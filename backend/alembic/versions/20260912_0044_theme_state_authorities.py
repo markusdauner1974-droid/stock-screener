@@ -50,7 +50,14 @@ def upgrade():
                 server_default=sa.func.now(),
             )
         )
-    op.drop_column("theme_development_work", "source_marker")
+    # Some deployed 0043 schemas predate the source_marker column. Its absence
+    # already satisfies this part of the migration; preserve the work rows.
+    work_columns = {
+        column["name"]
+        for column in sa.inspect(connection).get_columns("theme_development_work")
+    }
+    if "source_marker" in work_columns:
+        op.drop_column("theme_development_work", "source_marker")
 
 
 def downgrade():
