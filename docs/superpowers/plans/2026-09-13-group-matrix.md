@@ -342,3 +342,9 @@ Static layout-switch samples: **2,817.5ms, 561.1ms, 510.6ms**, with the same 131
 - Production browser: **6 passed**, covering live/static layouts, filter retention, keyboard drawer and focus restoration, 390px/1440px screenshots, light/dark themes, market switching and the 10,000-stock fixture. Static tests assert no live API requests. No uncaught page errors.
 - Both production build variants passed through the browser configuration. Frontend lint: zero errors, four existing warnings; the changed Matrix files also pass targeted lint. Backend new-file Ruff checks and final whitespace checks passed.
 - Functional acceptance is verified; the stress-latency target is explicitly not met. No deployment, push or merge was performed.
+
+### Docker build correction
+
+Reproduced the reported `vite/modulepreload-polyfill` source-phase error with the frontend Docker build. Compose uses `frontend/` as its build context, so the root ignore file did not exclude host dependencies. `COPY . .` overwrote Linux-installed JavaScript packages with local versions (local Rollup 4.63.2 versus locked 4.54.0; local Vite 6.4.3 versus locked 6.4.1), leaving an inconsistent installation.
+
+Added `frontend/.dockerignore` to exclude host dependencies, generated build/test output and local environment files. The full image build then passed using locked Vite 6.4.1: `docker build --build-arg VITE_API_URL=/api -t stock-matrix-frontend-build-check ./frontend`. No dependency or application-code changes were needed. The running stack was not restarted.
