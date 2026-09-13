@@ -1,15 +1,13 @@
-import { memo, useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { Alert, Box, Button, Chip, CircularProgress, MenuItem, Paper, Stack, TextField, ToggleButton, ToggleButtonGroup, Typography } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
 import { buildMatrixModel, groupLabel, sectorLabel } from './groupMatrixModel';
 import { matrixColor } from './groupMatrixColors';
-import GroupMatrixGrid from './GroupMatrixGrid';
-import GroupMatrixClusters from './GroupMatrixClusters';
+import GroupMatrixLayouts from './GroupMatrixLayouts';
 import GroupMatrixDetails from './GroupMatrixDetails';
+import GroupMatrixTileInspector from './GroupMatrixTileInspector';
 
 const EMPTY_STOCKS = [];
-const Grid = memo(GroupMatrixGrid);
-const Clusters = memo(GroupMatrixClusters);
 const UNAVAILABLE = {
   missing_ibd_mappings: 'IBD classifications are not available for this market yet.',
   no_published_run: 'No published daily stock snapshot is available yet.',
@@ -92,15 +90,7 @@ export default function GroupMatrixPanel({ data, isLoading, error, onRetry, pref
     </Stack>
     {coverageOpen && <Alert severity="info" sx={{ my: 1 }}>Universe: {coverage.universe_count}; missing features: {coverage.missing_feature_count || 0}; unknown sector: {coverage.unknown_sector_count || 0}; unknown cap: {coverage.unknown_cap_count || 0}; missing daily change: {coverage.missing_daily_change_count || 0}; missing RS: {coverage.missing_rs_count || 0}. Counts can overlap. Automated IBD mappings are estimates; inspect stock details for source.</Alert>}
     <MatrixLegend metric={preferences.metric} />
-    {model.stockCount ? <Box sx={{ position: 'relative' }}>
-      {[['grid', Grid], ['clusters', Clusters]].map(([layout, View]) => {
-        const active = preferences.layout === layout;
-        return <Box key={layout} aria-hidden={!active} inert={active ? undefined : ''} sx={{
-          position: active ? 'relative' : 'absolute', top: 0, left: 0, width: '100%',
-          visibility: active ? 'visible' : 'hidden', pointerEvents: active ? 'auto' : 'none',
-        }}><View model={model} tiers={visibleTiers} metric={preferences.metric} onSelectStock={selectStock} onSelectStocks={open} /></Box>;
-      })}
-    </Box>
+    {model.stockCount ? <GroupMatrixTileInspector stocks={model.stocks} data={data}><GroupMatrixLayouts layout={preferences.layout} model={model} tiers={visibleTiers} metric={preferences.metric} onSelectStock={selectStock} onSelectStocks={open} /></GroupMatrixTileInspector>
       : <Alert severity="info">No stocks match these filters. Reset filters to see the full matrix.</Alert>}
     <GroupMatrixDetails selection={selection} onClose={close} onSelectStock={stock=>setSelection({stock})} onSelectStocks={setSelection} matchingStocks={model.stocks} data={data} />
   </Paper>;

@@ -173,3 +173,29 @@ def test_all_groups_loaded_in_constant_queries(db):
         event.remove(db.bind, "before_cursor_execute", record)
     assert len(result["stocks"]) == 80
     assert len(statements) <= 4
+
+
+def test_metadata_timestamp_tracks_the_read_not_export_start(db, monkeypatch):
+    from datetime import datetime, timezone
+    from unittest.mock import Mock
+
+    import app.services.group_matrix_service as service_module
+
+    add_run(db, 1, "US", ["A"])
+    db.add(IBDIndustryGroup(symbol="A", market="US", industry_group="Software"))
+    db.commit()
+    service = GroupMatrixService()
+    clock = Mock()
+    clock.now.return_value = datetime(2026, 9, 13, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(service_module, "datetime", clock, raising=False)
+    load_rows = service.repository.load_rows
+
+    def read(*args, **kwargs):
+        rows = load_rows(*args, **kwargs)
+        clock.now.return_value = datetime(2026, 9, 13, 2, tzinfo=timezone.utc)
+        return rows
+
+    monkeypatch.setattr(service.repository, "load_rows", read)
+    result = service.build(db, market="US", generated_at="2026-09-13T00:00:00Z")
+    assert result["generated_at"] == "2026-09-13T00:00:00Z"
+    assert result["metadata_read_at"] == "2026-09-13T02:00:00+00:00"

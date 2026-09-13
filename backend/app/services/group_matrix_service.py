@@ -1,5 +1,7 @@
 """Read-only publication selection and Group Matrix assembly."""
 
+from datetime import datetime, timezone
+
 from app.domain.feature_store.run_metadata import feature_run_market
 from app.infra.db.models.feature_store import FeatureRun
 from app.schemas.group_matrix import GroupMatrixResponse
@@ -21,9 +23,7 @@ class GroupMatrixService:
             if feature_run_id is None
             else db.get(FeatureRun, feature_run_id)
         )
-        metadata = {
-            "market": market, "generated_at": generated_at, "metadata_read_at": generated_at
-        }
+        metadata = {"market": market, "generated_at": generated_at}
         if run is None:
             return GroupMatrixResponse(
                 **metadata, available=False, reason="no_published_run", tiers=TIERS
@@ -35,6 +35,7 @@ class GroupMatrixService:
                 )
             identity = resolve_feature_run_rs_identity(run, ranking_date=run.as_of_date)
             rows = self.repository.load_rows(db, run_id=run.id, market=market)
+            metadata["metadata_read_at"] = datetime.now(timezone.utc).isoformat()
             if any(row["feature_as_of_date"] != run.as_of_date for row in rows):
                 raise FeatureRunRsIdentityError(
                     "Feature dates do not match publication"

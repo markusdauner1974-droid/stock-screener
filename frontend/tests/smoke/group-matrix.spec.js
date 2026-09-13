@@ -17,7 +17,14 @@ test('both layouts, filters, stock drawer, keyboard and responsive themes', asyn
   await expect(page.getByRole('heading',{name:'US Stock Matrix'})).toBeVisible();
   await expect(page.locator('[data-matrix-stock]:visible').first()).toBeVisible();
   const tile = page.locator('[data-matrix-stock]:visible').first();
-  await tile.focus(); await page.keyboard.press('Enter');
+  await tile.hover();
+  await expect(page.getByRole('tooltip')).toContainText('Classification source');
+  await tile.focus();
+  await expect(page.getByRole('tooltip')).toContainText('Stock RS');
+  await page.screenshot({path:testInfo.outputPath('stock-inspector-desktop.png')});
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('tooltip')).toBeHidden();
+  await page.keyboard.press('Enter');
   await expect(page.getByRole('dialog')).toBeVisible();
   await expect(page.getByRole('dialog').getByText('Stock RS',{exact:true})).toBeVisible();
   await page.keyboard.press('Escape');
@@ -89,4 +96,24 @@ test('market switching resets stock filters and preserves layout preferences', a
   await expect(page.getByRole('button',{name:'Clusters',exact:true})).toHaveAttribute('aria-pressed','true');
   await expect(page.locator('[data-matrix-stock]:visible').first()).toHaveText(/HK/);
   await expect(page.locator('[data-matrix-stock]:visible').filter({hasText:'US00001'})).toHaveCount(0);
+});
+
+
+test('crowded Grid previews fit their rows on desktop and mobile', async ({page}, testInfo) => {
+  await installMatrixFixtures(page, {mode:testInfo.project.name});
+  const payload = matrixFixture('US',120);
+  payload.stocks.forEach(stock => { stock.cap_tier = 'mid'; stock.market_cap_usd = 3e9; });
+  payload.coverage.unknown_cap_count = 0;
+  await page.route(url => url.pathname.endsWith('/groups/matrix') || url.pathname.endsWith('/groups_matrix.json'), route => route.fulfill({json:payload}));
+  await page.setViewportSize({width:1440,height:1100});
+  await page.goto(testInfo.project.name === 'static' ? '/#/groups' : '/groups');
+  await page.getByRole('tab', {name:'Matrix'}).click();
+  for (const width of [1440,390]) {
+    await page.setViewportSize({width,height:1100});
+    const more = page.getByRole('button', {name:/\+38 more in/}).first();
+    await more.scrollIntoViewIfNeeded();
+    await expect(more).toBeVisible();
+    const bounds = await more.evaluate(button => ({bottom:button.getBoundingClientRect().bottom, rowBottom:button.parentElement.parentElement.parentElement.getBoundingClientRect().bottom}));
+    expect(bounds.bottom).toBeLessThanOrEqual(bounds.rowBottom);
+  }
 });

@@ -312,7 +312,7 @@ Implementation details that refine the plan:
 - `playwright.matrix.config.js` builds and serves both production variants on isolated ports, using installed Chrome. The static fixture uses the application's hash route.
 - Production testing exposed a circular React/query vendor split. React adapters now share the React vendor chunk in `vite.config.js`; this removes the startup failure.
 - The live navigation toolbar now scrolls horizontally within its own bounds on narrow screens, avoiding page-wide overflow.
-- A 10,000-stock benchmark exposed excessive per-tile MUI Tooltip/Button overhead. Stock tiles now use native buttons and shared CSS, with native hover titles and accessible detail drawers; cap formatting reuses one formatter. Memoized Grid and Clusters views retain their bounded rendered windows; inactive views use visibility and inert so switching avoids reconstruction while remaining inaccessible to focus and assistive technology.
+- A 10,000-stock benchmark exposed excessive per-tile MUI Tooltip/Button overhead. The initial implementation switched to native buttons and shared CSS with retained layout windows. The review follow-up below supersedes the native-title and retained-layout choices; cap formatting continues to reuse one formatter.
 - Local native build packages needed repair for the installed Node architectures. Neither package manifest nor lockfile changed.
 
 Validation commands:
@@ -348,3 +348,23 @@ Static layout-switch samples: **2,817.5ms, 561.1ms, 510.6ms**, with the same 131
 Reproduced the reported `vite/modulepreload-polyfill` source-phase error with the frontend Docker build. Compose uses `frontend/` as its build context, so the root ignore file did not exclude host dependencies. `COPY . .` overwrote Linux-installed JavaScript packages with local versions (local Rollup 4.63.2 versus locked 4.54.0; local Vite 6.4.3 versus locked 6.4.1), leaving an inconsistent installation.
 
 Added `frontend/.dockerignore` to exclude host dependencies, generated build/test output and local environment files. The full image build then passed using locked Vite 6.4.1: `docker build --build-arg VITE_API_URL=/api -t stock-matrix-frontend-build-check ./frontend`. No dependency or application-code changes were needed. The running stack was not restarted.
+
+## Review follow-up — 2026-09-14
+
+Verified the PR findings against implementation and regression tests:
+
+- Metadata provenance: `metadata_read_at` is now captured immediately after the metadata query, independently of the export-wide `generated_at`. A clock-controlled test exercises a metadata read later than export startup.
+- Invalid manifests: non-mapping `assets` values raise the artifact validator's expected `ValueError`, which the combiner converts to `StaticArtifactFormulaError`. Tests include truthy and falsey invalid values.
+- Refresh: completed calculations invalidate the market-specific Matrix query immediately.
+- Rendering: each layout mounts on first selection. Visited inactive layouts keep their last props and do not render when filters change; their props update when selected again. This avoids rebuilding visited layouts on every switch while eliminating inactive filter work. A regression test verifies the hidden markup stays unchanged during filtering and catches up on activation.
+- Inspection: one delegated Popper exposes the same complete metadata rows as the stock drawer on hover and keyboard focus; Escape dismisses it. Native stock buttons remain lightweight.
+
+Validation: 183 backend regression tests and 44 frontend tests pass. The five panel tests also pass after adding a regression for pointer exit to a non-node target.
+
+The proposed active-only mounting approach was tested and rejected as the final rendering solution: live switch samples were 3,542.0ms, 1,361.5ms and 2,036.8ms; static samples were 3,261.9ms, 1,255.5ms and 631.1ms. Retaining visited layouts with frozen inactive props addresses the review's alternative of preventing hidden-tree render work without paying remount cost on every switch. The first visit still creates that layout.
+
+Final cached-layout click-to-next-frame samples: live **4,415.7ms, 260.8ms, 1,011.6ms**; static **5,446.5ms, 475.7ms, 314.0ms**. Chrome 152.0.7977.83, 10,000-stock fixture, 131,000 compressed bytes, fewer than 2,000 rendered stock buttons. These are three observations per mode, not p95 measurements. Repeat visits improved relative to active-only mounting in this run, while first visits became slower. The **200ms target remains unmet**; filter latency is not independently benchmarked.
+
+The [reported row overflow](https://github.com/xang1234/stock-screener/pull/365#discussion_r3999697583) did not reproduce: a fixture with 50 stocks in one cap bucket keeps the 12 preview tiles and overflow button inside the row at 1440px and 390px, in both live and static builds. The existing 190px/238px row sizes remain unchanged, with a browser geometry regression added. No speculative variable-height implementation was added.
+
+Final production browser verification: **8 passed**, covering both build variants, inspector hover/focus and Escape, stock drawers, filters, market switching, responsive rows and the large universe. The inspector screenshot was visually checked. Both production builds, targeted frontend lint, backend Ruff and whitespace checks passed. The final non-node pointer-exit guard was verified by the panel test after the browser builds.

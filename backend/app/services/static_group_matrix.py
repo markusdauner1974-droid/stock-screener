@@ -1,6 +1,7 @@
 """Optional Matrix asset publication and artifact-boundary validation."""
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 from sqlalchemy import inspect
@@ -40,7 +41,13 @@ def export_group_matrix(db, *, output_dir, market, feature_run_id, generated_at)
 
 
 def validate_group_matrix_asset(*, market, market_dir, entry):
-    asset = (entry.get("assets") or {}).get("groups_matrix")
+    assets = entry.get("assets")
+    if assets is None:
+        return
+    if not isinstance(assets, Mapping):
+        # Malformed artifact content follows the combiner's ValueError contract.
+        raise ValueError("Matrix manifest assets must be a mapping")  # noqa: TRY004
+    asset = assets.get("groups_matrix")
     if asset is None:
         return
     expected_path = f"markets/{market.lower()}/groups_matrix.json"

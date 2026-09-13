@@ -117,3 +117,17 @@ def test_combiner_rejects_inconsistent_advertised_matrix(db, tmp_path, change):
         StaticArtifactCombiner._validate_advertised_assets(
             market="US", source_label="test", market_dir=path.parent, entry=entry
         )
+
+
+@pytest.mark.parametrize("assets", ["invalid", ["groups_matrix"], [], False, 0, ""])
+def test_combiner_reports_non_mapping_assets_as_invalid_artifacts(tmp_path, assets):
+    from app.services.static_artifact_combiner import (
+        StaticArtifactCombiner,
+        StaticArtifactFormulaError,
+    )
+
+    with pytest.raises(StaticArtifactFormulaError, match="assets"):
+        StaticArtifactCombiner._validate_advertised_assets(
+            market="US", source_label="test", market_dir=tmp_path,
+            entry={"assets": assets},
+        )

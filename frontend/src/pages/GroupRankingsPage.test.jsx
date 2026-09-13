@@ -569,6 +569,7 @@ describe('GroupRankingsPage', () => {
     const { queryClient } = renderGroupRankingsPage();
     expect(await screen.findByText('US | 1 groups | 2026-04-09')).toBeInTheDocument();
 
+    queryClient.setQueryData(['groupMatrix', 'US'], { available: false });
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Refresh' }));
 
@@ -579,6 +580,7 @@ describe('GroupRankingsPage', () => {
       ).toBe('2026-04-10');
     });
     expect(await screen.findByText('US | 1 groups | 2026-04-10')).toBeInTheDocument();
+    expect(queryClient.getQueryState(['groupMatrix', 'US']).isInvalidated).toBe(true);
     expect(getCurrentRankings).toHaveBeenCalledWith(197, 'US', '2026-04-10');
   });
 

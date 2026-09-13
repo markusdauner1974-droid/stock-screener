@@ -236,6 +236,6 @@ User-confirmed: both layouts and individual stock tiles. The subsequent request 
 
 The feature is implemented. The 10,000-stock live production fixture compressed to 131,000 bytes and kept both retained layout windows together below 2,000 stock buttons. Three layout-switch click-to-next-frame samples were 1,595.9ms, 210.8ms and 1,113.1ms on this macOS arm64 host using Chrome 152.0.7977.83. These measurements improve on the initial per-tile MUI implementation but do **not** meet the proposed 200ms target. Filter latency was not separately benchmarked. Treat acceptance criterion 9's performance portion as an open optimization item; functional stock reachability and rendering bounds are verified.
 
-Native button tiles and memoized retained layouts avoid rebuilding stock components on each switch. Inactive layouts remain bounded, inert, and hidden from assistive technology. Browser style/layout work still needs profiling before claiming the original latency target.
+These measurements describe the pre-review implementation. The review follow-up mounts layouts on first selection, freezes inactive layout props during filtering, and provides a shared hover/focus inspector. See the implementation plan for updated measurements; the original latency target is not assumed to be met.
 
 Static mode measured 2,817.5ms, 561.1ms and 510.6ms with the same fixture; it also misses the original latency target.

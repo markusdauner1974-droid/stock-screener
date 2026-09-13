@@ -634,6 +634,7 @@ function GroupRankingsPage() {
       queryClient.invalidateQueries({ queryKey: ['groupRankings', selectedMarket] }),
       queryClient.invalidateQueries({ queryKey: ['groupMovers'] }),
       queryClient.invalidateQueries({ queryKey: ['groupRRGBundle', selectedMarket] }),
+      queryClient.invalidateQueries({ queryKey: ['groupMatrix', selectedMarket] }),
     ]);
     const refreshedBootstrap = queryClient.getQueryData(['groupsBootstrap', selectedMarket]);
     if (!refreshedBootstrap || refreshedBootstrap.is_stale) {
