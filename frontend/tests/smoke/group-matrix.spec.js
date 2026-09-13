@@ -117,3 +117,50 @@ test('crowded Grid previews fit their rows on desktop and mobile', async ({page}
     expect(bounds.bottom).toBeLessThanOrEqual(bounds.rowBottom);
   }
 });
+
+test('Clusters form round bubble packs with stock inspection and complete overflow lists', async ({page}, testInfo) => {
+  await installMatrixFixtures(page, {mode:testInfo.project.name});
+  const payload = matrixFixture('US',600);
+  payload.stocks.forEach((stock, i) => {
+    stock.sector = 'Technology'; stock.ibd_industry_group = 'Computer-Software';
+    const fraction = (i % 17) / 16;
+    stock.market_cap_usd = [1e10 + 3e12 * fraction ** 3, 2e9 + 7e9 * fraction, 3e8 + 1.6e9 * fraction,
+      5e7 + 2.4e8 * fraction, 1e6 + 4.8e7 * fraction, null][i % 6];
+  });
+  await page.route(url => url.pathname.endsWith('/groups/matrix') || url.pathname.endsWith('/groups_matrix.json'), route => route.fulfill({json:payload}));
+  await page.setViewportSize({width:1440,height:1100});
+  await page.goto(testInfo.project.name === 'static' ? '/#/groups' : '/groups');
+  await page.getByRole('tab', {name:'Matrix'}).click();
+  await page.getByRole('button', {name:'Clusters',exact:true}).click();
+  const pack = page.locator('.group-matrix-bubble-pack').first();
+  await expect(pack.locator('button')).toHaveCount(64);
+  const circles = await pack.locator('button').evaluateAll(buttons => buttons.map(button => {
+    const rect = button.getBoundingClientRect();
+    return {x:rect.x + rect.width / 2, y:rect.y + rect.height / 2, width:rect.width, height:rect.height, radius:getComputedStyle(button).borderRadius};
+  }));
+  for (const [index, circle] of circles.entries()) {
+    expect(circle.radius).toBe('50%');
+    expect(Math.abs(circle.width - circle.height)).toBeLessThan(0.1);
+    for (const other of circles.slice(index + 1)) {
+      expect(Math.hypot(circle.x - other.x, circle.y - other.y) + 0.1).toBeGreaterThanOrEqual((circle.width + other.width) / 2);
+    }
+  }
+  expect(Math.max(...circles.map(circle=>circle.width))).toBeGreaterThan(Math.min(...circles.map(circle=>circle.width)) * 2);
+  const bubble = pack.locator('button').first();
+  await bubble.hover();
+  await expect(page.getByRole('tooltip')).toContainText('Classification source');
+  await bubble.focus();
+  await page.keyboard.press('Escape');
+  await page.keyboard.press('Enter');
+  await expect(page.getByRole('dialog')).toContainText('Stock RS');
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', {name:/\+36 more in/}).first().click();
+  await expect(page.getByRole('dialog')).toContainText('100 stocks');
+  await page.keyboard.press('Escape');
+  await page.mouse.move(0,0);
+  await page.screenshot({path:testInfo.outputPath('bubble-clusters-desktop.png'),fullPage:true});
+  await page.setViewportSize({width:390,height:844});
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await expect(bubble).toBeVisible();
+  await page.screenshot({path:testInfo.outputPath('bubble-clusters-mobile.png'),fullPage:true});
+});

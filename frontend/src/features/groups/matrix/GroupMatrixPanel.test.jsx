@@ -19,6 +19,21 @@ describe('Matrix panel', () => {
     vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(1200);
   });
   afterEach(() => vi.restoreAllMocks());
+  it('packs Clusters as market-cap-sized circular stock controls', () => {
+    const clusterData = { ...data, stocks: [
+      { ...stocks[1], market_cap_usd: 4e9 },
+      { ...stocks[2], market_cap_usd: 1e9 },
+    ] };
+    render(<GroupMatrixPanel data={clusterData} preferences={{...DEFAULT_MATRIX_PREFERENCES, layout:'clusters'}} />);
+    const large = screen.getByRole('button', {name:/STK01.*0.00%/});
+    const small = screen.getByRole('button', {name:/STK02.*0.00%/});
+    expect(large.style.width).toBe(large.style.height);
+    expect(parseFloat(large.style.width) / parseFloat(small.style.width)).toBeCloseTo(2, 1);
+    fireEvent.focus(small);
+    expect(screen.getByRole('tooltip')).toHaveTextContent('Company 2');
+    fireEvent.click(small);
+    expect(screen.getByRole('dialog')).toHaveTextContent('Company 2');
+  });
   it('creates layouts on demand and freezes the inactive tree during filtering', () => {
     const { container } = render(<Harness />);
     expect(container.querySelector('[aria-label="Stock matrix clusters"]')).toBeNull();

@@ -15,7 +15,7 @@ This is a native visualization using application data. Finviz supplies visual in
 ## Reference inspection
 
 - [Finviz Matrix / Grid](https://finviz.com/map?t=sec_all&view=matrix&ref=finviz.com): visually inspected in the browser. Sector bands contain industry rows, five market-cap columns contain compact stock tiles, and crowded cells expose a remaining-stock count. Controls include sector, industry, cap tiers, ticker search, and color metric. The legend shows daily performance from negative to positive.
-- [Finviz Matrix / Clusters](https://finviz.com/map?t=sec_all&view=matrix&ref=finviz.com&render=clusters): the browser confirmed Clusters selected, the same filters, and five cap headings without the Grid industry heading. Screenshot capture failed, so exact cluster geometry and hover behavior were not verified. The deterministic cluster arrangement below is a proposed adaptation, not a claim of pixel-identical Finviz behavior.
+- [Finviz Matrix / Clusters](https://finviz.com/map?t=sec_all&view=matrix&ref=finviz.com&render=clusters): the initial browser inspection confirmed the controls but failed to capture the geometry. The user's September 14 screenshot establishes that Clusters uses tightly packed circular stock bubbles with varying sizes. The corrected layout follows this rounded arrangement while retaining the requested IBD subdivision.
 
 ## Existing implementation and implications
 
@@ -35,7 +35,7 @@ This is a native visualization using application data. Finviz supplies visual in
 
 ## Approaches considered
 
-1. **Recommended: one compact stock payload, shared React presentation.** Dedicated read endpoint plus equivalent static asset; CSS Grid for aligned rows and CSS flow for clusters. Uses installed MUI and TanStack Virtual. Keeps data rules consistent and interactions accessible.
+1. **Recommended: one compact stock payload, shared React presentation.** Dedicated read endpoint plus equivalent static asset; CSS Grid for aligned rows and D3 circle packing for clusters. Uses MUI and TanStack Virtual. Keeps data rules consistent and interactions accessible.
 2. Reconstruct from existing group details. Smaller initial API change, but requires many requests or large chart-bearing payloads, omits needed fields, and risks truncating the universe. Rejected.
 3. Canvas or a general charting engine. Useful for very large continuously zoomable maps, but adds hit testing, keyboard navigation, and layout complexity. Defer unless the measured performance targets cannot be met with bounded DOM rendering.
 
@@ -50,7 +50,7 @@ Included:
 - Existing market selector; one market at a time. No cross-market aggregate RS comparison.
 - Both live and static paths using the same response shape and components.
 
-Excluded from this release: intraday quotes, new data providers, classifier runs triggered by viewing, historical replay, custom cap boundaries, market-cap-sized tiles, force simulation, correlation clustering, logos, portfolio actions, and additional return horizons.
+Excluded from this release: intraday quotes, new data providers, classifier runs triggered by viewing, historical replay, custom cap boundaries, market-cap-sized Grid tiles, force simulation, correlation clustering, logos, portfolio actions, and additional return horizons.
 
 ## Layout and controls
 
@@ -79,7 +79,7 @@ Large/Mega             Mid                     Small              ...
 └──────────────────┘  └────────────────────┘   └───────────────────┘
 ```
 
-The examples are illustrative, not real stock data. Use existing theme surfaces, typography, borders, and dark/light modes. Sector headings use restrained accents, never performance coloring. Tile area is constant; color represents the selected metric. Cap is encoded only by column membership.
+The examples are illustrative, not real stock data. Use existing theme surfaces, typography, borders, and dark/light modes. Sector headings use restrained accents, never performance coloring. Grid tile area is constant; Clusters bubble area represents relative market cap within each cluster, with a visibility floor. Color represents the selected metric in both layouts.
 
 ### Grid
 
@@ -89,7 +89,9 @@ Each cell initially shows up to 12 stocks sorted by finite USD market cap descen
 
 ### Clusters
 
-Keep the same cap columns. Within each column, stack sector sections and then labeled IBD cluster cards alphabetically. Cards pack constant-size tiles using CSS Grid; height follows the number of visible tiles, so industries do not need to line up horizontally across tiers. Empty industry/tier combinations disappear. Show up to 24 stocks per cluster plus `+N more` opening the full list. Virtualize the vertical card stream separately per cap column, with a fixed-height shared viewport and independent column scrolling; keep headers visible. This deliberate UI difference gives clusters more compact packing while Grid supports direct row comparison.
+Keep the same cap columns. Within each column, stack sector sections and then labeled IBD cluster cards alphabetically. Each card contains a tightly packed, circular cloud of individual stock bubbles, using the deterministic [D3 pack layout](https://d3js.org/d3-hierarchy/pack). Bubble area is proportional to USD market cap within that card, with a 1% floor relative to its largest cap so very small stocks remain visible. Unknown caps use equal sizes; the size legend explains both rules. Sizes must not be compared between different cards.
+
+Show up to 64 stocks, selected by market cap descending then symbol, in a 256px square canvas plus `+N more` opening the complete constituent list. Ticker labels appear only when a bubble is large enough to read; every bubble retains its accessible stock description, shared hover/focus inspector and stock drawer. The group title also opens the full list for comfortable access to tiny bubbles. Empty industry/tier combinations disappear. Virtualize each column's card stream with fixed card heights, independent vertical scrolling and visible cap headers. Grid continues to support aligned industry-row comparison.
 
 No random positioning or inferred relationships. Switching layouts preserves metric, filters, and selection, but resets scroll position. Both layouts show identical matching stock sets and counts.
 
@@ -214,7 +216,7 @@ Performance acceptance targets, measured rather than assumed: at 10,000 fixture 
 
 Use MUI Tabs with linked tab panels. Use semantic buttons for stocks, overflow controls, and group headings. Provide a labeled region describing row/column semantics; do not claim an ARIA grid unless implementing its full keyboard navigation. Each stock accessible name includes symbol, metric, sector, group, and tier. Support keyboard focus, Enter/Space, Escape, and focus restoration.
 
-At narrow widths, controls wrap, filters can collapse behind a labeled button, and the map scrolls horizontally within its own region. Page body does not overflow. Minimum interactive target on touch is 44px; increase tile height there. Provide a `View matching stocks` list action on mobile and desktop as an accessible alternative. Distinguish missing values from zero and retain numeric labels so color is not the sole encoding.
+At narrow widths, controls wrap, filters can collapse behind a labeled button, and the map scrolls horizontally within its own region. Page body does not overflow. Grid stock targets increase to 44px on touch. Dense Clusters bubbles may be smaller; the group title and `View matching stocks` provide complete constituent lists as an accessible alternative. Distinguish missing values from zero. Grid keeps numeric labels; Clusters keeps them where they fit and exposes exact values through every bubble's accessible description, inspector and stock drawer.
 
 ## Acceptance criteria
 
