@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Container,
@@ -34,6 +34,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import {
   getGroupsBootstrap,
+  getGroupMatrix,
   getCurrentRankings,
   getRankMovers,
   getGroupDetail,
@@ -42,7 +43,8 @@ import {
   getCalculationStatus,
 } from '../api/groups';
 import RRGChart from '../components/Charts/RRGChart';
-import RRGViewToggle from '../components/Charts/RRGViewToggle';
+import GroupViewTabs from '../features/groups/GroupViewTabs';
+import { DEFAULT_MATRIX_PREFERENCES } from '../features/groups/matrix/groupMatrixModel';
 import { useRRGScopeSelection } from '../components/Charts/useRRGScopeSelection';
 import {
   LineChart,
@@ -63,6 +65,8 @@ import { rrgScopesForMarket } from '../utils/rrgScopes';
 import LiveGroupRankingsTable from '../features/groups/LiveGroupRankingsTable';
 import { getLiveGroupRankingSortValue } from '../features/groups/groupRankingFields';
 import { sortGroupRankings } from '../features/groups/groupRankingSort';
+
+const GroupMatrixPanel = lazy(() => import('../features/groups/matrix/GroupMatrixPanel'));
 
 const GROUP_RANKING_MARKET_FALLBACKS = ['US', 'HK', 'IN', 'JP', 'KR', 'TW', 'CN', 'CA'];
 const EMPTY_AS_OF_ARGS = [];
@@ -486,7 +490,15 @@ function GroupRankingsPage() {
     GROUP_RANKING_MARKET_FALLBACKS,
   );
   const [selectedGroup, setSelectedGroup] = useState(null);
-  const [view, setView] = useState('table'); // 'table' | 'rrg'
+  const [view, setView] = useState('table');
+  const [matrixPreferences, setMatrixPreferences] = useState(DEFAULT_MATRIX_PREFERENCES);
+  const matrixQuery = useQuery({
+    queryKey: ['groupMatrix', selectedMarket],
+    queryFn: () => getGroupMatrix(selectedMarket),
+    enabled: runtimeReady && view === 'matrix',
+    staleTime: 60_000,
+    refetchInterval: view === 'matrix' ? 60_000 : false,
+  });
   const [rrgScope, setRrgScope] = useState('groups'); // 'groups' | 'sectors'
   const [orderBy, setOrderBy] = useState('rank');
   const [order, setOrder] = useState('asc');
@@ -562,7 +574,7 @@ function GroupRankingsPage() {
   } = useQuery({
     queryKey: ['groupRankings', selectedMarket, groupsAsOfDate],
     queryFn: () => getCurrentRankings(197, selectedMarket, ...groupAsOfArgs),
-    enabled: liveQueriesEnabled && !isRrgView,
+    enabled: liveQueriesEnabled && view === 'table',
     refetchInterval: 60000,
     staleTime: 60_000,
   });
@@ -574,7 +586,7 @@ function GroupRankingsPage() {
   } = useQuery({
     queryKey: ['groupMovers', selectedPeriod, selectedMarket, groupsAsOfDate],
     queryFn: () => getRankMovers(selectedPeriod, 10, selectedMarket, ...groupAsOfArgs),
-    enabled: liveQueriesEnabled && !isRrgView,
+    enabled: liveQueriesEnabled && view === 'table',
     staleTime: 60_000,
   });
 
@@ -723,29 +735,6 @@ function GroupRankingsPage() {
     ) : null
   );
 
-  if (errorRankings && !isRrgView) {
-    return (
-      <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
-        {features.tasks && selectedMarket === 'US' && (
-          <Box sx={{ mb: 2, display: 'flex', justifyContent: 'flex-end' }}>
-            <Button
-              variant="contained"
-              startIcon={<RefreshIcon />}
-              onClick={handleCalculate}
-              disabled={isCalculating}
-            >
-              {isCalculating ? 'Calculating...' : 'Calculate Rankings'}
-            </Button>
-          </Box>
-        )}
-        <Alert severity="error">
-          Error loading rankings: {errorRankings.message}
-        </Alert>
-        {renderCalculationErrorAlert({ mt: 1 })}
-      </Container>
-    );
-  }
-
   return (
     <Container maxWidth="xl" sx={{ mt: 2, mb: 2 }}>
       {features.tasks && selectedMarket === 'US' && (
@@ -765,7 +754,7 @@ function GroupRankingsPage() {
       {renderCalculationErrorAlert({ mb: 1.5 })}
 
       {/* View toggle: ranked table vs Relative Rotation Graph */}
-      <RRGViewToggle
+      <GroupViewTabs
         view={view}
         onView={setView}
         scope={rrgScope}
@@ -775,13 +764,22 @@ function GroupRankingsPage() {
         sx={{ mb: 1.5 }}
       />
 
-      {view === 'rrg' ? (
+      <Box role="tabpanel" id={`group-panel-${view}`} aria-labelledby={`group-tab-${view}`}>
+      {view === 'matrix' ? (
+        <Suspense fallback={<CircularProgress />}>
+          <GroupMatrixPanel key={selectedMarket} data={matrixQuery.data} isLoading={matrixQuery.isLoading}
+            error={matrixQuery.error} onRetry={() => matrixQuery.refetch()}
+            preferences={matrixPreferences} onPreferencesChange={setMatrixPreferences} />
+        </Suspense>
+      ) : view === 'rrg' ? (
         <RRGChart
           data={rrgData}
           isLoading={isLoadingRRG}
           error={errorRRG}
           onSelectGroup={(name) => rrgScope === 'groups' && setSelectedGroup(name)}
         />
+      ) : errorRankings ? (
+        <Alert severity="error">Error loading rankings: {errorRankings.message}</Alert>
       ) : isLoadingRankings ? (
         <Box display="flex" justifyContent="center" alignItems="center" minHeight="400px">
           <CircularProgress />
@@ -889,6 +887,8 @@ function GroupRankingsPage() {
           )}
         </>
       )}
+
+      </Box>
 
       {/* Group Detail Modal */}
       <GroupDetailModal

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from app.services.atomic_directory_publisher import AtomicDirectoryPublisher
+from app.services.static_group_matrix import validate_group_matrix_asset
 from app.services.breadth.types import CURRENT_BREADTH_CALCULATION_REVISION
 from app.services.static_breadth_contributor_asset_validator import (
     StaticBreadthContributorAssetError,
@@ -381,6 +382,10 @@ class StaticArtifactCombiner:
                     f"{market} {source_label} artifact advertises "
                     f"{feature.upper()} but {filename} is absent"
                 )
+        try:
+            validate_group_matrix_asset(market=market, market_dir=market_dir, entry=entry)
+        except (ValueError, OSError) as exc:
+            raise StaticArtifactFormulaError(f"{market} invalid Matrix asset: {exc}") from exc
         assets = entry.get("assets")
         contributor_asset = (
             assets.get("breadth_contributors") if isinstance(assets, dict) else None

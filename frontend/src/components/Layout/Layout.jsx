@@ -190,7 +190,7 @@ function Layout({ children }) {
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', minHeight: '100vh' }}>
       <AppBar position="static" sx={{ minHeight: 48 }}>
-        <Toolbar variant="dense" sx={{ minHeight: 48 }}>
+        <Toolbar variant="dense" sx={{ minHeight: 48, overflowX: 'auto', '& > *': { flexShrink: 0 } }}>
           <ShowChartIcon sx={{ mr: 1, fontSize: 20 }} />
           <Typography variant="subtitle1" component="div" sx={{ fontWeight: 600 }}>
             STOCK SCANNER

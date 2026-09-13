@@ -127,3 +127,11 @@ def test_cache_writes_use_ttl():
         )
     _, ttl, _ = client.setex.call_args[0]
     assert ttl == TTL_SECONDS
+
+
+def test_matrix_can_use_short_metadata_ttl():
+    client, _ = _fake_redis()
+    with patch(f'{MODULE}.get_redis_client', return_value=client):
+        cached_group_payload(market='US', name='matrix', params='run=1',
+            compute=lambda: {'available': True}, ttl_seconds=60)
+    assert client.setex.call_args.args[1] == 60

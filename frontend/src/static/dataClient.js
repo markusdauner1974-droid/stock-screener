@@ -84,3 +84,13 @@ export const resolveStaticMarketEntry = (manifest, selectedMarket) => {
     freshness: manifest?.freshness || {},
   };
 };
+
+export const useStaticGroupMatrix = (marketEntry, enabled) => {
+  const path = marketEntry?.assets?.groups_matrix?.path;
+  return useQuery({
+    queryKey: ['staticGroupMatrix', marketEntry?.market, path],
+    queryFn: () => fetchStaticJson(path),
+    enabled: enabled && Boolean(path),
+    staleTime: Infinity,
+  });
+};
