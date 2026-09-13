@@ -6,10 +6,13 @@ from pathlib import Path
 from sqlalchemy import inspect
 
 from app.schemas.group_matrix import GroupMatrixResponse
-from app.services.group_matrix_service import GroupMatrixService
 
 
 def export_group_matrix(db, *, output_dir, market, feature_run_id, generated_at):
+    # Artifact validation also runs in standalone jobs without a database.
+    # Import runtime database services only when exporting from a live session.
+    from app.services.group_matrix_service import GroupMatrixService
+
     # Older/minimal artifact databases may not include feature membership or IBD.
     required = {
         "feature_runs",

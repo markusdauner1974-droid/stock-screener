@@ -42,6 +42,28 @@ def _fallback_downloader_env(fake_bin: Path) -> dict[str, str]:
     return env
 
 
+def test_static_fallback_downloader_import_does_not_initialize_database(tmp_path):
+    env = _fallback_downloader_env(tmp_path)
+    # Deliberately unsupported by app.database: artifact jobs must not load it.
+    env["DATABASE_URL"] = "sqlite://"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys; import app.scripts.download_static_market_fallbacks; "
+                "assert 'app.database' not in sys.modules"
+            ),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=ROOT / "backend",
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def _build_market_job() -> str:
     content = (ROOT / ".github" / "workflows" / "static-site.yml").read_text()
     return content.split("  build-market:\n", 1)[1].split(
