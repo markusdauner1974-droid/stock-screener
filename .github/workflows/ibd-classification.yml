@@ -50,8 +50,11 @@ on:
       timezone: 'America/New_York'
 
 concurrency:
-  group: ibd-classification
-  cancel-in-progress: true
+  # Failed upstream workflow_run events still instantiate this workflow before
+  # job-level if guards skip it. Keep those no-op runs out of the active lane so
+  # they cannot cancel a scheduled fallback already classifying markets.
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'success' && format('noop-{0}', github.run_id) || 'active' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
 
 permissions:
   contents: write
