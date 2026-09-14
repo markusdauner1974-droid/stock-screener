@@ -1,0 +1,120 @@
+import { fireEvent, render, screen, within } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useState } from 'react';
+import GroupMatrixPanel from './GroupMatrixPanel';
+import { DEFAULT_MATRIX_PREFERENCES } from './groupMatrixModel';
+
+const stocks = Array.from({length: 30}, (_, i) => ({ symbol: `STK${String(i).padStart(2,'0')}`,
+  company_name: `Company ${i}`, sector: 'Technology', ibd_industry_group: 'Software',
+  cap_tier: 'mid', market_cap_usd: 3e9, price_change_1d: i === 0 ? null : 0,
+  price_change_1w: i === 0 ? null : 4.5, price_change_1m: i === 0 ? null : -8.25, rs_rating: 85 }));
+const data = { available: true, market: 'US', as_of_date: '2026-09-11', metadata_read_at: '2026-09-13',
+  tiers: [{ id: 'mid', label: 'Mid' }], stocks, coverage: { stock_count:30, universe_count:30, ibd_mapped_count:30 } };
+function Harness() {
+  const [preferences, onPreferencesChange] = useState(DEFAULT_MATRIX_PREFERENCES);
+  return <GroupMatrixPanel data={data} preferences={preferences} onPreferencesChange={onPreferencesChange} />;
+}
+describe('Matrix panel', () => {
+  beforeEach(() => {
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(640);
+    vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(1200);
+  });
+  afterEach(() => vi.restoreAllMocks());
+  it('offers weekly and monthly changes in both layouts and stock inspection', () => {
+    render(<Harness />);
+    fireEvent.mouseDown(screen.getByRole('combobox', {name:/^Color/}));
+    fireEvent.click(screen.getByRole('option', {name:'1-Week Change'}));
+    expect(screen.getByRole('button', {name:/^STK01 \+4.50%/})).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', {name:'Clusters'}));
+    expect(screen.getByRole('button', {name:/^STK01 \+4.50%/})).toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByRole('combobox', {name:/^Color/}));
+    fireEvent.click(screen.getByRole('option', {name:'1-Month Change'}));
+    const tile = screen.getByRole('button', {name:/^STK01 -8.25%/});
+    fireEvent.focus(tile);
+    expect(screen.getByRole('tooltip')).toHaveTextContent('1-Week Change');
+    expect(screen.getByRole('tooltip')).toHaveTextContent('1-Month Change');
+    expect(screen.getByRole('button', {name:/^STK00 —/})).toBeInTheDocument();
+  });
+  it('repositions bubbles when the selected color metric changes', () => {
+    const clusterData = { ...data, stocks: stocks.map((stock, i) => ({...stock,
+      price_change_1d:[-3,0,3][i % 3], rs_rating:[90,50,10][i % 3],
+    })) };
+    const preferences = {...DEFAULT_MATRIX_PREFERENCES, layout:'clusters'};
+    const {rerender} = render(<GroupMatrixPanel data={clusterData} preferences={preferences} />);
+    const bubble = screen.getByRole('button', {name:/^STK00 /});
+    const before = [bubble.style.left, bubble.style.top];
+    rerender(<GroupMatrixPanel data={clusterData} preferences={{...preferences, metric:'rs_rating'}} />);
+    expect([bubble.style.left, bubble.style.top]).not.toEqual(before);
+  });
+  it('packs Clusters as market-cap-sized circular stock controls', () => {
+    const clusterData = { ...data, stocks: [
+      { ...stocks[1], market_cap_usd: 4e9 },
+      { ...stocks[2], market_cap_usd: 1e9 },
+    ] };
+    render(<GroupMatrixPanel data={clusterData} preferences={{...DEFAULT_MATRIX_PREFERENCES, layout:'clusters'}} />);
+    const large = screen.getByRole('button', {name:/STK01.*0.00%/});
+    const small = screen.getByRole('button', {name:/STK02.*0.00%/});
+    expect(large.style.width).toBe(large.style.height);
+    expect(parseFloat(large.style.width) / parseFloat(small.style.width)).toBeCloseTo(2, 1);
+    fireEvent.focus(small);
+    expect(screen.getByRole('tooltip')).toHaveTextContent('Company 2');
+    fireEvent.click(small);
+    expect(screen.getByRole('dialog')).toHaveTextContent('Company 2');
+  });
+  it('creates layouts on demand and freezes the inactive tree during filtering', () => {
+    const { container } = render(<Harness />);
+    expect(container.querySelector('[aria-label="Stock matrix clusters"]')).toBeNull();
+    fireEvent.click(screen.getByRole('button', {name:'Clusters'}));
+    const inactive = container.querySelector('[data-matrix-layout="grid"]');
+    expect(inactive).toHaveAttribute('inert');
+    const previousMarkup = inactive.innerHTML;
+    fireEvent.change(screen.getByRole('textbox', {name:/Search/}), {target:{value:'STK01'}});
+    expect(inactive.innerHTML).toBe(previousMarkup);
+    expect(screen.getByRole('button', {name:/STK01.*0.00%/})).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', {name:'Grid'}));
+    expect(screen.queryByRole('button', {name:/STK02.*0.00%/})).not.toBeInTheDocument();
+    expect(screen.getByRole('button', {name:/STK01.*0.00%/})).toBeInTheDocument();
+  });
+  it('exposes complete metadata on hover and focus without opening a drawer', async () => {
+    render(<Harness />);
+    const tile = screen.getByRole('button', {name:/STK01.*0.00%/});
+    fireEvent.mouseOver(tile);
+    let tooltip = await screen.findByRole('tooltip');
+    expect(within(tooltip).getByText('Stock RS')).toBeInTheDocument();
+    expect(within(tooltip).getByText('1-Day Change')).toBeInTheDocument();
+    expect(within(tooltip).getByText('Classification source')).toBeInTheDocument();
+    expect(within(tooltip).getByText('Fundamentals updated')).toBeInTheDocument();
+    expect(within(tooltip).getByText('US')).toBeInTheDocument();
+    const mouseOut = new MouseEvent('mouseout', { bubbles: true });
+    Object.defineProperty(mouseOut, 'relatedTarget', { value: window });
+    fireEvent(tile, mouseOut);
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+    fireEvent.focus(tile);
+    tooltip = await screen.findByRole('tooltip');
+    expect(tile).toHaveAttribute('aria-describedby', tooltip.id);
+    fireEvent.keyDown(tile, {key:'Escape'});
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
+  it('retains search and metric when changing layouts', () => {
+    render(<Harness />);
+    fireEvent.change(screen.getByRole('textbox', {name: /Search/}), {target: {value:'STK01'}});
+    fireEvent.click(screen.getByRole('button', {name:'Clusters'}));
+    expect(screen.getByRole('textbox', {name:/Search/})).toHaveValue('STK01');
+    expect(screen.getByRole('button', {name:/STK01.*0.00%/})).toBeInTheDocument();
+    expect(screen.queryByRole('button', {name:/STK02.*0.00%/})).not.toBeInTheDocument();
+  });
+  it('opens every overflow constituent and stock metadata', async () => {
+    render(<Harness />);
+    fireEvent.click(screen.getByRole('button', {name:/\+18 more/}));
+    const drawer = await screen.findByRole('dialog');
+    expect(within(drawer).getByText('30 stocks')).toBeInTheDocument();
+    fireEvent.click(within(drawer).getByRole('button', {name:/STK00/}));
+    expect(within(drawer).getByText('Company 0')).toBeInTheDocument();
+    expect(within(drawer).getByText('Stock RS')).toBeInTheDocument();
+  });
+  it('distinguishes unavailable data from no matching filters', () => {
+    render(<GroupMatrixPanel data={{available:false, reason:'missing_ibd_mappings'}} preferences={DEFAULT_MATRIX_PREFERENCES} />);
+    expect(screen.getByText(/IBD classifications are not available/)).toBeInTheDocument();
+  });
+});

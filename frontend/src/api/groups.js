@@ -163,3 +163,8 @@ export const triggerBackfill = async (startDate, endDate) => {
   });
   return response.data;
 };
+
+export const getGroupMatrix = async (market) => {
+  const response = await apiClient.get('/v1/groups/matrix', { params: { market } });
+  return response.data;
+};

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import {
   Alert,
@@ -20,11 +20,13 @@ import {
   fetchStaticJson,
   resolveStaticMarketEntry,
   useStaticGroupsRRG,
+  useStaticGroupMatrix,
 } from '../dataClient';
 import { useStaticChartIndex } from '../chartClient';
 import StaticGroupDetailModal from '../StaticGroupDetailModal';
 import RRGChart from '../../components/Charts/RRGChart';
-import RRGViewToggle from '../../components/Charts/RRGViewToggle';
+import GroupViewTabs from '../../features/groups/GroupViewTabs';
+import { DEFAULT_MATRIX_PREFERENCES } from '../../features/groups/matrix/groupMatrixModel';
 import { useRRGScopeSelection } from '../../components/Charts/useRRGScopeSelection';
 import RankChangeCell from '../../components/shared/RankChangeCell';
 import TickerCell from '../../components/common/TickerCell';
@@ -38,6 +40,8 @@ import {
   groupRsCellSx,
   groupRsTone,
 } from '../../features/groups/groupRsVisualEncoding';
+
+const GroupMatrixPanel = lazy(() => import('../../features/groups/matrix/GroupMatrixPanel'));
 
 function SortableTableCell({ field, label, align = 'left', orderBy, order, onSort }) {
   return (
@@ -234,7 +238,14 @@ function StaticGroupsPage() {
   const rrgQuery = useStaticGroupsRRG(marketEntry);
   const rrgAvailable = Boolean(marketEntry.assets?.groups_rrg?.path);
   const [selectedGroup, setSelectedGroup] = useState(null);
-  const [view, setView] = useState('table'); // 'table' | 'rrg'
+  const [view, setView] = useState('table');
+  const [matrixPreferences, setMatrixPreferences] = useState(DEFAULT_MATRIX_PREFERENCES);
+  const matrixAvailable = Boolean(marketEntry.assets?.groups_matrix?.path);
+  const matrixQuery = useStaticGroupMatrix(marketEntry, view === 'matrix');
+  useEffect(() => {
+    setSelectedGroup(null);
+    if (!matrixAvailable && view === 'matrix') setView('table');
+  }, [selectedMarket, matrixAvailable, view]);
   const [rrgScope, setRrgScope] = useState('groups'); // 'groups' | 'sectors'
   const { availableScopes: availableRrgScopes } = useRRGScopeSelection({
     view,
@@ -245,7 +256,7 @@ function StaticGroupsPage() {
     bundle: rrgQuery.data,
   });
 
-  if (manifestQuery.isLoading || groupsQuery.isLoading) {
+  if (manifestQuery.isLoading) {
     return (
       <Box display="flex" justifyContent="center" py={8}>
         <CircularProgress />
@@ -253,15 +264,11 @@ function StaticGroupsPage() {
     );
   }
 
-  if (manifestQuery.isError || groupsQuery.isError) {
+  if (manifestQuery.isError) {
     return <Alert severity="error">Failed to load group rankings.</Alert>;
   }
 
-  if (!groupsQuery.data?.available) {
-    return <Alert severity="info">{groupsQuery.data?.message || 'No group rankings are available.'}</Alert>;
-  }
-
-  const payload = groupsQuery.data.payload || {};
+  const payload = groupsQuery.data?.payload || {};
   const rankings = payload.rankings?.rankings || [];
   const movers = payload.movers || {};
   const moversPeriod = payload.movers_period || movers.period || '1w';
@@ -276,26 +283,35 @@ function StaticGroupsPage() {
         Latest ranking date: {payload.rankings?.date || '-'}.
       </Typography>
 
-      {rrgAvailable && (
-        <RRGViewToggle
+      <GroupViewTabs
           view={view}
           onView={setView}
           scope={rrgScope}
           onScope={setRrgScope}
           rrgAvailable={rrgAvailable}
+          matrixAvailable={matrixAvailable}
           availableScopes={availableRrgScopes}
           sx={{ mb: 2 }}
         />
-      )}
 
-      {view === 'rrg' ? (
+      <Box role="tabpanel" id={`group-panel-${view}`} aria-labelledby={`group-tab-${view}`}>
+      {view === 'matrix' ? (
+        <Suspense fallback={<CircularProgress />}>
+          <GroupMatrixPanel key={selectedMarket} data={matrixQuery.data} isLoading={matrixQuery.isLoading}
+            error={matrixQuery.error} onRetry={() => matrixQuery.refetch()}
+            preferences={matrixPreferences} onPreferencesChange={setMatrixPreferences} />
+        </Suspense>
+      ) : view === 'rrg' ? (
         <RRGChart
           data={rrgQuery.data?.payload?.[rrgScope]}
           isLoading={rrgQuery.isLoading}
           error={rrgQuery.isError ? rrgQuery.error : null}
           onSelectGroup={(name) => rrgScope === 'groups' && setSelectedGroup(name)}
         />
-      ) : (
+      ) : groupsQuery.isLoading ? <CircularProgress />
+        : groupsQuery.isError ? <Alert severity="error">Failed to load group rankings.</Alert>
+        : !groupsQuery.data?.available ? <Alert severity="info">{groupsQuery.data?.message || 'No group rankings are available.'}</Alert>
+        : (
         <GroupsTableView
           movers={movers}
           moversPeriod={moversPeriod}
@@ -303,6 +319,8 @@ function StaticGroupsPage() {
           onSelectGroup={setSelectedGroup}
         />
       )}
+
+      </Box>
 
       <StaticGroupDetailModal
         group={selectedGroup}

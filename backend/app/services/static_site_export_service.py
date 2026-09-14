@@ -52,6 +52,7 @@ from app.services.static_chart_bundle_exporter import (
     StaticChartBundleExporter,
 )
 from app.services.static_group_section_builder import StaticGroupSectionBuilder
+from app.services.static_group_matrix import export_group_matrix
 from app.services.static_groups_rrg_export import (
     StaticGroupsRRGDatabasePayloadSource,
     StaticGroupsRRGPayloadSource,
@@ -526,6 +527,12 @@ class StaticSiteExportService:
                 "symbols_total": chart_manifest["symbols_total"],
             },
         }
+        matrix_asset = export_group_matrix(
+            db, output_dir=output_dir, market=market,
+            feature_run_id=latest_run.id, generated_at=generated_at,
+        )
+        if matrix_asset is not None:
+            assets["groups_matrix"] = matrix_asset
         breadth_contributor_asset = self._export_breadth_contributors(
             db=db,
             output_dir=output_dir,

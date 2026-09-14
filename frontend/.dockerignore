@@ -1,0 +1,14 @@
+# This directory is the frontend Docker build context; the repository-root
+# .dockerignore does not apply here. Keep npm ci's Linux dependencies intact.
+node_modules
+**/node_modules
+dist
+coverage
+.vite
+test-results
+playwright-report
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example

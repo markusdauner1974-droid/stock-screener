@@ -282,8 +282,26 @@ describe('StaticGroupsPage', () => {
 
     expect(await screen.findByRole('heading', { name: 'US Group Rankings' })).toBeInTheDocument();
     // Switch from the table view to the Relative Rotation Graph.
-    fireEvent.click(screen.getByRole('button', { name: 'RRG' }));
+    fireEvent.click(screen.getByRole('tab', { name: 'RRG' }));
     expect(await screen.findByText(/Relative Rotation Graph/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Sectors' })).not.toBeInTheDocument();
   });
 });
+
+ it('loads the Matrix asset independently of a failed rankings asset', async () => {
+  vi.stubEnv('VITE_STATIC_SITE', 'true');
+  const requested = [];
+  globalThis.fetch = vi.fn(async url => {
+    const path = String(url).split('/static-data/')[1]; requested.push(path);
+    if (path === 'manifest.json') return {ok:true, json:async()=>({pages:{groups:{path:'groups.json'}}, assets:{groups_matrix:{path:'matrix.json'}}})};
+    if (path === 'matrix.json') return {ok:true, json:async()=>({available:false, reason:'missing_ibd_mappings'})};
+    return {ok:false, status:500};
+  });
+  renderPage();
+  expect(await screen.findByRole('tab', {name:'Matrix'})).toBeInTheDocument();
+  expect(requested).not.toContain('matrix.json');
+  fireEvent.click(screen.getByRole('tab', {name:'Matrix'}));
+  expect(await screen.findByText(/IBD classifications are not available/)).toBeInTheDocument();
+  expect(requested.every(path=>Boolean(path))).toBe(true);
+  vi.unstubAllEnvs();
+ });

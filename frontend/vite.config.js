@@ -38,7 +38,13 @@ export default defineConfig(({ mode }) => {
         output: {
           manualChunks: {
             // Core React ecosystem
-            'react-vendor': ['react', 'react-dom', 'react-router-dom'],
+            // Query's React adapters share React's initialization boundary.
+            // Splitting these creates a circular vendor chunk in production.
+            'react-vendor': [
+              'react', 'react-dom', 'react-router-dom',
+              '@tanstack/react-query', '@tanstack/react-virtual',
+              '@tanstack/react-query-persist-client', '@tanstack/query-sync-storage-persister',
+            ],
             // MUI components (large library)
             'mui-vendor': ['@mui/material', '@mui/icons-material'],
             // Data visualization: recharts powers the always-visible
@@ -46,8 +52,6 @@ export default defineConfig(({ mode }) => {
             // candlestick chart modals.
             'charts-vendor': ['recharts'],
             'price-charts-vendor': ['lightweight-charts'],
-            // React Query for data fetching
-            'query-vendor': ['@tanstack/react-query', '@tanstack/react-virtual'],
           },
         },
       },

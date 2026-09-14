@@ -7,7 +7,7 @@ rank movers, and manual calculation triggers.
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 from ...config import settings
 from ...database import get_db
@@ -36,6 +36,9 @@ from ...wiring.bootstrap import (
     get_rrg_service as get_runtime_rrg_service,
     get_ui_snapshot_service,
 )
+
+from ...schemas.group_matrix import GroupMatrixResponse
+from ...services.group_matrix_service import GroupMatrixService
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +83,23 @@ def _normalize_rrg_market_param(market: str | None) -> str:
             ),
         )
     return normalized
+
+
+@router.get("/matrix", response_model=GroupMatrixResponse)
+def get_group_matrix(market: str = Query("US"), db: Session = Depends(get_db)):
+    market = _normalize_market_param(market)
+    service = GroupMatrixService()
+    run = service.repository.latest_published_run(db, market=market)
+    def build():
+        return service.build(db, market=market, feature_run_id=run.id if run else None,
+            generated_at=datetime.now(timezone.utc).isoformat())
+    if run is None:
+        return build()
+    formula = (run.config_json or {}).get("rs_formula_version", "legacy")
+    return cached_group_payload(market=market, name="matrix",
+        params=f"schema=group-matrix-v1:run={run.id}:formula={formula}",
+        compute=build, ttl_seconds=60,
+        should_cache=lambda value: value.get("available", False))
 
 
 # Rankings change once per trading day; these wrappers cache the computed

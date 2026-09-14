@@ -22,7 +22,7 @@ See the **[Static Site Guide](docs/STATIC_SITE.md)** for exactly what works in s
 - **Multiple screening methodologies** - Minervini, CANSLIM, IPO, Volume Breakthrough, etc. with composite scoring.
 - **Market Health and Exposure** - Market-regime overlay for position sizing and risk posture.
 - **Market Breadth** - StockBee-style daily movers and trend windows, advance/decline and new-high/new-low health bars, T2108, a benchmark overlay, and a significance heatmap built from one shared calculation layer.
-- **Industry groups with Relative Rotation Graph** - groups ranked by relative strength with movers (1W/1M/3M/6M) and constituent analysis, plus RRG charts plotting RS-Ratio vs RS-Momentum through (Leading → Weakening → Lagging → Improving).
+- **Industry groups with Relative Rotation Graph** - groups ranked by relative strength with movers (1W/1M/3M/6M) and constituent analysis, plus RRG charts plotting RS-Ratio vs RS-Momentum through (Leading → Weakening → Lagging → Improving). The Matrix tab adds Grid and Clusters layouts colored by 1-day, 1-week, 1-month change, or Stock RS.
 - **Watchlists and Themes** - RS and price sparklines, multi-period change bars, drag-and-drop folders, and full-screen chart navigation.
 - **Theme discovery** - AI theme identification from RSS, Twitter/X, and news feeds; tracks trending vs. emerging themes and alerts on momentum shifts.
 - **AI research chatbot** - LLM powered chatbot with optional web search and persistent conversation history.
@@ -36,8 +36,17 @@ See the **[Static Site Guide](docs/STATIC_SITE.md)** for exactly what works in s
 ![Scan results with composite scores, RS sparklines, multi-screener ratings, and classification columns](docs/screenshots/scan-results.png)
 *Scan results table*
 
+![Group relative-strength rankings with movers and the rankings table](docs/screenshots/group-rs-table.png)
+*Group RS: industry rankings, relative-strength statistics, and changes in group rank*
+
 ![Relative Rotation Graph — sector rotation with direction-arrowed weekly tails](docs/screenshots/rrg-rotation.png)
 *RRG: sector rotation with direction-arrowed weekly tails; full 197-group scope available from the same view*
+
+![Stock Matrix Grid colored by one-week change](docs/screenshots/group-matrix-grid.png)
+*Matrix Grid: sector and IBD industry rows, market-cap columns, and individual stock tiles*
+
+![Stock Matrix Clusters colored by one-month change](docs/screenshots/group-matrix-clusters.png)
+*Matrix Clusters: market-cap-sized bubbles with green centers and red perimeters. Both layouts support 1-day, 1-week, 1-month change, and Stock RS in the live app and static site. See the **[Group Matrix Guide](docs/GROUP_MATRIX_README.md)**.*
 
 *Market Breadth combines advance/decline and new-high/new-low health bars with an SPY overlay and a color-coded history table for primary, secondary, and context indicators.*
 
@@ -93,7 +102,7 @@ Optional web-search keys (`TAVILY_API_KEY`, `SERPER_API_KEY`) enable the chatbot
 | `/` | Daily | Dashboard: Daily Snapshot, Key Markets, Themes, Watchlists, Stockbee MM |
 | `/scan` | Bulk Scanner | Multi-market scanning with 80+ filters, per-market badges, CSV export |
 | `/breadth` | Market Breadth | StockBee-style breadth indicators and trends |
-| `/groups` | Group Rankings | IBD industry group rankings, movers, and the RRG |
+| `/groups` | Group Rankings | IBD industry group rankings, movers, RRG, and stock Matrix (Grid/Clusters) |
 | `/validation` | Backtest | Deterministic validation of scan picks and theme alerts |
 | `/themes` | Themes | Feature-gated AI theme discovery, review queues, pipeline controls |
 | `/chatbot` | Assistant | Feature-gated AI research assistant with web search and watchlist actions |
@@ -113,6 +122,7 @@ Optional web-search keys (`TAVILY_API_KEY`, `SERPER_API_KEY`) enable the chatbot
 | Guide | Audience |
 |-------|----------|
 | [Live App Guide](docs/LIVE_APP_GUIDE.md) | Users of the server-backed live application |
+| [Group Matrix Guide](docs/GROUP_MATRIX_README.md) | Grid/Clusters, return periods, stock RS, data coverage, and live/static delivery |
 | [Operations Guide](docs/OPERATIONS.md) | Live-app operators and maintainers |
 | [Static Site Guide](docs/STATIC_SITE.md) | Static demo users and maintainers |
 | [Options Command Center](docs/OPTIONS_COMMAND_CENTER.md) | Understanding the options cohort, metrics, history, and limitations |

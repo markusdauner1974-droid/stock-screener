@@ -26,6 +26,7 @@ async function selectGlobalMarket(user, optionName) {
   await user.click(await screen.findByRole('option', { name: optionName }));
 }
 
+const getGroupMatrix = vi.fn();
 const getGroupsBootstrap = vi.fn();
 const getCurrentRankings = vi.fn();
 const getRankMovers = vi.fn();
@@ -60,6 +61,7 @@ const runtimeState = {
 };
 
 vi.mock('../api/groups', () => ({
+  getGroupMatrix: (...args) => getGroupMatrix(...args),
   getGroupsBootstrap: (...args) => getGroupsBootstrap(...args),
   getCurrentRankings: (...args) => getCurrentRankings(...args),
   getRankMovers: (...args) => getRankMovers(...args),
@@ -427,7 +429,7 @@ describe('GroupRankingsPage', () => {
     expect(await screen.findByText('HK Internet Services')).toBeInTheDocument();
 
     const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'RRG' }));
+    await user.click(screen.getByRole('tab', { name: 'RRG' }));
 
     await waitFor(() => {
       expect(getRRGBundle).toHaveBeenCalledWith(8, 197, 'HK');
@@ -472,7 +474,7 @@ describe('GroupRankingsPage', () => {
       expect(getRankMovers).toHaveBeenCalledWith('1m', 10, 'HK', '2026-03-16');
     });
 
-    await user.click(screen.getByRole('button', { name: 'RRG' }));
+    await user.click(screen.getByRole('tab', { name: 'RRG' }));
 
     await waitFor(() => {
       expect(getRRGBundle).toHaveBeenCalledWith(8, 197, 'HK', '2026-03-16');
@@ -517,7 +519,7 @@ describe('GroupRankingsPage', () => {
     expect(await screen.findByText('HK | 1 groups | 2026-04-10')).toBeInTheDocument();
 
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
-    await user.click(screen.getByRole('button', { name: 'RRG' }));
+    await user.click(screen.getByRole('tab', { name: 'RRG' }));
     await waitFor(() => {
       expect(getRRGBundle).toHaveBeenCalledWith(8, 197, 'HK', '2026-04-10');
     });
@@ -567,6 +569,7 @@ describe('GroupRankingsPage', () => {
     const { queryClient } = renderGroupRankingsPage();
     expect(await screen.findByText('US | 1 groups | 2026-04-09')).toBeInTheDocument();
 
+    queryClient.setQueryData(['groupMatrix', 'US'], { available: false });
     const user = userEvent.setup();
     await user.click(screen.getByRole('button', { name: 'Refresh' }));
 
@@ -577,6 +580,7 @@ describe('GroupRankingsPage', () => {
       ).toBe('2026-04-10');
     });
     expect(await screen.findByText('US | 1 groups | 2026-04-10')).toBeInTheDocument();
+    expect(queryClient.getQueryState(['groupMatrix', 'US']).isInvalidated).toBe(true);
     expect(getCurrentRankings).toHaveBeenCalledWith(197, 'US', '2026-04-10');
   });
 
@@ -690,7 +694,7 @@ describe('GroupRankingsPage', () => {
       ).toBe('2026-04-10');
     });
 
-    await user.click(screen.getByRole('button', { name: 'RRG' }));
+    await user.click(screen.getByRole('tab', { name: 'RRG' }));
     await waitFor(() => {
       expect(getRRGBundle).toHaveBeenCalledWith(8, 197, 'US', '2026-04-10');
     });
@@ -703,7 +707,7 @@ describe('GroupRankingsPage', () => {
     renderGroupRankingsPage();
 
     expect(await screen.findByText('KR Internet Services')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'RRG' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'RRG' })).not.toBeInTheDocument();
     expect(getRRGBundle).not.toHaveBeenCalled();
   });
 
@@ -765,3 +769,13 @@ describe('GroupRankingsPage', () => {
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
   });
 });
+
+ it('keeps Matrix reachable when rankings fail and RRG is unavailable', async () => {
+  getCurrentRankings.mockRejectedValue(new Error('ranking failure'));
+  getGroupMatrix.mockResolvedValue({available:false, reason:'missing_ibd_mappings'});
+  renderGroupRankingsPage();
+  expect(await screen.findByRole('tab', {name:'Matrix'})).toBeInTheDocument();
+  expect(getGroupMatrix).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('tab', {name:'Matrix'}));
+  expect(await screen.findByText(/IBD classifications are not available/)).toBeInTheDocument();
+ });

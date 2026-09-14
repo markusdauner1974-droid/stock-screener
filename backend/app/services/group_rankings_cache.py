@@ -47,6 +47,7 @@ def cached_group_payload(
     params: str,
     compute: Callable[[], Any],
     should_cache: Callable[[Any], bool] = bool,
+    ttl_seconds: int = TTL_SECONDS,
 ) -> Any:
     """Return the cached payload for (market, name, params), computing on miss.
 
@@ -79,7 +80,7 @@ def cached_group_payload(
 
     if client is not None and key is not None and should_cache(value):
         try:
-            client.setex(key, TTL_SECONDS, json.dumps(value, default=str))
+            client.setex(key, ttl_seconds, json.dumps(value, default=str))
         except Exception as exc:
             logger.warning("Group-rankings cache write failed (%s/%s): %s", market, name, exc)
 
