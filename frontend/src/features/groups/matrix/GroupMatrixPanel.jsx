@@ -2,7 +2,7 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import { Alert, Box, Button, Chip, CircularProgress, MenuItem, Paper, Stack, TextField, ToggleButton, ToggleButtonGroup, Typography } from '@mui/material';
 import { useTheme } from '@mui/material/styles';
 import { buildMatrixModel, groupLabel, sectorLabel } from './groupMatrixModel';
-import { matrixColor } from './groupMatrixColors';
+import { MATRIX_METRICS, matrixColor, matrixLegend } from './groupMatrixColors';
 import GroupMatrixLayouts from './GroupMatrixLayouts';
 import GroupMatrixDetails from './GroupMatrixDetails';
 import GroupMatrixTileInspector from './GroupMatrixTileInspector';
@@ -16,9 +16,8 @@ const UNAVAILABLE = {
 };
 function MatrixLegend({ metric }) {
   const theme = useTheme();
-  const values = metric === 'rs_rating' ? [20, 30, 50, 70, 80] : [-3, -2, -1, 0, 1, 2, 3];
-  const labels = metric === 'rs_rating' ? ['≤20', '>20–30', '>30–<70', '70–<80', '≥80'] : ['<−2.5%', '−2.5–<−1.5%', '−1.5–<−0.5%', '−0.5–<0.5%', '0.5–<1.5%', '1.5–<2.5%', '≥2.5%'];
-  return <Box aria-label={`${metric === 'rs_rating' ? 'Stock RS' : 'Daily change'} color legend`} sx={{ display: 'flex', flexWrap: 'wrap', gap: '2px', my: 1 }}>
+  const {values, labels} = matrixLegend(metric);
+  return <Box aria-label={`${MATRIX_METRICS[metric].label} color legend`} sx={{ display: 'flex', flexWrap: 'wrap', gap: '2px', my: 1 }}>
     {values.map((value, i) => <Box key={value} sx={{ px: 1, py: 0.5, borderRadius: '2px', fontSize: 10,
       bgcolor: matrixColor(value, metric, theme).backgroundColor, color: '#fff' }}>{labels[i]}</Box>)}
     <Box sx={{ fontSize: 11, px: 1, py: 0.5 }}>— Missing</Box>
@@ -63,7 +62,7 @@ export default function GroupMatrixPanel({ data, isLoading, error, onRetry, pref
           <ToggleButton value="grid">Grid</ToggleButton><ToggleButton value="clusters">Clusters</ToggleButton>
         </ToggleButtonGroup>
         <TextField select size="small" label="Color" value={preferences.metric} onChange={e => update({metric:e.target.value})} sx={{ minWidth:160 }}>
-          <MenuItem value="price_change_1d">1-Day Change</MenuItem><MenuItem value="rs_rating">Stock RS</MenuItem>
+          {Object.entries(MATRIX_METRICS).map(([key, value]) => <MenuItem key={key} value={key}>{value.label}</MenuItem>)}
         </TextField>
       </Stack>
     </Stack>
@@ -88,7 +87,7 @@ export default function GroupMatrixPanel({ data, isLoading, error, onRetry, pref
       <Button size="small" onClick={() => setCoverageOpen(v=>!v)} aria-expanded={coverageOpen}>Data coverage</Button>
       <Button size="small" ref={listButtonRef} onClick={() => open({title:'Matching stocks · current filters', stocks:model.stocks})}>View matching stocks</Button>
     </Stack>
-    {coverageOpen && <Alert severity="info" sx={{ my: 1 }}>Universe: {coverage.universe_count}; missing features: {coverage.missing_feature_count || 0}; unknown sector: {coverage.unknown_sector_count || 0}; unknown cap: {coverage.unknown_cap_count || 0}; missing daily change: {coverage.missing_daily_change_count || 0}; missing RS: {coverage.missing_rs_count || 0}. Counts can overlap. Automated IBD mappings are estimates; inspect stock details for source.</Alert>}
+    {coverageOpen && <Alert severity="info" sx={{ my: 1 }}>Universe: {coverage.universe_count}; missing features: {coverage.missing_feature_count || 0}; unknown sector: {coverage.unknown_sector_count || 0}; unknown cap: {coverage.unknown_cap_count || 0}; missing daily change: {coverage.missing_daily_change_count || 0}; missing weekly change: {coverage.missing_weekly_change_count ?? stocks.filter(stock=>!Number.isFinite(stock.price_change_1w)).length}; missing monthly change: {coverage.missing_monthly_change_count ?? stocks.filter(stock=>!Number.isFinite(stock.price_change_1m)).length}; missing RS: {coverage.missing_rs_count || 0}. Counts can overlap. Automated IBD mappings are estimates; inspect stock details for source.</Alert>}
     <MatrixLegend metric={preferences.metric} />
     {model.stockCount ? <GroupMatrixTileInspector stocks={model.stocks} data={data}><GroupMatrixLayouts layout={preferences.layout} model={model} tiers={visibleTiers} metric={preferences.metric} onSelectStock={selectStock} onSelectStocks={open} /></GroupMatrixTileInspector>
       : <Alert severity="info">No stocks match these filters. Reset filters to see the full matrix.</Alert>}

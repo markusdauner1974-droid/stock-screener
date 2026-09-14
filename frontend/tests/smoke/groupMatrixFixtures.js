@@ -15,13 +15,17 @@ export function matrixFixture(market = 'US', count = 120) {
     classification_source: market === 'US' ? 'csv' : 'crosswalk', classification_confidence: market === 'US' ? null : 0.9,
     classification_updated_at: '2026-09-10T00:00:00Z', fundamentals_updated_at: '2026-09-11T00:00:00Z',
     price_change_1d: i%11 === 0 ? null : ((i%13)-6)/2, rs_rating: (i*7)%101,
+    price_change_1w: i%11 === 0 ? null : ((i%13)-6),
+    price_change_1m: i%11 === 0 ? null : ((i%13)-6)*2,
   }));
   return { schema_version:'group-matrix-v1', available:true, reason:null, market, feature_run_id:1,
     as_of_date:'2026-09-11', generated_at:'2026-09-13T00:00:00Z', metadata_read_at:'2026-09-13T00:00:00Z',
     metadata_basis:'latest_stored', taxonomy:'ibd', rs_formula_version:'legacy-linear-v1', market_rs_run_id:null, rs_universe_size:null,
     tiers, stocks, coverage: {stock_count:count, universe_count:count, ibd_mapped_count:count, missing_feature_count:0,
       unknown_sector_count:0, unknown_cap_count:stocks.filter(s=>s.market_cap_usd===null).length,
-      missing_daily_change_count:stocks.filter(s=>s.price_change_1d===null).length, missing_rs_count:0} };
+      missing_daily_change_count:stocks.filter(s=>s.price_change_1d===null).length,
+      missing_weekly_change_count:stocks.filter(s=>s.price_change_1w===null).length,
+      missing_monthly_change_count:stocks.filter(s=>s.price_change_1m===null).length, missing_rs_count:0} };
 }
 export async function installMatrixFixtures(page, { count = 120, mode = 'live' } = {}) {
   const requests = [];

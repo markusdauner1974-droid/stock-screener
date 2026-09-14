@@ -20,6 +20,8 @@ class MatrixStock(BaseModel):
     cap_tier: CapTier
     fundamentals_updated_at: str | None = None
     price_change_1d: float | None = None
+    price_change_1w: float | None = None
+    price_change_1m: float | None = None
     rs_rating: float | None = Field(None, ge=0, le=100)
 
 
@@ -38,6 +40,8 @@ class MatrixCoverage(BaseModel):
     unknown_sector_count: int = Field(0, ge=0)
     unknown_cap_count: int = Field(0, ge=0)
     missing_daily_change_count: int = Field(0, ge=0)
+    missing_weekly_change_count: int = Field(0, ge=0)
+    missing_monthly_change_count: int = Field(0, ge=0)
     missing_rs_count: int = Field(0, ge=0)
 
 

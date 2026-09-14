@@ -43,6 +43,8 @@ def _stock(row):
     for key in (
         "market_cap_usd",
         "price_change_1d",
+        "price_change_1w",
+        "price_change_1m",
         "rs_rating",
         "classification_confidence",
     ):
@@ -88,6 +90,12 @@ def build_group_matrix_payload(*, rows, metadata, universe_count):
             "unknown_cap_count": sum(stock.cap_tier == "unknown" for stock in stocks),
             "missing_daily_change_count": sum(
                 stock.price_change_1d is None for stock in stocks
+            ),
+            "missing_weekly_change_count": sum(
+                stock.price_change_1w is None for stock in stocks
+            ),
+            "missing_monthly_change_count": sum(
+                stock.price_change_1m is None for stock in stocks
             ),
             "missing_rs_count": sum(stock.rs_rating is None for stock in stocks),
         },

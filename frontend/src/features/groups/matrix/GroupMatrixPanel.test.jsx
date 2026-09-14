@@ -6,7 +6,8 @@ import { DEFAULT_MATRIX_PREFERENCES } from './groupMatrixModel';
 
 const stocks = Array.from({length: 30}, (_, i) => ({ symbol: `STK${String(i).padStart(2,'0')}`,
   company_name: `Company ${i}`, sector: 'Technology', ibd_industry_group: 'Software',
-  cap_tier: 'mid', market_cap_usd: 3e9, price_change_1d: i === 0 ? null : 0, rs_rating: 85 }));
+  cap_tier: 'mid', market_cap_usd: 3e9, price_change_1d: i === 0 ? null : 0,
+  price_change_1w: i === 0 ? null : 4.5, price_change_1m: i === 0 ? null : -8.25, rs_rating: 85 }));
 const data = { available: true, market: 'US', as_of_date: '2026-09-11', metadata_read_at: '2026-09-13',
   tiers: [{ id: 'mid', label: 'Mid' }], stocks, coverage: { stock_count:30, universe_count:30, ibd_mapped_count:30 } };
 function Harness() {
@@ -19,6 +20,21 @@ describe('Matrix panel', () => {
     vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(1200);
   });
   afterEach(() => vi.restoreAllMocks());
+  it('offers weekly and monthly changes in both layouts and stock inspection', () => {
+    render(<Harness />);
+    fireEvent.mouseDown(screen.getByRole('combobox', {name:/^Color/}));
+    fireEvent.click(screen.getByRole('option', {name:'1-Week Change'}));
+    expect(screen.getByRole('button', {name:/^STK01 \+4.50%/})).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', {name:'Clusters'}));
+    expect(screen.getByRole('button', {name:/^STK01 \+4.50%/})).toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByRole('combobox', {name:/^Color/}));
+    fireEvent.click(screen.getByRole('option', {name:'1-Month Change'}));
+    const tile = screen.getByRole('button', {name:/^STK01 -8.25%/});
+    fireEvent.focus(tile);
+    expect(screen.getByRole('tooltip')).toHaveTextContent('1-Week Change');
+    expect(screen.getByRole('tooltip')).toHaveTextContent('1-Month Change');
+    expect(screen.getByRole('button', {name:/^STK00 —/})).toBeInTheDocument();
+  });
   it('repositions bubbles when the selected color metric changes', () => {
     const clusterData = { ...data, stocks: stocks.map((stock, i) => ({...stock,
       price_change_1d:[-3,0,3][i % 3], rs_rating:[90,50,10][i % 3],

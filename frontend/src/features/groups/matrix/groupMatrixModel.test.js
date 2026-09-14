@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { buildMatrixModel } from './groupMatrixModel';
-import { matrixColor, formatMatrixValue } from './groupMatrixColors';
+import { matrixColor, formatMatrixValue, matrixLegend } from './groupMatrixColors';
 
 const stocks = [
   { symbol: 'A', company_name: 'Alpha', sector: 'Tech', ibd_industry_group: 'Software', cap_tier: 'mid', market_cap_usd: 3e9 },
@@ -25,6 +25,16 @@ it('orders stocks by cap then symbol and rejects duplicate symbols', () => {
 });
 describe('color semantics', () => {
   const theme = { palette: { mode: 'dark', text: { primary: '#fff' } } };
+  it.each([
+    ['price_change_1w', 4, '≥5%', '-1–<1%'],
+    ['price_change_1m', 8, '≥10%', '-2–<2%'],
+  ])('scales the %s legend and colors without changing displayed returns', (metric, value, topLabel, neutralLabel) => {
+    expect(matrixColor(value, metric, theme)).toEqual(matrixColor(2, 'price_change_1d', theme));
+    expect(matrixLegend(metric).labels.at(-1)).toBe(topLabel);
+    expect(matrixLegend(metric).labels[3]).toBe(neutralLabel);
+    expect(formatMatrixValue(value, metric)).toBe(`+${value.toFixed(2)}%`);
+    expect(matrixColor(undefined, metric, theme).missing).toBe(true);
+  });
   it('separates missing from zero, clips color but not text', () => {
     expect(matrixColor(null, 'price_change_1d', theme).missing).toBe(true);
     expect(matrixColor(0, 'price_change_1d', theme).missing).toBe(false);

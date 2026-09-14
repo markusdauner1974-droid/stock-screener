@@ -50,7 +50,7 @@ Included:
 - Existing market selector; one market at a time. No cross-market aggregate RS comparison.
 - Both live and static paths using the same response shape and components.
 
-Excluded from this release: intraday quotes, new data providers, classifier runs triggered by viewing, historical replay, custom cap boundaries, market-cap-sized Grid tiles, force simulation, correlation clustering, logos, portfolio actions, and additional return horizons.
+Excluded from this release: intraday quotes, new data providers, classifier runs triggered by viewing, historical replay, custom cap boundaries, market-cap-sized Grid tiles, force simulation, correlation clustering, logos, portfolio actions, and returns beyond the supported 1-day, 1-week and 1-month return horizons.
 
 ## Layout and controls
 
@@ -93,7 +93,7 @@ Keep the same cap columns. Within each column, stack sector sections and then la
 
 Show up to 64 stocks, selected by market cap descending then symbol, in a 256px square canvas plus `+N more` opening the complete constituent list. Ticker labels appear only when a bubble is large enough to read; every bubble retains its accessible stock description, shared hover/focus inspector and stock drawer. The group title also opens the full list for comfortable access to tiny bubbles. Empty industry/tier combinations disappear. Virtualize each column's card stream with fixed card heights, independent vertical scrolling and visible cap headers. Grid continues to support aligned industry-row comparison.
 
-Arrange the selected bubbles from green at the center, through neutral, to red at the perimeter. D3's outward packing order follows the selected metric descending, with market cap and symbol as tie-breakers. Missing values join the neutral band (daily change 0 / RS 50 for positioning only). Switching the color metric repacks the same preview members. Bubble areas continue to encode market cap; unequal radii make these organic bands rather than rigid concentric rings.
+Arrange the selected bubbles from green at the center, through neutral, to red at the perimeter. D3's outward packing order follows the selected metric descending, with market cap and symbol as tie-breakers. Missing values join the neutral band (any return 0 / RS 50 for positioning only). Switching the color metric repacks the same preview members. Bubble areas continue to encode market cap; unequal radii make these organic bands rather than rigid concentric rings.
 
 No random positioning or inferred relationships. Switching layouts preserves metric, filters, and selection, but resets scroll position. Both layouts show identical matching stock sets and counts.
 
@@ -107,7 +107,7 @@ No random positioning or inferred relationships. Switching layouts preserves met
 
 ### Drilldowns
 
-Hover or keyboard focus shows symbol, company, market, sector, IBD group, classification source, USD cap, daily change, RS, and relevant dates. Click/Enter/Space opens a shared stock drawer showing the same data and an explicit group-constituents action. This works without chart data or live APIs.
+Hover or keyboard focus shows symbol, company, market, sector, IBD group, classification source, USD cap, daily/weekly/monthly change, RS, and relevant dates. Click/Enter/Space opens a shared stock drawer showing the same data and an explicit group-constituents action. This works without chart data or live APIs.
 
 Industry heading click opens a Matrix constituent drawer for that `(sector, IBD group)` across selected tiers and search results. The drawer title includes the current filter context. Do not route non-US IBD selections into the existing local-taxonomy ranking dialog. A future chart integration is outside this release.
 
@@ -142,6 +142,7 @@ These are application-defined thresholds inspired by the reference categories; e
 
 - Default: persisted `price_change_1d`, expressed as percentage points, not a fraction. The source producer's unit and previous-trading-session meaning must be checked with a known price fixture before implementation is accepted. Do not calculate change from compressed sparklines.
 - Daily scale: clamp only the color at −3%/+3%, show exact values in text. Use seven stops at −3, −2, −1, 0, +1, +2, +3, with smooth interpolation or fixed documented bins. Zero is neutral, absent is gray/hatched with `—`.
+- Additional returns: persisted `details_json.perf_week` and `perf_month`, exposed as optional `price_change_1w` and `price_change_1m`. The local calculator uses 5 and 21 trading sessions. Weekly color stops use steps of 2 percentage points; monthly uses 4. Exact bin boundaries and missing-data behavior are documented in [the Matrix guide](../../GROUP_MATRIX_README.md). Both layouts, inspectors and static exports support these fields.
 - Alternative: persisted stock `rs_rating`, valid within 0–100, labeled `Stock RS`. Reuse Group RS tone semantics (`<=20`, `<=30`, neutral, `>=70`, `>=80`) and show their ranges in the legend. Never color stocks with group rank or treat RS as return percentage.
 - Missing/invalid metrics remain on the map. Stock tiles show symbol plus the selected value when space permits; exact values always appear in the drawer.
 
@@ -176,7 +177,8 @@ New live route: `GET /api/v1/groups/matrix?market=US`. No `as_of_date` or user-s
     "universe_count": 5120, "stock_count": 5000,
     "missing_feature_count": 120, "ibd_mapped_count": 4700,
     "unknown_sector_count": 30, "unknown_cap_count": 100,
-    "missing_daily_change_count": 40, "missing_rs_count": 50
+    "missing_daily_change_count": 40, "missing_rs_count": 50,
+    "missing_weekly_change_count": 60, "missing_monthly_change_count": 80
   },
   "tiers": [
     {"id": "large_mega", "label": "Large/Mega", "min_usd": 10000000000, "max_usd": null},
@@ -193,7 +195,8 @@ New live route: `GET /api/v1/groups/matrix?market=US`. No `as_of_date` or user-s
     "classification_updated_at": "2026-09-10T00:00:00Z",
     "market_cap_usd": 2500000000, "cap_tier": "mid",
     "fundamentals_updated_at": "2026-09-11T22:00:00Z",
-    "price_change_1d": 1.25, "rs_rating": 87.4
+    "price_change_1d": 1.25, "price_change_1w": 4.5,
+    "price_change_1m": -8.25, "rs_rating": 87.4
   }]
 }
 ```
@@ -234,7 +237,7 @@ At narrow widths, controls wrap, filters can collapse behind a labeled button, a
 
 ## Review points
 
-User-confirmed: both layouts and individual stock tiles. The subsequent request authorized inline implementation on a new feature branch with no subagents. Implementation uses all eligible markets, both delivery modes, daily change/RS, and the deterministic Clusters arrangement. See the accompanying plan’s execution record for delivered files, validation and deviations.
+User-confirmed: both layouts and individual stock tiles. The subsequent request authorized inline implementation on a new feature branch with no subagents. Implementation uses all eligible markets, both delivery modes, daily/weekly/monthly change and RS, and the deterministic Clusters arrangement. See the accompanying plan’s execution record for delivered files, validation and deviations.
 
 ## Measured implementation limits
 

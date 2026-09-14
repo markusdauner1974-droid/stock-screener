@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { packMatrixStocks } from './groupMatrixPacking';
 
 describe('Matrix bubble packing', () => {
-  it.each(['price_change_1d', 'rs_rating'])('places green, neutral and red zones from center outward for %s', metric => {
+  it.each(['price_change_1d', 'price_change_1w', 'price_change_1m', 'rs_rating'])('places green, neutral and red zones from center outward for %s', metric => {
     const stocks = Array.from({length:64}, (_, i) => ({
       symbol:`S${i}`, market_cap_usd:1e10 * (1 + i % 7),
       price_change_1d:i < 60 ? [-3, 0, 3][i % 3] : null,
+      price_change_1w:i < 60 ? [-6, 0, 6][i % 3] : null,
+      price_change_1m:i < 60 ? [-12, 0, 12][i % 3] : null,
       rs_rating:i < 60 ? [90, 50, 10][i % 3] : null,
     }));
     const bubbles = packMatrixStocks(stocks, metric);

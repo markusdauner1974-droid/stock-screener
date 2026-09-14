@@ -125,6 +125,8 @@ test('Clusters form round bubble packs with stock inspection and complete overfl
     stock.sector = 'Technology'; stock.ibd_industry_group = 'Computer-Software';
     const colorGroup = Math.floor(i / 6) % 3;
     stock.price_change_1d = i % 11 ? [-3,0,3][colorGroup] : null;
+    stock.price_change_1w = i % 11 ? [-6,0,6][colorGroup] : null;
+    stock.price_change_1m = i % 11 ? [-12,0,12][colorGroup] : null;
     stock.rs_rating = i % 11 ? [90,50,10][colorGroup] : null;
     const fraction = (i % 17) / 16;
     stock.market_cap_usd = [1e10 + 3e12 * fraction ** 3, 2e9 + 7e9 * fraction, 3e8 + 1.6e9 * fraction,
@@ -160,9 +162,10 @@ test('Clusters form round bubble packs with stock inspection and complete overfl
       const matches = positions.filter(position => payload.stocks.find(stock=>stock.symbol === position.symbol)[metric] === value);
       return matches.reduce((sum, position)=>sum + position.distance,0) / matches.length;
     };
-    const green = meanDistance(metric === 'rs_rating' ? 90 : 3);
+    const magnitude = {price_change_1d:3, price_change_1w:6, price_change_1m:12}[metric];
+    const green = meanDistance(metric === 'rs_rating' ? 90 : magnitude);
     const neutral = meanDistance(metric === 'rs_rating' ? 50 : 0);
-    const red = meanDistance(metric === 'rs_rating' ? 10 : -3);
+    const red = meanDistance(metric === 'rs_rating' ? 10 : -magnitude);
     expect(green).toBeLessThan(neutral);
     expect(neutral).toBeLessThan(red);
   };
@@ -171,6 +174,14 @@ test('Clusters form round bubble packs with stock inspection and complete overfl
   await page.getByRole('option', {name:'Stock RS',exact:true}).click();
   await assertColorZones('rs_rating');
   await page.screenshot({path:testInfo.outputPath('bubble-clusters-rs-desktop.png'),fullPage:true});
+  for (const [metric,label] of [['price_change_1w','1-Week Change'], ['price_change_1m','1-Month Change']]) {
+    await page.getByRole('combobox', {name:/^Color /}).click();
+    await page.getByRole('option', {name:label,exact:true}).click();
+    await assertColorZones(metric);
+    await page.getByRole('button', {name:'Grid',exact:true}).click();
+    await expect(page.locator('[data-matrix-stock]:visible').first()).toHaveAttribute('aria-label', /%/);
+    await page.getByRole('button', {name:'Clusters',exact:true}).click();
+  }
   await page.getByRole('combobox', {name:/^Color /}).click();
   await page.getByRole('option', {name:'1-Day Change',exact:true}).click();
   const bubble = pack.locator('button').first();

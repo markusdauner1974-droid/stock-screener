@@ -1,6 +1,10 @@
 from datetime import UTC, date, datetime
 
 import pytest
+from sqlalchemy import create_engine, event
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
+
 from app.database import Base
 from app.infra.db.models.feature_store import (
     FeatureRun,
@@ -12,9 +16,6 @@ from app.models.industry import IBDIndustryGroup
 from app.models.stock import StockFundamental
 from app.models.stock_universe import StockUniverse
 from app.services.group_matrix_service import GroupMatrixService
-from sqlalchemy import create_engine, event
-from sqlalchemy.orm import Session
-from sqlalchemy.pool import StaticPool
 
 
 @pytest.fixture(name="db")
@@ -63,6 +64,8 @@ def add_run(db, run_id, market, symbols, status="published"):
                     "ibd_industry_group": "Local taxonomy",
                     "gics_sector": "Tech",
                     "price_change_1d": 2,
+                    "perf_week": -1.25,
+                    "perf_month": 9.5,
                     "rs_rating": 81,
                 },
             )
@@ -97,6 +100,8 @@ def test_market_identity_actual_ibd_and_missing_caps(db):
     assert result["stocks"][0]["cap_tier"] == "unknown"
     assert result["stocks"][1]["ibd_industry_group"] is None
     assert result["stocks"][0]["price_change_1d"] == 2
+    assert result["stocks"][0]["price_change_1w"] == -1.25
+    assert result["stocks"][0]["price_change_1m"] == 9.5
     assert result["metadata_basis"] == "latest_stored"
     assert result["coverage"]["ibd_mapped_count"] == 1
 

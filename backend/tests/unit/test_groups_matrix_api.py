@@ -1,10 +1,10 @@
 import httpx
 import pytest
+from fastapi import FastAPI
+
 from app.api.v1.groups import router
 from app.database import get_db
 from app.models.industry import IBDIndustryGroup
-from fastapi import FastAPI
-
 from tests.unit.test_group_matrix_service import (
     add_run,
     matrix_db,  # noqa: F401
@@ -32,12 +32,15 @@ async def test_matrix_route_normalizes_market_and_reports_unavailable(db):
         payload = (await client.get("/api/v1/groups/matrix?market=HK")).json()
         assert payload["stocks"][0]["symbol"] == "A.HK"
         assert payload["feature_run_id"] == 1
+        assert payload["stocks"][0]["price_change_1w"] == -1.25
+        assert payload["stocks"][0]["price_change_1m"] == 9.5
 
 
 @pytest.mark.asyncio
 async def test_matrix_database_failure_is_not_reported_as_empty_data(db, monkeypatch):
-    from app.services.group_matrix_repository import GroupMatrixRepository
     from sqlalchemy.exc import SQLAlchemyError
+
+    from app.services.group_matrix_repository import GroupMatrixRepository
 
     add_run(db, 1, "US", ["A"])
 

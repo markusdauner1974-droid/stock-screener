@@ -1,12 +1,12 @@
 import json
 
 import pytest
+
 from app.models.industry import IBDIndustryGroup
 from app.services.static_group_matrix import (
     export_group_matrix,
     validate_group_matrix_asset,
 )
-
 from tests.unit.test_group_matrix_service import (
     add_run,
     matrix_db,  # noqa: F401
@@ -25,6 +25,8 @@ def test_export_freezes_selected_run_and_advertises_compact_asset(db, tmp_path):
     payload = json.loads((tmp_path / asset["path"]).read_text())
     assert payload["feature_run_id"] == 1
     assert [s["symbol"] for s in payload["stocks"]] == ["A"]
+    assert payload["stocks"][0]["price_change_1w"] == -1.25
+    assert payload["stocks"][0]["price_change_1m"] == 9.5
     assert "price_sparkline_data" not in payload["stocks"][0]
     entry = {
         key: payload[key]

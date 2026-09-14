@@ -111,6 +111,8 @@ class GroupMatrixRepository:
                     "market_cap_usd": cap,
                     "fundamentals_updated_at": cap_date,
                     "price_change_1d": details.get("price_change_1d"),
+                    "price_change_1w": details.get("perf_week"),
+                    "price_change_1m": details.get("perf_month"),
                     "rs_rating": details.get("rs_rating"),
                 }
             )

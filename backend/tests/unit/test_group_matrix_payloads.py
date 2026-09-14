@@ -2,6 +2,7 @@ import json
 
 import pandas as pd
 import pytest
+
 from app.scanners.criteria.price_sparkline import PriceSparklineCalculator
 from app.services.group_matrix_payloads import build_group_matrix_payload, cap_tier
 
@@ -58,6 +59,8 @@ def test_missing_data_stays_visible_and_coverage_is_not_an_exclusion_count():
         "unknown_sector_count": 2,
         "unknown_cap_count": 2,
         "missing_daily_change_count": 2,
+        "missing_weekly_change_count": 3,
+        "missing_monthly_change_count": 3,
         "missing_rs_count": 2,
     }
     assert result["stocks"][0]["price_change_1d"] == 0
@@ -73,6 +76,19 @@ def test_no_actual_ibd_mapping_is_unavailable():
     assert result["reason"] == "missing_ibd_mappings"
     assert result["stocks"] == []
     assert result["coverage"]["stock_count"] == 1
+
+
+@pytest.mark.parametrize("value,expected", [(0, 0), (-4.25, -4.25), (None, None), (True, None), ("2.5", None), (float("nan"), None), (float("inf"), None)])
+def test_weekly_monthly_returns_preserve_zero_and_normalize_invalid_values(value, expected):
+    result = build_group_matrix_payload(
+        rows=[{"symbol": "A", "ibd_industry_group": "Software", "price_change_1w": value, "price_change_1m": value}],
+        metadata={"market": "US"}, universe_count=1,
+    )
+    assert result["stocks"][0]["price_change_1w"] == expected
+    assert result["stocks"][0]["price_change_1m"] == expected
+    assert result["coverage"]["missing_weekly_change_count"] == (expected is None)
+    assert result["coverage"]["missing_monthly_change_count"] == (expected is None)
+    json.dumps(result, allow_nan=False)
 
 
 @pytest.mark.parametrize(
