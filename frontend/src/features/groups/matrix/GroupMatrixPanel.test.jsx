@@ -19,6 +19,17 @@ describe('Matrix panel', () => {
     vi.spyOn(HTMLElement.prototype, 'offsetWidth', 'get').mockReturnValue(1200);
   });
   afterEach(() => vi.restoreAllMocks());
+  it('repositions bubbles when the selected color metric changes', () => {
+    const clusterData = { ...data, stocks: stocks.map((stock, i) => ({...stock,
+      price_change_1d:[-3,0,3][i % 3], rs_rating:[90,50,10][i % 3],
+    })) };
+    const preferences = {...DEFAULT_MATRIX_PREFERENCES, layout:'clusters'};
+    const {rerender} = render(<GroupMatrixPanel data={clusterData} preferences={preferences} />);
+    const bubble = screen.getByRole('button', {name:/^STK00 /});
+    const before = [bubble.style.left, bubble.style.top];
+    rerender(<GroupMatrixPanel data={clusterData} preferences={{...preferences, metric:'rs_rating'}} />);
+    expect([bubble.style.left, bubble.style.top]).not.toEqual(before);
+  });
   it('packs Clusters as market-cap-sized circular stock controls', () => {
     const clusterData = { ...data, stocks: [
       { ...stocks[1], market_cap_usd: 4e9 },

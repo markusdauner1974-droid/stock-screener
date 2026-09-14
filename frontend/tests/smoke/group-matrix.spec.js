@@ -123,6 +123,9 @@ test('Clusters form round bubble packs with stock inspection and complete overfl
   const payload = matrixFixture('US',600);
   payload.stocks.forEach((stock, i) => {
     stock.sector = 'Technology'; stock.ibd_industry_group = 'Computer-Software';
+    const colorGroup = Math.floor(i / 6) % 3;
+    stock.price_change_1d = i % 11 ? [-3,0,3][colorGroup] : null;
+    stock.rs_rating = i % 11 ? [90,50,10][colorGroup] : null;
     const fraction = (i % 17) / 16;
     stock.market_cap_usd = [1e10 + 3e12 * fraction ** 3, 2e9 + 7e9 * fraction, 3e8 + 1.6e9 * fraction,
       5e7 + 2.4e8 * fraction, 1e6 + 4.8e7 * fraction, null][i % 6];
@@ -146,6 +149,30 @@ test('Clusters form round bubble packs with stock inspection and complete overfl
     }
   }
   expect(Math.max(...circles.map(circle=>circle.width))).toBeGreaterThan(Math.min(...circles.map(circle=>circle.width)) * 2);
+  const assertColorZones = async metric => {
+    const positions = await pack.locator('button').evaluateAll(buttons => buttons.map(button => {
+      const rect = button.getBoundingClientRect();
+      const canvas = button.parentElement.getBoundingClientRect();
+      return {symbol:button.dataset.matrixStock, distance:Math.hypot(rect.x + rect.width / 2 - canvas.x - canvas.width / 2,
+        rect.y + rect.height / 2 - canvas.y - canvas.height / 2)};
+    }));
+    const meanDistance = value => {
+      const matches = positions.filter(position => payload.stocks.find(stock=>stock.symbol === position.symbol)[metric] === value);
+      return matches.reduce((sum, position)=>sum + position.distance,0) / matches.length;
+    };
+    const green = meanDistance(metric === 'rs_rating' ? 90 : 3);
+    const neutral = meanDistance(metric === 'rs_rating' ? 50 : 0);
+    const red = meanDistance(metric === 'rs_rating' ? 10 : -3);
+    expect(green).toBeLessThan(neutral);
+    expect(neutral).toBeLessThan(red);
+  };
+  await assertColorZones('price_change_1d');
+  await page.getByRole('combobox', {name:/^Color /}).click();
+  await page.getByRole('option', {name:'Stock RS',exact:true}).click();
+  await assertColorZones('rs_rating');
+  await page.screenshot({path:testInfo.outputPath('bubble-clusters-rs-desktop.png'),fullPage:true});
+  await page.getByRole('combobox', {name:/^Color /}).click();
+  await page.getByRole('option', {name:'1-Day Change',exact:true}).click();
   const bubble = pack.locator('button').first();
   await bubble.hover();
   await expect(page.getByRole('tooltip')).toContainText('Classification source');

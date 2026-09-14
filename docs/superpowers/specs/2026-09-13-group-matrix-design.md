@@ -93,6 +93,8 @@ Keep the same cap columns. Within each column, stack sector sections and then la
 
 Show up to 64 stocks, selected by market cap descending then symbol, in a 256px square canvas plus `+N more` opening the complete constituent list. Ticker labels appear only when a bubble is large enough to read; every bubble retains its accessible stock description, shared hover/focus inspector and stock drawer. The group title also opens the full list for comfortable access to tiny bubbles. Empty industry/tier combinations disappear. Virtualize each column's card stream with fixed card heights, independent vertical scrolling and visible cap headers. Grid continues to support aligned industry-row comparison.
 
+Arrange the selected bubbles from green at the center, through neutral, to red at the perimeter. D3's outward packing order follows the selected metric descending, with market cap and symbol as tie-breakers. Missing values join the neutral band (daily change 0 / RS 50 for positioning only). Switching the color metric repacks the same preview members. Bubble areas continue to encode market cap; unequal radii make these organic bands rather than rigid concentric rings.
+
 No random positioning or inferred relationships. Switching layouts preserves metric, filters, and selection, but resets scroll position. Both layouts show identical matching stock sets and counts.
 
 ### Filters and selection
