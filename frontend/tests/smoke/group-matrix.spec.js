@@ -110,11 +110,23 @@ test('crowded Grid previews fit their rows on desktop and mobile', async ({page}
   await page.getByRole('tab', {name:'Matrix'}).click();
   for (const width of [1440,390]) {
     await page.setViewportSize({width,height:1100});
-    const more = page.getByRole('button', {name:/\+38 more in/}).first();
-    await more.scrollIntoViewIfNeeded();
-    await expect(more).toBeVisible();
-    const bounds = await more.evaluate(button => ({bottom:button.getBoundingClientRect().bottom, rowBottom:button.parentElement.parentElement.parentElement.getBoundingClientRect().bottom}));
-    expect(bounds.bottom).toBeLessThanOrEqual(bounds.rowBottom);
+    const controls = page.getByRole('button', {name:/^\+\d+ more in/});
+    // All three fixture rows overflow, including the shorter final group (+8).
+    await expect(controls).toHaveCount(3);
+    const names = await controls.evaluateAll(buttons => buttons.map(button => button.getAttribute('aria-label')));
+    for (const name of names) {
+      const more = page.getByRole('button', {name,exact:true});
+      await more.scrollIntoViewIfNeeded();
+      await expect(more).toBeVisible();
+      const bounds = await more.evaluate(button => ({
+        control:button.getBoundingClientRect().toJSON(),
+        row:button.parentElement.parentElement.parentElement.getBoundingClientRect().toJSON(),
+      }));
+      expect(bounds.control.top, name).toBeGreaterThanOrEqual(bounds.row.top);
+      expect(bounds.control.bottom, name).toBeLessThanOrEqual(bounds.row.bottom);
+      expect(bounds.control.left, name).toBeGreaterThanOrEqual(bounds.row.left);
+      expect(bounds.control.right, name).toBeLessThanOrEqual(bounds.row.right);
+    }
   }
 });
 
@@ -185,6 +197,9 @@ test('Clusters form round bubble packs with stock inspection and complete overfl
   await page.getByRole('combobox', {name:/^Color /}).click();
   await page.getByRole('option', {name:'1-Day Change',exact:true}).click();
   const bubble = pack.locator('button').first();
+  // Let the Color menu finish closing and restoring scroll before testing hover.
+  await expect(page.getByRole('listbox', {includeHidden:true})).toHaveCount(0);
+  await bubble.scrollIntoViewIfNeeded();
   await bubble.hover();
   await expect(page.getByRole('tooltip')).toContainText('Classification source');
   await bubble.focus();
