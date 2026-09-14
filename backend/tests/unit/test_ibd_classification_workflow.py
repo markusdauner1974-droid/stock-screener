@@ -43,3 +43,13 @@ def test_ibd_workflow_keeps_successful_weekly_reference_trigger():
     trigger = workflow[True]
     assert trigger["workflow_run"]["workflows"] == ["Weekly Reference Data"]
     assert trigger["workflow_run"]["types"] == ["completed"]
+
+
+def test_ibd_workflow_defaults_llm_dispatch_pacing_to_opencode_budget():
+    workflow = _workflow()
+
+    classify_env = workflow["jobs"]["classify"]["env"]
+
+    assert classify_env["IBD_LLM_MIN_INTERVAL_SECONDS"] == (
+        "${{ vars.IBD_LLM_MIN_INTERVAL_SECONDS || '1.5' }}"
+    )

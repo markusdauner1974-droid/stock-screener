@@ -203,8 +203,9 @@ jobs:
       # unset → 30s default in build_ibd_tiebreaker.
       IBD_LLM_TIMEOUT: ${{ vars.IBD_LLM_TIMEOUT }}
       # Minimum delay between provider dispatches. OpenCode Go is shared by all
-      # classifications in this job; pacing avoids burst traffic.
-      IBD_LLM_MIN_INTERVAL_SECONDS: ${{ vars.IBD_LLM_MIN_INTERVAL_SECONDS || '5' }}
+      # classifications in this job; pacing avoids burst traffic while staying
+      # closer to the provider's documented request budget.
+      IBD_LLM_MIN_INTERVAL_SECONDS: ${{ vars.IBD_LLM_MIN_INTERVAL_SECONDS || '1.5' }}
       # Authenticate sentence-transformers' all-MiniLM-L6-v2 download from the HF
       # Hub (higher rate limits, no "unauthenticated requests" warning). Optional:
       # unset → anonymous download still works.
