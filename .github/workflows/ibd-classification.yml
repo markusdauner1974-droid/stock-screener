@@ -71,9 +71,10 @@ on:
 
 concurrency:
   # Keep repeated runs for the same scheduled slot or manual market from
-  # overlapping, without letting one scheduled market cancel another.
+  # overlapping, without letting one scheduled market cancel another or
+  # interrupting an active manual full rebuild.
   group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && github.event.schedule || github.event.inputs.market || 'all' }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.market != 'all' }}
 
 permissions:
   contents: write
@@ -228,10 +229,15 @@ jobs:
     needs: [select_markets, ensure_release, build_crosswalk]
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    concurrency:
+      # Same-market runs publish the same release asset names; queue the later
+      # classify job so manual reruns cannot race scheduled publication.
+      group: ${{ github.workflow }}-classify-${{ matrix.market }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
-      # Every matrix job shares the same OpenCode Go account. Serial execution
-      # guarantees that separate markets never dispatch LLM calls concurrently.
+      # Every matrix job shares the same OpenCode Go account. Keep manual
+      # all-market rebuilds sequential; scheduled markets are staggered above.
       max-parallel: 1
       matrix:
         market: ${{ fromJSON(needs.select_markets.outputs.markets) }}

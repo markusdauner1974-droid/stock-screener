@@ -82,7 +82,21 @@ def test_ibd_concurrency_is_scoped_to_the_selected_market_run():
     assert "github.event.schedule" in group
     assert "github.event.inputs.market" in group
     assert "|| 'all'" in group
-    assert concurrency["cancel-in-progress"] is True
+    assert concurrency["cancel-in-progress"] == (
+        "${{ github.event_name != 'workflow_dispatch' || "
+        "github.event.inputs.market != 'all' }}"
+    )
+
+
+def test_ibd_classify_jobs_serialize_same_market_across_trigger_types():
+    workflow = _workflow()
+
+    classify_concurrency = workflow["jobs"]["classify"]["concurrency"]
+
+    assert classify_concurrency["group"] == (
+        "${{ github.workflow }}-classify-${{ matrix.market }}"
+    )
+    assert classify_concurrency["cancel-in-progress"] is False
 
 
 def test_ibd_workflow_defaults_llm_dispatch_pacing_to_opencode_budget():
