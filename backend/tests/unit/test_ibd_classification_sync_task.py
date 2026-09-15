@@ -220,5 +220,37 @@ def test_task_is_registered_routed_and_scheduled():
         assert "market" in sample["kwargs"]
 
 
+def test_task_syncs_each_market_after_expected_classification_publish_window():
+    """Each live sync runs after its scheduled classifier artifact can publish."""
+    from app.celery_app import celery_app
+    from app.config import settings
+
+    expected = {
+        "US": (0, 6, 30),
+        "JP": (0, 6, 30),
+        "IN": (0, 6, 30),
+        "HK": (0, 6, 30),
+        "KR": (0, 6, 30),
+        "TW": (0, 9, 30),
+        "CN": (0, 12, 30),
+        "CA": (0, 15, 30),
+        "DE": (0, 18, 30),
+        "SG": (0, 21, 30),
+        "AU": (1, 0, 30),
+        "MY": (1, 3, 30),
+    }
+
+    beat = celery_app.conf.beat_schedule or {}
+    for market in settings.enabled_markets_list:
+        entry = beat[f"weekly-ibd-classification-sync-{market.lower()}"]
+        schedule = entry["schedule"]
+
+        assert (
+            schedule._orig_day_of_week,
+            schedule._orig_hour,
+            schedule._orig_minute,
+        ) == expected[market]
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

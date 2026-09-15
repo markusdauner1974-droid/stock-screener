@@ -17,14 +17,14 @@ _SCHEDULED_CRONS = [
     "30 17 * * 6",
     "30 20 * * 6",
     "30 23 * * 6",
-    "30 2 * * 0",
-    "30 5 * * 0",
-    "30 8 * * 0",
-    "30 11 * * 0",
-    "30 14 * * 0",
-    "30 17 * * 0",
-    "30 20 * * 0",
-    "30 23 * * 0",
+    "30 3 * * 0",
+    "30 6 * * 0",
+    "30 9 * * 0",
+    "30 12 * * 0",
+    "30 15 * * 0",
+    "30 18 * * 0",
+    "30 21 * * 0",
+    "30 0 * * 1",
 ]
 
 
@@ -56,6 +56,20 @@ def test_ibd_scheduled_crons_map_to_single_markets_in_order():
 
     for cron, market in zip(_SCHEDULED_CRONS, _SCHEDULED_MARKETS, strict=True):
         assert f'schedule:"{cron}") markets=\'["{market}"]\' ;;' in selector
+
+
+def test_ibd_scheduled_crons_avoid_new_york_dst_transition_hour():
+    workflow = _workflow()
+
+    trigger = workflow[True]
+    sunday_transition_hour_crons = [
+        entry["cron"]
+        for entry in trigger["schedule"]
+        if entry.get("timezone") == "America/New_York"
+        and re.match(r"\S+\s+2\s+\*\s+\*\s+0$", entry["cron"])
+    ]
+
+    assert sunday_transition_hour_crons == []
 
 
 def test_ibd_manual_all_keeps_full_serial_market_matrix():

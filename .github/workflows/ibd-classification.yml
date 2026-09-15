@@ -44,6 +44,8 @@ on:
     # Staggered single-market weekly lane. The first run starts after the
     # Saturday weekly-reference cron (08:10 ET) has had several hours to publish;
     # later runs leave enough room for the 100-min market budget plus setup.
+    # The lane avoids Sunday 02:xx ET so the spring DST transition cannot skip a
+    # market, and the final slots run early Monday before the static-site build.
     - cron: '30 14 * * 6' # US
       timezone: 'America/New_York'
     - cron: '30 17 * * 6' # JP
@@ -52,21 +54,21 @@ on:
       timezone: 'America/New_York'
     - cron: '30 23 * * 6' # HK
       timezone: 'America/New_York'
-    - cron: '30 2 * * 0' # KR
+    - cron: '30 3 * * 0' # KR
       timezone: 'America/New_York'
-    - cron: '30 5 * * 0' # TW
+    - cron: '30 6 * * 0' # TW
       timezone: 'America/New_York'
-    - cron: '30 8 * * 0' # CN
+    - cron: '30 9 * * 0' # CN
       timezone: 'America/New_York'
-    - cron: '30 11 * * 0' # CA
+    - cron: '30 12 * * 0' # CA
       timezone: 'America/New_York'
-    - cron: '30 14 * * 0' # DE
+    - cron: '30 15 * * 0' # DE
       timezone: 'America/New_York'
-    - cron: '30 17 * * 0' # SG
+    - cron: '30 18 * * 0' # SG
       timezone: 'America/New_York'
-    - cron: '30 20 * * 0' # AU
+    - cron: '30 21 * * 0' # AU
       timezone: 'America/New_York'
-    - cron: '30 23 * * 0' # MY
+    - cron: '30 0 * * 1' # MY
       timezone: 'America/New_York'
 
 concurrency:
@@ -101,14 +103,14 @@ jobs:
               schedule:"30 17 * * 6") markets='["JP"]' ;;
               schedule:"30 20 * * 6") markets='["IN"]' ;;
               schedule:"30 23 * * 6") markets='["HK"]' ;;
-              schedule:"30 2 * * 0") markets='["KR"]' ;;
-              schedule:"30 5 * * 0") markets='["TW"]' ;;
-              schedule:"30 8 * * 0") markets='["CN"]' ;;
-              schedule:"30 11 * * 0") markets='["CA"]' ;;
-              schedule:"30 14 * * 0") markets='["DE"]' ;;
-              schedule:"30 17 * * 0") markets='["SG"]' ;;
-              schedule:"30 20 * * 0") markets='["AU"]' ;;
-              schedule:"30 23 * * 0") markets='["MY"]' ;;
+              schedule:"30 3 * * 0") markets='["KR"]' ;;
+              schedule:"30 6 * * 0") markets='["TW"]' ;;
+              schedule:"30 9 * * 0") markets='["CN"]' ;;
+              schedule:"30 12 * * 0") markets='["CA"]' ;;
+              schedule:"30 15 * * 0") markets='["DE"]' ;;
+              schedule:"30 18 * * 0") markets='["SG"]' ;;
+              schedule:"30 21 * * 0") markets='["AU"]' ;;
+              schedule:"30 0 * * 1") markets='["MY"]' ;;
               *)
                 echo "Unknown IBD classification schedule: $SCHEDULE" >&2
                 exit 1
