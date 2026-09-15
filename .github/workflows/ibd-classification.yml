@@ -5,14 +5,11 @@ name: IBD Classification
 # cascade (crosswalk → local embedding → optional LLM tiebreaker). Publishes an
 # `ibd-classification-data` release artifact the daily static-site build consumes.
 #
-# Runs after "Weekly Reference Data" publishes (so the universe is fresh), and is
-# also manually dispatchable / scheduled as a fallback.
+# Runs on a staggered weekly schedule after "Weekly Reference Data" has had time
+# to publish, and is also manually dispatchable for one market or a full serial
+# rebuild.
 
 on:
-  workflow_run:
-    workflows: ["Weekly Reference Data"]
-    types:
-      - completed
   workflow_dispatch:
     inputs:
       market:
@@ -44,25 +41,91 @@ on:
           - enforce
           - off
   schedule:
-    # Fallback ~3h after the Saturday weekly-reference cron (08:10 ET) in case
-    # the workflow_run trigger is missed.
-    - cron: '10 11 * * 6'
+    # Staggered single-market weekly lane. The first run starts after the
+    # Saturday weekly-reference cron (08:10 ET) has had several hours to publish;
+    # later runs leave enough room for the 100-min market budget plus setup.
+    # The lane avoids Sunday 02:xx ET so the spring DST transition cannot skip a
+    # market, and the final slots run early Monday before the static-site build.
+    - cron: '30 14 * * 6' # US
+      timezone: 'America/New_York'
+    - cron: '30 17 * * 6' # JP
+      timezone: 'America/New_York'
+    - cron: '30 20 * * 6' # IN
+      timezone: 'America/New_York'
+    - cron: '30 23 * * 6' # HK
+      timezone: 'America/New_York'
+    - cron: '30 3 * * 0' # KR
+      timezone: 'America/New_York'
+    - cron: '30 6 * * 0' # TW
+      timezone: 'America/New_York'
+    - cron: '30 9 * * 0' # CN
+      timezone: 'America/New_York'
+    - cron: '30 12 * * 0' # CA
+      timezone: 'America/New_York'
+    - cron: '30 15 * * 0' # DE
+      timezone: 'America/New_York'
+    - cron: '30 18 * * 0' # SG
+      timezone: 'America/New_York'
+    - cron: '30 21 * * 0' # AU
+      timezone: 'America/New_York'
+    - cron: '30 0 * * 1' # MY
       timezone: 'America/New_York'
 
 concurrency:
-  # Failed upstream workflow_run events still instantiate this workflow before
-  # job-level if guards skip it. Keep those no-op runs out of the active lane so
-  # they cannot cancel a scheduled fallback already classifying markets.
-  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'success' && format('noop-{0}', github.run_id) || 'active' }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
+  # Keep repeated runs for the same scheduled slot or manual market from
+  # overlapping, without letting one scheduled market cancel another or
+  # interrupting an active manual full rebuild.
+  group: ${{ github.workflow }}-${{ github.event_name == 'schedule' && github.event.schedule || github.event.inputs.market || 'all' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.market != 'all' }}
 
 permissions:
   contents: write
 
 jobs:
+  select_markets:
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    runs-on: ubuntu-latest
+    outputs:
+      markets: ${{ steps.pick.outputs.markets }}
+    steps:
+      - id: pick
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          MARKET: ${{ github.event.inputs.market || 'all' }}
+        run: |
+          ALL_MARKETS='["US","HK","IN","JP","KR","TW","CN","CA","DE","SG","AU","MY"]'
+          markets="$ALL_MARKETS"
+
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            case "$EVENT_NAME:$SCHEDULE" in
+              schedule:"30 14 * * 6") markets='["US"]' ;;
+              schedule:"30 17 * * 6") markets='["JP"]' ;;
+              schedule:"30 20 * * 6") markets='["IN"]' ;;
+              schedule:"30 23 * * 6") markets='["HK"]' ;;
+              schedule:"30 3 * * 0") markets='["KR"]' ;;
+              schedule:"30 6 * * 0") markets='["TW"]' ;;
+              schedule:"30 9 * * 0") markets='["CN"]' ;;
+              schedule:"30 12 * * 0") markets='["CA"]' ;;
+              schedule:"30 15 * * 0") markets='["DE"]' ;;
+              schedule:"30 18 * * 0") markets='["SG"]' ;;
+              schedule:"30 21 * * 0") markets='["AU"]' ;;
+              schedule:"30 0 * * 1") markets='["MY"]' ;;
+              *)
+                echo "Unknown IBD classification schedule: $SCHEDULE" >&2
+                exit 1
+                ;;
+            esac
+          elif [ -n "$MARKET" ] && [ "$MARKET" != "all" ]; then
+            markets="[\"$MARKET\"]"
+          fi
+
+          echo "markets=$markets" >> "$GITHUB_OUTPUT"
+          echo "Selected IBD markets: $markets"
+
   ensure_release:
-    # On workflow_run, only proceed when the upstream build succeeded.
-    if: ${{ (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    needs: select_markets
     runs-on: ubuntu-latest
     steps:
       - name: Ensure IBD classification release exists
@@ -82,7 +145,7 @@ jobs:
   # bundle is unavailable, no artifact is produced and classify degrades to
   # embedding+LLM.
   build_crosswalk:
-    if: ${{ (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     needs: ensure_release
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -164,19 +227,22 @@ jobs:
           if-no-files-found: warn
 
   classify:
-    if: ${{ (github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success') && github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
-    needs: [ensure_release, build_crosswalk]
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+    needs: [select_markets, ensure_release, build_crosswalk]
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    concurrency:
+      # Same-market runs publish the same release asset names; queue the later
+      # classify job so manual reruns cannot race scheduled publication.
+      group: ${{ github.workflow }}-classify-${{ matrix.market }}
+      cancel-in-progress: false
     strategy:
       fail-fast: false
-      # Every matrix job shares the same OpenCode Go account. Serial execution
-      # guarantees that separate markets never dispatch LLM calls concurrently.
+      # Every matrix job shares the same OpenCode Go account. Keep manual
+      # all-market rebuilds sequential; scheduled markets are staggered above.
       max-parallel: 1
       matrix:
-        # Specific market on dispatch, full matrix otherwise (inputs are null on
-        # workflow_run / schedule, so coerce to 'all').
-        market: ${{ fromJSON((github.event.inputs.market || 'all') != 'all' && format('["{0}"]', github.event.inputs.market) || '["US","HK","IN","JP","KR","TW","CN","CA","DE","SG","AU","MY"]') }}
+        market: ${{ fromJSON(needs.select_markets.outputs.markets) }}
     services:
       postgres:
         image: postgres:16-alpine
@@ -203,8 +269,9 @@ jobs:
       # unset → 30s default in build_ibd_tiebreaker.
       IBD_LLM_TIMEOUT: ${{ vars.IBD_LLM_TIMEOUT }}
       # Minimum delay between provider dispatches. OpenCode Go is shared by all
-      # classifications in this job; pacing avoids burst traffic.
-      IBD_LLM_MIN_INTERVAL_SECONDS: ${{ vars.IBD_LLM_MIN_INTERVAL_SECONDS || '5' }}
+      # classifications in this job; pacing avoids burst traffic while staying
+      # closer to the provider's documented request budget.
+      IBD_LLM_MIN_INTERVAL_SECONDS: ${{ vars.IBD_LLM_MIN_INTERVAL_SECONDS || '1.5' }}
       # Authenticate sentence-transformers' all-MiniLM-L6-v2 download from the HF
       # Hub (higher rate limits, no "unauthenticated requests" warning). Optional:
       # unset → anonymous download still works.

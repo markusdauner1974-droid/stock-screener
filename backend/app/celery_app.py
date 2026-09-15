@@ -6,6 +6,7 @@ Handles async bulk scanning of stocks and cache warming.
 import logging
 import os
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 # Disable MPS/Metal before any PyTorch imports to avoid fork() issues on macOS
 # Must be set at the very start before any libraries that use PyTorch are imported
@@ -31,6 +32,37 @@ def _offset_schedule(hour: int, minute: int, offset_minutes: int) -> tuple[int, 
 
 def _social_refresh_hour_expression(interval_hours: int) -> str:
     return ",".join(str(hour) for hour in range(0, 24, interval_hours))
+
+
+_IBD_CLASSIFICATION_SYNC_SCHEDULES_ET: dict[str, tuple[int, int, int]] = {
+    # day_of_week, hour, minute in America/New_York. The crontabs below use a
+    # fixed ET schedule context so these remain aligned with the GitHub
+    # classifier slots even when CELERY_TIMEZONE is configured differently.
+    "US": (0, 6, 30),
+    "JP": (0, 6, 30),
+    "IN": (0, 6, 30),
+    "HK": (0, 6, 30),
+    "KR": (0, 6, 30),
+    "TW": (0, 9, 30),
+    "CN": (0, 12, 30),
+    "CA": (0, 15, 30),
+    "DE": (0, 18, 30),
+    "SG": (0, 21, 30),
+    "AU": (1, 0, 30),
+    "MY": (1, 3, 30),
+}
+
+
+def _ibd_classification_sync_schedule_for_market(market: str) -> tuple[int, int, int]:
+    """Return the ET live-sync schedule tuple for a supported market."""
+    normalized = market.strip().upper()
+    try:
+        return _IBD_CLASSIFICATION_SYNC_SCHEDULES_ET[normalized]
+    except KeyError as exc:
+        raise ValueError(
+            f"No weekly IBD classification sync schedule for {normalized}"
+        ) from exc
+
 
 # Import scanners to trigger registration
 # This ensures all screeners are registered with the registry before tasks run
@@ -97,6 +129,25 @@ celery_app.conf.update(
 
 _logger = logging.getLogger(__name__)
 _STARTUP_STALE_HEARTBEAT_SECONDS = 30 * 60
+_IBD_CLASSIFICATION_SYNC_ZONE = ZoneInfo("America/New_York")
+
+
+class _FixedTimezoneScheduleApp:
+    """Minimal app context for crontabs that must run in a fixed timezone."""
+
+    timezone = _IBD_CLASSIFICATION_SYNC_ZONE
+
+    @property
+    def conf(self):
+        """Reuse the main Celery config for UTC and cron-deadline settings."""
+        return celery_app.conf
+
+    def now(self) -> datetime:
+        """Return current time in the fixed timezone for schedule evaluation."""
+        return datetime.now(self.timezone)
+
+
+_IBD_CLASSIFICATION_SYNC_SCHEDULE_APP = _FixedTimezoneScheduleApp()
 
 
 def _ensure_worker_runtime_services(*, force_rebuild: bool = False):
@@ -414,15 +465,24 @@ def _build_cache_warmup_beat_schedule(enabled_markets: list[str]) -> dict:
             'kwargs': {'market': _market},
         }
 
+        _ibd_sync_day, _ibd_sync_hour, _ibd_sync_minute = (
+            _ibd_classification_sync_schedule_for_market(_market)
+        )
+
         # Weekly IBD classification sync from the published GitHub bundle.
-        # Sunday 6 AM ET — after the Saturday GitHub classifier publishes and
-        # after the Sunday 3 AM universe refresh. Non-US markets get the IBD
-        # coverage they otherwise lack on the live site.
-        # ponytail: fixed Sun 6am, no new config knob — the task no-ops for
-        # live_only deployments and swallows GitHub outages.
+        # Each market imports after its staggered GitHub classifier slot has
+        # enough room to publish. Non-US markets get the IBD coverage they
+        # otherwise lack on the live site.
+        # ponytail: fixed schedule table, no new config knob — the task no-ops
+        # for live_only deployments and swallows GitHub outages.
         beat_schedule[f'weekly-ibd-classification-sync-{_m_lower}'] = {
             'task': 'app.tasks.industry_tasks.sync_ibd_classification',
-            'schedule': crontab(hour=6, minute=0, day_of_week=0),
+            'schedule': crontab(
+                hour=_ibd_sync_hour,
+                minute=_ibd_sync_minute,
+                day_of_week=_ibd_sync_day,
+                app=_IBD_CLASSIFICATION_SYNC_SCHEDULE_APP,
+            ),
             'options': {'queue': market_jobs_queue_for_market(_market)},
             'kwargs': {'market': _market},
         }
