@@ -6,6 +6,7 @@ Handles async bulk scanning of stocks and cache warming.
 import logging
 import os
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 # Disable MPS/Metal before any PyTorch imports to avoid fork() issues on macOS
 # Must be set at the very start before any libraries that use PyTorch are imported
@@ -34,9 +35,9 @@ def _social_refresh_hour_expression(interval_hours: int) -> str:
 
 
 _IBD_CLASSIFICATION_SYNC_SCHEDULES_ET: dict[str, tuple[int, int, int]] = {
-    # day_of_week, hour, minute in settings.celery_timezone (America/New_York by
-    # default). These follow the staggered GitHub classifier slots with enough
-    # room for its 30-min crosswalk prep and 120-min classify job cap.
+    # day_of_week, hour, minute in America/New_York. The crontabs below use a
+    # fixed ET schedule context so these remain aligned with the GitHub
+    # classifier slots even when CELERY_TIMEZONE is configured differently.
     "US": (0, 6, 30),
     "JP": (0, 6, 30),
     "IN": (0, 6, 30),
@@ -53,6 +54,7 @@ _IBD_CLASSIFICATION_SYNC_SCHEDULES_ET: dict[str, tuple[int, int, int]] = {
 
 
 def _ibd_classification_sync_schedule_for_market(market: str) -> tuple[int, int, int]:
+    """Return the ET live-sync schedule tuple for a supported market."""
     normalized = market.strip().upper()
     try:
         return _IBD_CLASSIFICATION_SYNC_SCHEDULES_ET[normalized]
@@ -127,6 +129,25 @@ celery_app.conf.update(
 
 _logger = logging.getLogger(__name__)
 _STARTUP_STALE_HEARTBEAT_SECONDS = 30 * 60
+_IBD_CLASSIFICATION_SYNC_ZONE = ZoneInfo("America/New_York")
+
+
+class _FixedTimezoneScheduleApp:
+    """Minimal app context for crontabs that must run in a fixed timezone."""
+
+    timezone = _IBD_CLASSIFICATION_SYNC_ZONE
+
+    @property
+    def conf(self):
+        """Reuse the main Celery config for UTC and cron-deadline settings."""
+        return celery_app.conf
+
+    def now(self) -> datetime:
+        """Return current time in the fixed timezone for schedule evaluation."""
+        return datetime.now(self.timezone)
+
+
+_IBD_CLASSIFICATION_SYNC_SCHEDULE_APP = _FixedTimezoneScheduleApp()
 
 
 def _ensure_worker_runtime_services(*, force_rebuild: bool = False):
@@ -460,6 +481,7 @@ def _build_cache_warmup_beat_schedule(enabled_markets: list[str]) -> dict:
                 hour=_ibd_sync_hour,
                 minute=_ibd_sync_minute,
                 day_of_week=_ibd_sync_day,
+                app=_IBD_CLASSIFICATION_SYNC_SCHEDULE_APP,
             ),
             'options': {'queue': market_jobs_queue_for_market(_market)},
             'kwargs': {'market': _market},

@@ -252,5 +252,17 @@ def test_task_syncs_each_market_after_expected_classification_publish_window():
         ) == expected[market]
 
 
+def test_task_sync_schedule_uses_new_york_time_independent_of_celery_default():
+    """IBD sync crontabs stay aligned to the GitHub ET classifier schedule."""
+    from app.celery_app import _build_cache_warmup_beat_schedule, celery_app
+
+    beat = _build_cache_warmup_beat_schedule(["KR"])
+    schedule = beat["weekly-ibd-classification-sync-kr"]["schedule"]
+
+    assert schedule._orig_kwargs.get("app") is not None
+    assert schedule.app is not celery_app
+    assert str(schedule.tz) == "America/New_York"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
