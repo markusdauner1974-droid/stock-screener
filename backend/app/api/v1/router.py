@@ -52,6 +52,7 @@ _include(
     tags=["options-analytics"],
 )
 _include("social_signals", prefix="/social-signals", tags=["social-signals"])
+_include("cot", prefix="/cot", tags=["cot"])
 
 _include("cache", tags=["cache"])
 _include("fundamentals", tags=["fundamentals"])
