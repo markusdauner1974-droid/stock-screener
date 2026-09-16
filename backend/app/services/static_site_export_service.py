@@ -51,6 +51,7 @@ from app.services.static_chart_bundle_exporter import (
     StaticChartBundleConfig,
     StaticChartBundleExporter,
 )
+from app.services.static_cot_section import StaticCotSection
 from app.services.static_group_section_builder import StaticGroupSectionBuilder
 from app.services.static_groups_rrg_export import (
     StaticGroupsRRGDatabasePayloadSource,
@@ -148,6 +149,7 @@ class StaticSiteExportService:
         breadth_engine_input_factory: StaticBreadthEngineInputFactory | None = None,
         breadth_contributor_exporter: StaticBreadthContributorExporter | None = None,
         options_section: StaticOptionsSection | None = None,
+        cot_section: StaticCotSection | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._rrg_payload_source = (
@@ -201,6 +203,7 @@ class StaticSiteExportService:
         self._options_section = options_section or StaticOptionsSection(
             json_writer=self._write_json,
         )
+        self._cot_section = cot_section or StaticCotSection()
 
     def export(
         self,
@@ -218,6 +221,7 @@ class StaticSiteExportService:
             datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         )
         warnings: list[str] = []
+        global_assets: dict[str, Any] = {}
 
         if clean and output_dir.exists():
             shutil.rmtree(output_dir)
@@ -296,10 +300,20 @@ class StaticSiteExportService:
                         warnings=warnings,
                     )
 
+            cot_result = self._cot_section.compose_live(
+                db=db,
+                output_dir=output_dir,
+                generated_at=generated_at,
+                fallback_cot_dir=None,
+                global_assets=global_assets,
+            )
+            warnings.extend(cot_result.warnings)
+
         manifest = self._build_manifest(
             market_entries=market_entries,
             generated_at=generated_at,
             warnings=warnings,
+            global_assets=global_assets,
         )
         if write_manifest:
             self._write_json(output_dir / "manifest.json", manifest)
@@ -674,6 +688,7 @@ class StaticSiteExportService:
         market_entries: dict[str, dict[str, Any]],
         generated_at: str,
         warnings: list[str],
+        global_assets: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         return build_static_site_manifest(
             market_entries=market_entries,
@@ -681,6 +696,7 @@ class StaticSiteExportService:
             warnings=warnings,
             supported_markets=STATIC_SUPPORTED_MARKETS,
             default_market=STATIC_DEFAULT_MARKET,
+            global_assets=global_assets,
         )
 
     def _build_groups_rrg_payload(

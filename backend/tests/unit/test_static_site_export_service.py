@@ -2393,6 +2393,27 @@ def test_build_manifest_orders_india_between_hk_and_jp():
     assert list(manifest["markets"]) == ["US", "HK", "IN"]
 
 
+def test_build_manifest_adds_global_assets_only_at_root():
+    entry = {
+        "market": "US",
+        "display_name": "United States",
+        "as_of_date": "2026-09-15",
+        "features": {"scan": True},
+        "pages": {"scan": {"path": "markets/us/scan/manifest.json"}},
+        "assets": {"charts": {"path": "markets/us/charts/index.json"}},
+    }
+
+    manifest = StaticSiteExportService._build_manifest(
+        market_entries={"US": entry},
+        generated_at="2026-09-16T09:00:00Z",
+        warnings=[],
+        global_assets={"cot": {"path": "cot/index.json"}},
+    )
+
+    assert manifest["assets"]["cot"] == {"path": "cot/index.json"}
+    assert "cot" not in manifest["markets"]["US"]["assets"]
+
+
 def test_export_marks_optional_sections_unavailable_without_aborting(
     service_and_session_factory,
     monkeypatch,
