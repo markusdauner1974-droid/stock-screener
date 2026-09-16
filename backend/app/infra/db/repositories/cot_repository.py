@@ -87,7 +87,7 @@ class SqlCotRepository:
         if not derived_weeks:
             raise ValueError("cannot publish empty COT history")
 
-        with self._session.begin():
+        try:
             run = self._require_run(run_id)
             if run.status != "staged":
                 raise ValueError(f"COT run {run_id} is not staged")
@@ -119,6 +119,10 @@ class SqlCotRepository:
             else:
                 pointer.run_id = run_id
                 pointer.report_date = report_date
+            self._session.commit()
+        except Exception:
+            self._session.rollback()
+            raise
 
     def mark_no_change(
         self,

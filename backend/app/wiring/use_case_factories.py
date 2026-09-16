@@ -219,6 +219,20 @@ def get_options_analytics_queries(session: Session):
     )
 
 
+def get_refresh_cot_use_case(session: Session):
+    from app.infra.db.repositories.cot_repository import SqlCotRepository
+    from app.infra.providers.cftc_cot import CftcCotSource
+    from app.services.cot_price_hydrator import CotPriceHydrator
+    from app.use_cases.cot.refresh import RefreshCotUseCase
+
+    runtime = resolve_runtime_services()
+    return RefreshCotUseCase(
+        source=CftcCotSource(),
+        repository=SqlCotRepository(session),
+        price_hydrator=CotPriceHydrator(runtime.cache_bundle().price),
+    )
+
+
 def _social_provider_factories(sessions, *, official_client=None, cooldown_gate=None):
     import httpx
     from app.config import settings
