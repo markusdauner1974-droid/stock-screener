@@ -7,8 +7,6 @@ from datetime import date, datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
-
 from app.domain.cot.calculations import align_prices_to_report_dates
 from app.domain.cot.models import PriceCoverageState
 from app.domain.cot.registry import (
@@ -17,9 +15,6 @@ from app.domain.cot.registry import (
     PARTICIPANT_LABELS,
     instrument_by_slug,
 )
-from app.models.stock import StockPrice
-
-
 RANGE_WEEKS = {"1y": 52, "3y": 156, "5y": 260}
 _NEW_YORK = ZoneInfo("America/New_York")
 
@@ -146,22 +141,6 @@ class CotSnapshotRowView:
 class CotSnapshotView:
     publication: CotPublicationView
     rows: tuple[CotSnapshotRowView, ...]
-
-
-class SqlCotPriceReader:
-    def __init__(self, session) -> None:
-        self._session = session
-
-    def closes(self, symbol: str, *, start: date, end: date) -> Mapping[date, float]:
-        rows = self._session.execute(
-            select(StockPrice.date, StockPrice.close).where(
-                StockPrice.symbol == symbol,
-                StockPrice.date >= start,
-                StockPrice.date <= end,
-                StockPrice.close.is_not(None),
-            )
-        ).all()
-        return {price_date: float(close) for price_date, close in rows}
 
 
 class CotQueryService:

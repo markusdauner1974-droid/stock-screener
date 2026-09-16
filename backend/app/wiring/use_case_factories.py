@@ -237,7 +237,8 @@ def get_refresh_cot_use_case(session: Session):
 
 def get_cot_queries(session: Session):
     from app.infra.db.repositories.cot_repository import SqlCotRepository
-    from app.use_cases.cot.queries import CotQueryService, SqlCotPriceReader
+    from app.infra.query.cot_prices import SqlCotPriceReader
+    from app.use_cases.cot.queries import CotQueryService
 
     return CotQueryService(SqlCotRepository(session), SqlCotPriceReader(session))
 

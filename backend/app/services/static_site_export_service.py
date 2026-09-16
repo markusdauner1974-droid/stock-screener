@@ -56,8 +56,8 @@ from app.services.static_group_section_builder import StaticGroupSectionBuilder
 from app.services.static_groups_rrg_export import (
     StaticGroupsRRGDatabasePayloadSource,
     StaticGroupsRRGPayloadSource,
-    StaticGroupsRRGUnavailableError,
 )
+from app.services.static_groups_rrg_section import build_static_groups_rrg_section
 from app.services.static_market_artifact_contract import (
     STATIC_MARKET_METADATA_FILENAME,
     STATIC_SITE_SCHEMA_VERSION,
@@ -724,33 +724,14 @@ class StaticSiteExportService:
         market: str,
         formula_version: str,
     ) -> dict[str, Any]:
-        """Pre-compute the Relative Rotation Graph payload for the static bundle.
-
-        There is no live API in static mode, so RRG coordinates are baked here
-        using the SAME pure math as the live endpoint (``RRGService`` ->
-        ``compute_group_rrg``), emitting the same ``{date, market, scope,
-        groups[]}`` shape the shared ``RRGChart`` consumes. Both scopes
-        (groups + sectors) are stored so the static page's toggle works offline.
-
-        RRG tails want ~30 weekly points (~7 months) of
-        ``avg_rs_rating`` history — when the exported DB is shallower, the math
-        flags ``is_provisional`` / omits thin groups rather than fabricating.
-        If a lightweight export database lacks the RRG source tables entirely,
-        this optional section is reported unavailable without aborting export.
-        """
-        try:
-            return self._rrg_payload_source.build(
-                db=db,
-                generated_at=generated_at,
-                expected_as_of_date=expected_as_of_date,
-                market=market,
-                formula_version=formula_version,
-            )
-        except StaticGroupsRRGUnavailableError as exc:
-            raise StaticSiteSectionUnavailableError(
-                section=exc.section,
-                reason=exc.reason,
-            ) from exc
+        return build_static_groups_rrg_section(
+            self._rrg_payload_source,
+            db=db,
+            generated_at=generated_at,
+            expected_as_of_date=expected_as_of_date,
+            market=market,
+            formula_version=formula_version,
+        )
 
     def _build_optional_section_payload(
         self,
@@ -989,10 +970,6 @@ class StaticSiteExportService:
         return self._scan_bundle_exporter.serialize_scan_row(row)
 
     @staticmethod
-    def _annotate_percentile_ranks(rows: list[dict[str, Any]]) -> None:
-        StaticScanBundleExporter.annotate_percentile_ranks(rows)
-
-    @staticmethod
     def resolve_static_default_filters(
         market: str | None,
     ) -> dict[str, int | None]:
@@ -1008,12 +985,6 @@ class StaticSiteExportService:
             rows,
             default_filters=default_filters,
         )
-
-    @staticmethod
-    def _sort_static_scan_rows(
-        rows: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        return StaticScanBundleExporter.sort_static_scan_rows(rows)
 
     @staticmethod
     def _write_json(path: Path, payload: dict[str, Any]) -> None:
