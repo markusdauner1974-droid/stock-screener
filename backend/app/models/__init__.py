@@ -60,6 +60,12 @@ from app.infra.db.models.options_analytics import (
     OptionsAnalyticsRunItem,
     OptionsAnalyticsStrikePoint,
 )
+from app.infra.db.models.cot import (
+    CotImportRun,
+    CotInstrument,
+    CotPublicationPointer,
+    CotWeeklyPosition,
+)
 
 from app.infra.db.models.social_analysis import SocialExtractionWork, SocialRunWork, SocialLLMBudgetDay, SocialLLMAttempt
 from app.infra.db.models.social_signals import (
@@ -170,4 +176,8 @@ __all__ = [
     "OptionsAnalyticsRunItem",
     "OptionsAnalyticsStrikePoint",
     "OptionsAnalyticsPointer",
+    "CotInstrument",
+    "CotWeeklyPosition",
+    "CotImportRun",
+    "CotPublicationPointer",
 ]

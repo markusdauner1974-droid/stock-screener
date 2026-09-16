@@ -2,11 +2,33 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from types import MappingProxyType
 from typing import Any, Protocol
 
-from app.domain.cot.models import CotInstrumentDefinition, NormalizedCotWeek
+from app.domain.cot.models import (
+    COT_CALCULATION_VERSION,
+    COT_REGISTRY_VERSION,
+    COT_SCHEMA_VERSION,
+    CotInstrumentDefinition,
+    NormalizedCotWeek,
+)
+
+
+@dataclass(frozen=True)
+class CotRunRequest:
+    origin: str
+    expected_instrument_count: int
+    requested_report_date: date | None = None
+    registry_version: str = COT_REGISTRY_VERSION
+    calculation_version: str = COT_CALCULATION_VERSION
+    schema_version: str = COT_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        if not self.origin.strip():
+            raise ValueError("origin must be non-empty")
+        if self.expected_instrument_count < 0:
+            raise ValueError("expected instrument count must be nonnegative")
 
 
 @dataclass(frozen=True)

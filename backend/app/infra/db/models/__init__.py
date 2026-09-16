@@ -17,6 +17,7 @@ from .options_analytics import (
     OptionsAnalyticsRunItem,
     OptionsAnalyticsStrikePoint,
 )
+from .cot import CotImportRun, CotInstrument, CotPublicationPointer, CotWeeklyPosition
 
 __all__ = [
     "SocialExtractionWork", "SocialRunWork", "SocialLLMBudgetDay", "SocialLLMAttempt",
@@ -31,4 +32,8 @@ __all__ = [
     "OptionsAnalyticsRunItem",
     "OptionsAnalyticsStrikePoint",
     "OptionsAnalyticsPointer",
+    "CotInstrument",
+    "CotWeeklyPosition",
+    "CotImportRun",
+    "CotPublicationPointer",
 ]
