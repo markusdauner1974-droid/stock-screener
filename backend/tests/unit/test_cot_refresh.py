@@ -60,6 +60,14 @@ class FakeSource:
             for definition in COT_INSTRUMENTS
             for index in range(157)
         )
+        self.expected_counts = self._counts(self.weeks)
+
+    @staticmethod
+    def _counts(weeks):
+        counts = {}
+        for week in weeks:
+            counts[week.source_dataset_id] = counts.get(week.source_dataset_id, 0) + 1
+        return counts
 
     def fetch(self, _instruments):
         return CotSourceSnapshot(
@@ -67,7 +75,8 @@ class FakeSource:
             metadata=CotSourceMetadata(
                 retrieved_at=datetime(2026, 9, 16, tzinfo=timezone.utc),
                 retry_count=0,
-                dataset_row_counts={"72hh-3qpy": 170, "gpe5-46if": 17},
+                dataset_row_counts=self._counts(self.weeks),
+                expected_dataset_row_counts=self.expected_counts,
             ),
         )
 
@@ -188,6 +197,7 @@ def test_refresh_rejects_a_truncated_first_backfill():
 
     assert result.status == "failed_quality"
     assert "insufficient_initial_history" in result.reason_codes
+    assert "source_row_count_mismatch" in result.reason_codes
     assert repository.published_run_id is None
 
 

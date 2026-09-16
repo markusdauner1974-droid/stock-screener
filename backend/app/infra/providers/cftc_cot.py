@@ -139,6 +139,7 @@ class CftcCotSource:
 
         weeks: list[NormalizedCotWeek] = []
         row_counts: dict[str, int] = {}
+        expected_row_counts: dict[str, int] = {}
         retry_count = 0
         for family in ReportFamily:
             family_instruments = by_family.get(family, [])
@@ -150,8 +151,13 @@ class CftcCotSource:
                 family,
                 family_instruments,
             )
-            retry_count += family_retries
+            expected_count, count_retries = self._request_count(
+                dataset_id,
+                family_instruments,
+            )
+            retry_count += family_retries + count_retries
             row_counts[dataset_id] = len(rows)
+            expected_row_counts[dataset_id] = expected_count
             instruments_by_code = {
                 definition.cftc_code: definition for definition in family_instruments
             }
@@ -173,6 +179,7 @@ class CftcCotSource:
                 retrieved_at=self._now(),
                 retry_count=retry_count,
                 dataset_row_counts=row_counts,
+                expected_dataset_row_counts=expected_row_counts,
             ),
         )
 
@@ -247,6 +254,53 @@ class CftcCotSource:
             ):
                 raise CftcCotSchemaError("CFTC response must be a list of rows")
             return payload, retries
+        raise AssertionError("unreachable")
+
+    def _request_count(
+        self,
+        dataset_id: str,
+        instruments: Sequence[CotInstrumentDefinition],
+    ) -> tuple[int, int]:
+        params = {
+            "$select": "count(*) as count",
+            "$where": self._where_clause(instruments),
+        }
+        retries = 0
+        for attempt in range(4):
+            try:
+                response = self._client.get(f"/resource/{dataset_id}.json", params=params)
+            except httpx.TimeoutException as exc:
+                if attempt == 3:
+                    raise CftcCotError("CFTC count request timed out after retries") from exc
+                retries += 1
+                self._sleep(min(2.0**attempt, 60.0))
+                continue
+
+            if response.status_code in _TRANSIENT_STATUSES:
+                if attempt == 3:
+                    raise CftcCotError(
+                        f"CFTC count request failed after retries: {response.status_code}"
+                    )
+                retries += 1
+                self._sleep(self._retry_delay(response, attempt))
+                continue
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise CftcCotError(
+                    f"CFTC count request failed: {response.status_code}"
+                ) from exc
+            try:
+                payload = response.json()
+                value = payload[0]["count"]
+                count = int(value)
+            except (ValueError, TypeError, KeyError, IndexError) as exc:
+                raise CftcCotSchemaError(
+                    "CFTC count response was outside the expected schema"
+                ) from exc
+            if count < 0:
+                raise CftcCotSchemaError("CFTC count response cannot be negative")
+            return count, retries
         raise AssertionError("unreachable")
 
     @staticmethod

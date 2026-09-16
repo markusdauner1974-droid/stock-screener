@@ -34,10 +34,15 @@ def source_with_rows(
             requests.append(request)
         status = statuses[min(calls, len(statuses) - 1)]
         calls += 1
+        payload = (
+            [{"count": str(len(rows))}]
+            if request.url.params.get("$select") == "count(*) as count"
+            else rows
+        )
         return httpx.Response(
             status,
             headers={"Retry-After": "120"} if status == 503 else None,
-            json=rows if status == 200 else {"error": "temporary"},
+            json=payload if status == 200 else {"error": "temporary"},
         )
 
     client = httpx.Client(
@@ -88,6 +93,8 @@ def test_source_paginates_until_a_short_page():
     requested_offsets: list[int] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("$select") == "count(*) as count":
+            return httpx.Response(200, json=[{"count": "5"}])
         offset = int(request.url.params["$offset"])
         requested_offsets.append(offset)
         length = {0: 2, 2: 2, 4: 1}[offset]
@@ -123,6 +130,23 @@ def test_full_history_query_has_no_report_date_cutoff():
     where = requests[0].url.params["$where"]
     assert "report_date_as_yyyy_mm_dd" not in where
     assert "futonly_or_combined = 'FutOnly'" in where
+
+
+def test_source_records_authoritative_count_for_the_exact_curated_query():
+    requests: list[httpx.Request] = []
+    source = source_with_rows(
+        load_fixture("cot/disaggregated_wheat.json"), requests=requests
+    )
+
+    result = source.fetch((instrument_by_slug("wheat-srw"),))
+
+    count_request = next(
+        request
+        for request in requests
+        if request.url.params.get("$select") == "count(*) as count"
+    )
+    assert result.metadata.expected_dataset_row_counts == {"72hh-3qpy": 1}
+    assert count_request.url.params["$where"] == requests[0].url.params["$where"]
 
 
 def test_source_retries_transient_responses_and_records_retry_count():

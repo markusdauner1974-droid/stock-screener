@@ -36,6 +36,7 @@ class CotSourceMetadata:
     retrieved_at: datetime
     retry_count: int
     dataset_row_counts: Mapping[str, int]
+    expected_dataset_row_counts: Mapping[str, int]
 
     def __post_init__(self) -> None:
         if self.retrieved_at.tzinfo is None:
@@ -44,10 +45,17 @@ class CotSourceMetadata:
             raise ValueError("retry_count must be nonnegative")
         if any(count < 0 for count in self.dataset_row_counts.values()):
             raise ValueError("dataset row counts must be nonnegative")
+        if any(count < 0 for count in self.expected_dataset_row_counts.values()):
+            raise ValueError("expected dataset row counts must be nonnegative")
         object.__setattr__(
             self,
             "dataset_row_counts",
             MappingProxyType(dict(self.dataset_row_counts)),
+        )
+        object.__setattr__(
+            self,
+            "expected_dataset_row_counts",
+            MappingProxyType(dict(self.expected_dataset_row_counts)),
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -55,6 +63,9 @@ class CotSourceMetadata:
             "retrieved_at": self.retrieved_at.isoformat(),
             "retry_count": self.retry_count,
             "dataset_row_counts": dict(self.dataset_row_counts),
+            "expected_dataset_row_counts": dict(
+                self.expected_dataset_row_counts
+            ),
         }
 
 

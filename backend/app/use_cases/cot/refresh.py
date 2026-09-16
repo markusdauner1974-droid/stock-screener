@@ -73,6 +73,7 @@ class RefreshCotUseCase:
                 raw_weeks,
                 COT_INSTRUMENTS,
                 self._repository.existing_week_keys(),
+                source_snapshot.metadata.expected_dataset_row_counts,
             )
             if not validation.valid:
                 self._repository.mark_failed(

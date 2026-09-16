@@ -55,6 +55,7 @@ def validate_cot_snapshot(
     weeks: Sequence[NormalizedCotWeek],
     instruments: Sequence[CotInstrumentDefinition],
     existing_keys: Iterable[tuple[str, date]],
+    expected_dataset_row_counts: Mapping[str, int],
 ) -> CotValidationResult:
     snapshot = tuple(weeks)
     definitions = tuple(instruments)
@@ -143,6 +144,21 @@ def validate_cot_snapshot(
 
     if not persisted_keys.issubset(observed_keys):
         reject("source_history_truncated")
+
+    expected_dataset_ids = {
+        EXPECTED_DATASET_BY_FAMILY[definition.report_family]
+        for definition in definitions
+    }
+    if set(expected_dataset_row_counts) != expected_dataset_ids:
+        reject("source_coverage_baseline_mismatch")
+    observed_dataset_row_counts: dict[str, int] = defaultdict(int)
+    for week in snapshot:
+        observed_dataset_row_counts[week.source_dataset_id] += 1
+    if any(
+        observed_dataset_row_counts[dataset_id] != expected_count
+        for dataset_id, expected_count in expected_dataset_row_counts.items()
+    ):
+        reject("source_row_count_mismatch")
 
     if not persisted_keys and any(
         len(weeks_by_slug.get(definition.slug, ())) < MINIMUM_INITIAL_HISTORY_WEEKS
