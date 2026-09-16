@@ -92,6 +92,7 @@ celery_app = Celery(
         'app.tasks.static_export_tasks',  # Scheduled static-data bundle export
         'app.interfaces.tasks.feature_store_tasks',  # Daily feature snapshot
         'app.interfaces.tasks.options_analytics_tasks',  # US options follow-on
+        'app.interfaces.tasks.cot_tasks',  # Global CFTC positioning refresh
         'app.interfaces.tasks.social_signal_tasks',  # Social collection/analysis
     ]
 )
@@ -389,6 +390,9 @@ celery_app.conf.task_routes = {
 celery_app.conf.task_routes[
     'app.interfaces.tasks.options_analytics_tasks.refresh_options_analytics'
 ] = {'queue': data_fetch_queue_for_market('US')}
+celery_app.conf.task_routes[
+    'app.interfaces.tasks.cot_tasks.refresh_cot'
+] = {'queue': SHARED_DATA_FETCH_QUEUE}
 celery_app.conf.task_routes.update({
     task_name: {'queue': market_jobs_queue_for_market("US")}
     for task_name in _MARKET_JOB_TASKS
@@ -496,6 +500,17 @@ def _build_cache_warmup_beat_schedule(enabled_markets: list[str]) -> dict:
     # already do a full refresh that supersedes the stale-intraday refresh.
     # The task function remains available for manual invocation via the API.
     _shared_entries = {
+        'cot-refresh-weekday': {
+            'task': 'app.interfaces.tasks.cot_tasks.refresh_cot',
+            'schedule': crontab(
+                hour=17,
+                minute=0,
+                day_of_week='1-5',
+                app=_IBD_CLASSIFICATION_SYNC_SCHEDULE_APP,
+            ),
+            'options': {'queue': SHARED_DATA_FETCH_QUEUE},
+            'kwargs': {'origin': 'scheduled'},
+        },
         'theme-group-refresh': {
             'task': 'app.tasks.theme_intelligence_tasks.refresh_groups',
             'schedule': 60.0,
