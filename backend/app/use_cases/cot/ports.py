@@ -11,6 +11,7 @@ from app.domain.cot.models import (
     COT_REGISTRY_VERSION,
     COT_SCHEMA_VERSION,
     CotInstrumentDefinition,
+    DerivedCotWeek,
     NormalizedCotWeek,
 )
 
@@ -63,9 +64,7 @@ class CotSourceMetadata:
             "retrieved_at": self.retrieved_at.isoformat(),
             "retry_count": self.retry_count,
             "dataset_row_counts": dict(self.dataset_row_counts),
-            "expected_dataset_row_counts": dict(
-                self.expected_dataset_row_counts
-            ),
+            "expected_dataset_row_counts": dict(self.expected_dataset_row_counts),
         }
 
 
@@ -75,6 +74,30 @@ class CotSourceSnapshot:
     metadata: CotSourceMetadata
 
 
+@dataclass(frozen=True)
+class CotPublicationSignature:
+    source_fingerprints: Mapping[str, str]
+    registry_version: str
+    calculation_version: str
+    schema_version: str
+
+    def __post_init__(self) -> None:
+        if not all(
+            value.strip()
+            for value in (
+                self.registry_version,
+                self.calculation_version,
+                self.schema_version,
+            )
+        ):
+            raise ValueError("publication signature versions must be non-empty")
+        object.__setattr__(
+            self,
+            "source_fingerprints",
+            MappingProxyType(dict(self.source_fingerprints)),
+        )
+
+
 class CotSource(Protocol):
     def fetch(
         self,
@@ -82,14 +105,48 @@ class CotSource(Protocol):
     ) -> CotSourceSnapshot: ...
 
 
-class CotRepository(Protocol):
-    def existing_week_keys(self) -> frozenset[tuple[str, object]]: ...
+class CotWriteRepository(Protocol):
+    def start_run(self, request: CotRunRequest) -> int: ...
 
-    def stored_fingerprints(self) -> Mapping[str, str]: ...
+    def existing_week_keys(self) -> frozenset[tuple[str, date]]: ...
+
+    def publication_signature(self) -> CotPublicationSignature | None: ...
+
+    def publish(
+        self,
+        run_id: int,
+        *,
+        registry: Sequence[CotInstrumentDefinition],
+        weeks: Sequence[DerivedCotWeek],
+        diagnostics: Mapping[str, object],
+        source_metadata: Mapping[str, object],
+    ) -> None: ...
+
+    def mark_no_change(
+        self,
+        run_id: int,
+        diagnostics: Mapping[str, object],
+    ) -> None: ...
+
+    def mark_failed(
+        self,
+        run_id: int,
+        status: str,
+        diagnostics: Mapping[str, object],
+    ) -> None: ...
+
+
+class CotPriceHydrationResultPort(Protocol):
+    unavailable_count: int
+
+    def as_dict(self) -> Mapping[str, object]: ...
 
 
 class CotPriceHydratorPort(Protocol):
-    def hydrate(self, instruments: Sequence[CotInstrumentDefinition]) -> Any: ...
+    def hydrate(
+        self,
+        instruments: Sequence[CotInstrumentDefinition],
+    ) -> CotPriceHydrationResultPort: ...
 
 
 class CotReadSide(Protocol):

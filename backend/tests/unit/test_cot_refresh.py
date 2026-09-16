@@ -3,9 +3,20 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 
-from app.domain.cot.models import NormalizedCotWeek, Participant, RawParticipantPosition
+from app.domain.cot.models import (
+    COT_CALCULATION_VERSION,
+    COT_REGISTRY_VERSION,
+    COT_SCHEMA_VERSION,
+    NormalizedCotWeek,
+    Participant,
+    RawParticipantPosition,
+)
 from app.domain.cot.registry import COT_INSTRUMENTS
-from app.use_cases.cot.ports import CotSourceMetadata, CotSourceSnapshot
+from app.use_cases.cot.ports import (
+    CotPublicationSignature,
+    CotSourceMetadata,
+    CotSourceSnapshot,
+)
 from app.use_cases.cot.refresh import CotRefreshCommand, RefreshCotUseCase
 
 
@@ -19,9 +30,13 @@ def make_week(definition, report_date: date, sequence: int) -> NormalizedCotWeek
     reported_long = 0
     reported_short = 0
     for participant in reportables:
-        long_value = 200 + sequence if participant is definition.focal_participant else 100
+        long_value = (
+            200 + sequence if participant is definition.focal_participant else 100
+        )
         short_value = 100
-        positions.append(RawParticipantPosition(participant, long_value, short_value, 0))
+        positions.append(
+            RawParticipantPosition(participant, long_value, short_value, 0)
+        )
         reported_long += long_value
         reported_short += short_value
     open_interest = 2000
@@ -107,6 +122,7 @@ class FakeRepository:
         self.fingerprints = {}
         self.weeks = ()
         self.statuses = {}
+        self.signature = None
 
     def start_run(self, _request):
         run_id = self.next_run_id
@@ -115,10 +131,15 @@ class FakeRepository:
         return run_id
 
     def existing_week_keys(self):
-        return frozenset((week.instrument_slug, week.report_date) for week in self.weeks)
+        return frozenset(
+            (week.instrument_slug, week.report_date) for week in self.weeks
+        )
 
     def stored_fingerprints(self):
         return dict(self.fingerprints)
+
+    def publication_signature(self):
+        return self.signature
 
     def publish(self, run_id, *, registry, weeks, diagnostics, source_metadata):
         assert len(registry) == 31
@@ -126,6 +147,12 @@ class FakeRepository:
         self.fingerprints = {
             week.source_row_id: week.source_fingerprint for week in weeks
         }
+        self.signature = CotPublicationSignature(
+            source_fingerprints=self.fingerprints,
+            registry_version=COT_REGISTRY_VERSION,
+            calculation_version=COT_CALCULATION_VERSION,
+            schema_version=COT_SCHEMA_VERSION,
+        )
         self.published_run_id = run_id
         self.statuses[run_id] = "published"
 
@@ -209,6 +236,21 @@ def test_refresh_no_change_does_not_move_pointer():
 
     assert second.status == "no_change"
     assert repository.published_run_id == first.run_id
+
+
+def test_refresh_republishes_when_calculation_version_changes():
+    use_case, _source, repository = make_use_case()
+    first = use_case.execute(CotRefreshCommand(origin="test", force=False))
+    repository.signature = replace(
+        repository.signature,
+        calculation_version="cot-positions-old",
+    )
+
+    second = use_case.execute(CotRefreshCommand(origin="test", force=False))
+
+    assert first.status == "published"
+    assert second.status == "published"
+    assert repository.published_run_id == second.run_id
 
 
 def test_historical_correction_rebuilds_later_deltas_and_percentiles():

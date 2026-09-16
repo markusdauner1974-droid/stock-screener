@@ -22,8 +22,7 @@ from app.infra.db.models.cot import (
     CotPublicationPointer,
     CotWeeklyPosition,
 )
-from app.use_cases.cot.ports import CotRunRequest
-
+from app.use_cases.cot.ports import CotPublicationSignature, CotRunRequest
 
 LATEST_PUBLICATION_KEY = "latest_published"
 
@@ -64,14 +63,26 @@ class SqlCotRepository:
         ).all()
         return frozenset((slug, report_date) for slug, report_date in rows)
 
-    def stored_fingerprints(self) -> Mapping[str, str]:
+    def publication_signature(self) -> CotPublicationSignature | None:
+        publication = self.get_publication()
+        if publication is None:
+            return None
         rows = self._session.execute(
             select(
                 CotWeeklyPosition.source_row_id,
                 CotWeeklyPosition.source_fingerprint,
-            ).distinct()
+            )
+            .where(CotWeeklyPosition.import_run_id == publication.run.id)
+            .distinct()
         ).all()
-        return {source_row_id: fingerprint for source_row_id, fingerprint in rows}
+        return CotPublicationSignature(
+            source_fingerprints={
+                source_row_id: fingerprint for source_row_id, fingerprint in rows
+            },
+            registry_version=publication.run.registry_version,
+            calculation_version=publication.run.calculation_version,
+            schema_version=publication.run.schema_version,
+        )
 
     def publish(
         self,
@@ -193,16 +204,18 @@ class SqlCotRepository:
             )
             if instrument is None:
                 return ()
-            selected_dates = select(CotWeeklyPosition.report_date).where(
-                CotWeeklyPosition.instrument_id == instrument.id
-            ).distinct().order_by(CotWeeklyPosition.report_date.desc()).limit(limit)
+            selected_dates = (
+                select(CotWeeklyPosition.report_date)
+                .where(CotWeeklyPosition.instrument_id == instrument.id)
+                .distinct()
+                .order_by(CotWeeklyPosition.report_date.desc())
+                .limit(limit)
+            )
             statement = statement.where(
                 CotWeeklyPosition.report_date.in_(selected_dates)
             )
         rows = tuple(self._session.scalars(statement))
-        return tuple(
-            sorted(rows, key=lambda row: (row.report_date, row.participant))
-        )
+        return tuple(sorted(rows, key=lambda row: (row.report_date, row.participant)))
 
     def get_snapshot(self) -> tuple[CotWeeklyPosition, ...]:
         latest = (

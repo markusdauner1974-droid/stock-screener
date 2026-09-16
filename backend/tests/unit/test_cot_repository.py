@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import date
 
 import pytest
@@ -98,6 +97,11 @@ def test_publish_upserts_history_and_advances_pointer_in_one_commit(
     assert pointer.run_id == run_id
     assert repository.get_publication().run.status == "published"
     assert session.query(CotWeeklyPosition).one().net == 40
+    signature = repository.publication_signature()
+    assert signature.registry_version == run_request().registry_version
+    assert signature.calculation_version == run_request().calculation_version
+    assert signature.schema_version == run_request().schema_version
+    assert dict(signature.source_fingerprints) == {"gold-2026-09-08": "fingerprint-40"}
 
 
 def test_failed_publish_keeps_previous_pointer(repository, session):
@@ -139,7 +143,9 @@ def test_later_publication_updates_canonical_row_and_pointer(repository, session
 
     assert session.query(CotWeeklyPosition).count() == 1
     assert session.query(CotWeeklyPosition).one().net == 55
-    assert session.get(CotPublicationPointer, "latest_published").run_id == second_run_id
+    assert (
+        session.get(CotPublicationPointer, "latest_published").run_id == second_run_id
+    )
 
 
 def test_no_change_run_does_not_move_publication_pointer(repository, session):
@@ -154,4 +160,7 @@ def test_no_change_run_does_not_move_publication_pointer(repository, session):
     repository.mark_no_change(no_change_run_id, {"valid": True})
 
     assert session.get(CotImportRun, no_change_run_id).status == "no_change"
-    assert session.get(CotPublicationPointer, "latest_published").run_id == published_run_id
+    assert (
+        session.get(CotPublicationPointer, "latest_published").run_id
+        == published_run_id
+    )

@@ -1,14 +1,19 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
-from typing import Any
 
 from app.domain.cot.calculations import derive_all_instrument_series
 from app.domain.cot.registry import COT_INSTRUMENTS
 from app.domain.cot.validation import validate_cot_snapshot
-from app.use_cases.cot.ports import CotRunRequest, CotSource
+from app.use_cases.cot.ports import (
+    CotPriceHydratorPort,
+    CotPublicationSignature,
+    CotRunRequest,
+    CotSource,
+    CotWriteRepository,
+)
 
 
 @dataclass(frozen=True)
@@ -39,7 +44,7 @@ class CotRefreshResult:
         cls,
         run_id: int,
         reason_codes: tuple[str, ...],
-    ) -> "CotRefreshResult":
+    ) -> CotRefreshResult:
         return cls(
             status="failed_quality",
             run_id=run_id,
@@ -55,8 +60,8 @@ class RefreshCotUseCase:
         self,
         *,
         source: CotSource,
-        repository: Any,
-        price_hydrator: Any,
+        repository: CotWriteRepository,
+        price_hydrator: CotPriceHydratorPort,
         cache_invalidator: Callable[[], None] | None = None,
     ) -> None:
         self._source = source
@@ -65,7 +70,8 @@ class RefreshCotUseCase:
         self._cache_invalidator = cache_invalidator or (lambda: None)
 
     def execute(self, command: CotRefreshCommand) -> CotRefreshResult:
-        run_id = self._repository.start_run(command.to_run_request())
+        run_request = command.to_run_request()
+        run_id = self._repository.start_run(run_request)
         try:
             source_snapshot = self._source.fetch(COT_INSTRUMENTS)
             raw_weeks = source_snapshot.weeks
@@ -86,11 +92,17 @@ class RefreshCotUseCase:
             fingerprints = {
                 week.source_row_id: week.source_fingerprint for week in raw_weeks
             }
+            requested_signature = CotPublicationSignature(
+                source_fingerprints=fingerprints,
+                registry_version=run_request.registry_version,
+                calculation_version=run_request.calculation_version,
+                schema_version=run_request.schema_version,
+            )
             report_date = max((week.report_date for week in raw_weeks), default=None)
             instrument_count = len({week.instrument_slug for week in raw_weeks})
             if (
                 not command.force
-                and fingerprints == self._repository.stored_fingerprints()
+                and requested_signature == self._repository.publication_signature()
             ):
                 self._repository.mark_no_change(run_id, validation.as_dict())
                 return CotRefreshResult(
