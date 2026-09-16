@@ -7,6 +7,7 @@ import DailyMarketSnapshotTab from '../components/MarketScan/DailyMarketSnapshot
 import { useRuntime } from '../contexts/RuntimeContext';
 
 const KeyMarketsTab = lazy(() => import('../components/MarketScan/KeyMarketsTab'));
+const CotPositioningTab = lazy(() => import('../features/cot/CotPositioningTab'));
 const ThemesTab = lazy(() => import('../components/MarketScan/ThemesTab'));
 const WatchlistsTab = lazy(() => import('../components/MarketScan/WatchlistsTab'));
 const StockbeeMmTab = lazy(() => import('../components/MarketScan/StockbeeMmTab'));
@@ -43,6 +44,7 @@ function MarketScanPage() {
       ? [{ id: 'social_signals', label: 'Social Signals', render: () => renderLazyTab(SocialSignalsTab) }]
       : []),
     { id: 'key_markets', label: 'Key Markets', render: () => renderLazyTab(KeyMarketsTab) },
+    { id: 'cot_positioning', label: 'COT Positioning', render: () => renderLazyTab(CotPositioningTab) },
     ...(features.themes
       ? [{ id: 'themes', label: 'Themes', render: () => renderLazyTab(ThemesTab) }]
       : []),
