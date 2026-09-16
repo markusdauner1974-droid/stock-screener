@@ -4,7 +4,6 @@ from collections import defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.domain.cot.calculations import align_prices_to_report_dates
@@ -16,6 +15,12 @@ from app.domain.cot.registry import (
     PARTICIPANT_LABELS,
     dataset_for_family,
     instrument_by_slug,
+)
+from app.use_cases.cot.ports import (
+    CotHistoryPositionRecord,
+    CotPriceReader,
+    CotReadRepository,
+    CotSnapshotPositionRecord,
 )
 
 RANGE_WEEKS = {"1y": 52, "3y": 156, "5y": 260}
@@ -149,18 +154,14 @@ class CotSnapshotView:
 class CotQueryService:
     def __init__(
         self,
-        repository: Any,
-        price_reader: Any,
+        repository: CotReadRepository,
+        price_reader: CotPriceReader,
         *,
         now: Callable[[], datetime] | None = None,
     ) -> None:
         self._repository = repository
         self._price_reader = price_reader
         self._now = now or (lambda: datetime.now(timezone.utc))
-
-    @property
-    def external_calls(self) -> list:
-        return list(getattr(self._price_reader, "external_calls", []))
 
     def publication(self) -> CotPublicationView:
         publication = self._repository.get_publication()
@@ -186,8 +187,12 @@ class CotQueryService:
             stale=age_days > 10,
         )
 
-    def catalog(self) -> CotCatalogView:
-        publication = self.publication()
+    def catalog(
+        self,
+        *,
+        publication: CotPublicationView | None = None,
+    ) -> CotCatalogView:
+        publication = publication or self.publication()
         return CotCatalogView(
             publication=publication,
             default_slug="sp-500",
@@ -220,18 +225,24 @@ class CotQueryService:
             ),
         )
 
-    def history(self, slug: str, range_name: str) -> CotHistoryView:
+    def history(
+        self,
+        slug: str,
+        range_name: str,
+        *,
+        publication: CotPublicationView | None = None,
+    ) -> CotHistoryView:
         if range_name not in RANGE_WEEKS:
             raise ValueError(f"unknown COT range: {range_name}")
         try:
             definition = instrument_by_slug(slug)
         except KeyError as exc:
             raise CotInstrumentUnavailable(slug) from exc
-        publication = self.publication()
+        publication = publication or self.publication()
         rows = self._repository.get_history(slug, limit=RANGE_WEEKS[range_name])
         if not rows:
             raise CotInstrumentUnavailable(slug)
-        grouped: dict[date, list[Any]] = defaultdict(list)
+        grouped: dict[date, list[CotHistoryPositionRecord]] = defaultdict(list)
         for row in rows:
             grouped[row.report_date].append(row)
         report_dates = tuple(sorted(grouped))
@@ -313,45 +324,82 @@ class CotQueryService:
             weeks=weeks,
         )
 
-    def snapshot(self) -> CotSnapshotView:
-        publication = self.publication()
+    def snapshot(
+        self,
+        *,
+        publication: CotPublicationView | None = None,
+    ) -> CotSnapshotView:
+        publication = publication or self.publication()
+        history_by_slug: dict[str, list[CotSnapshotPositionRecord]] = defaultdict(list)
+        for record in self._repository.get_snapshot_history(weeks=RANGE_WEEKS["1y"]):
+            history_by_slug[record.instrument_slug].append(record)
+
+        price_requests: dict[str, tuple[date, date]] = {}
+        for definition in COT_INSTRUMENTS:
+            history = history_by_slug.get(definition.slug, [])
+            if not history:
+                raise CotInstrumentUnavailable(definition.slug)
+            history.sort(key=lambda item: item.report_date)
+            symbol = definition.price.yahoo_symbol
+            if symbol is not None:
+                requested = (
+                    history[0].report_date - timedelta(days=7),
+                    history[-1].report_date,
+                )
+                existing = price_requests.get(symbol)
+                price_requests[symbol] = (
+                    (
+                        min(existing[0], requested[0]),
+                        max(existing[1], requested[1]),
+                    )
+                    if existing
+                    else requested
+                )
+        closes_by_symbol = self._price_reader.closes_many(price_requests)
+
         rows: list[CotSnapshotRowView] = []
         for definition in COT_INSTRUMENTS:
-            history = self.history(definition.slug, "1y")
-            current = history.weeks[-1]
-            focal = next(
-                position
-                for position in current.positions
-                if position.participant == definition.focal_participant.value
+            history = history_by_slug[definition.slug]
+            report_dates = tuple(item.report_date for item in history)
+            closes = (
+                closes_by_symbol.get(definition.price.yahoo_symbol, {})
+                if definition.price.yahoo_symbol is not None
+                else {}
             )
-            trend = tuple(
-                position.net
-                for week in history.weeks[-12:]
-                for position in week.positions
-                if position.participant == definition.focal_participant.value
+            aligned = align_prices_to_report_dates(report_dates, closes)
+            aligned_by_date = {item.report_date: item for item in aligned}
+            aligned_count = sum(item.close is not None for item in aligned)
+            coverage = (
+                PriceCoverageState.UNAVAILABLE
+                if aligned_count == 0
+                else PriceCoverageState.COMPLETE
+                if aligned_count == len(report_dates)
+                else PriceCoverageState.PARTIAL
             )
+            current = history[-1]
+            current_price = aligned_by_date[current.report_date]
             rows.append(
                 CotSnapshotRowView(
                     slug=definition.slug,
                     display_name=definition.display_name,
                     category=definition.category.value,
                     instrument_order=definition.instrument_order,
-                    focal_participant=focal.participant,
-                    focal_label=focal.label,
+                    focal_participant=current.participant,
+                    focal_label=PARTICIPANT_LABELS[definition.focal_participant],
                     report_date=current.report_date,
-                    long=focal.long,
-                    short=focal.short,
-                    net=focal.net,
-                    delta_long=focal.delta_long,
-                    delta_short=focal.delta_short,
-                    delta_net=focal.delta_net,
-                    net_pct_open_interest=focal.net_pct_open_interest,
-                    percentile_3y=focal.percentile_3y,
-                    percentile_status=focal.percentile_status,
-                    net_trend=trend,
-                    price_change_pct=current.price_change_pct,
-                    price_mapping_kind=history.price_mapping_kind,
-                    price_coverage_state=history.price_coverage_state,
+                    long=current.long,
+                    short=current.short,
+                    net=current.net,
+                    delta_long=current.delta_long,
+                    delta_short=current.delta_short,
+                    delta_net=current.delta_net,
+                    net_pct_open_interest=current.net_pct_open_interest,
+                    percentile_3y=current.percentile_3y,
+                    percentile_status=current.percentile_status,
+                    net_trend=tuple(item.net for item in history[-12:]),
+                    price_change_pct=current_price.weekly_change_pct,
+                    price_mapping_kind=definition.price.kind.value,
+                    price_coverage_state=coverage.value,
                 )
             )
         return CotSnapshotView(publication=publication, rows=tuple(rows))

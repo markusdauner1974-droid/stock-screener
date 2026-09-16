@@ -4,7 +4,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from types import MappingProxyType
-from typing import Any, Protocol
+from typing import Protocol
 
 from app.domain.cot.models import (
     COT_CALCULATION_VERSION,
@@ -59,7 +59,7 @@ class CotSourceMetadata:
             MappingProxyType(dict(self.expected_dataset_row_counts)),
         )
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_dict(self) -> dict[str, object]:
         return {
             "retrieved_at": self.retrieved_at.isoformat(),
             "retry_count": self.retry_count,
@@ -149,11 +149,84 @@ class CotPriceHydratorPort(Protocol):
     ) -> CotPriceHydrationResultPort: ...
 
 
-class CotReadSide(Protocol):
-    def get_publication(self) -> Any: ...
+class CotRunRecord(Protocol):
+    id: int
+    registry_version: str
+    calculation_version: str
+    schema_version: str
+    source_metadata_json: Mapping[str, object] | None
+    published_at: datetime | None
 
-    def get_instruments(self) -> Sequence[Any]: ...
 
-    def get_history(self, slug: str, *, limit: int) -> Sequence[Any]: ...
+class CotPublicationPointerRecord(Protocol):
+    report_date: date
 
-    def get_snapshot(self) -> Sequence[Any]: ...
+
+class CotPublicationRecord(Protocol):
+    run: CotRunRecord
+    pointer: CotPublicationPointerRecord
+
+
+class CotHistoryPositionRecord(Protocol):
+    report_date: date
+    participant: str
+    long: int
+    short: int
+    spreading: int
+    open_interest: int
+    net: int
+    delta_long: int | None
+    delta_short: int | None
+    delta_net: int | None
+    net_pct_open_interest: float | None
+    percentile_3y: float | None
+    percentile_status: str
+
+
+@dataclass(frozen=True)
+class CotSnapshotPositionRecord:
+    instrument_slug: str
+    report_date: date
+    participant: str
+    long: int
+    short: int
+    open_interest: int
+    net: int
+    delta_long: int | None
+    delta_short: int | None
+    delta_net: int | None
+    net_pct_open_interest: float | None
+    percentile_3y: float | None
+    percentile_status: str
+
+
+class CotReadRepository(Protocol):
+    def get_publication(self) -> CotPublicationRecord | None: ...
+
+    def get_history(
+        self,
+        slug: str,
+        *,
+        limit: int,
+    ) -> Sequence[CotHistoryPositionRecord]: ...
+
+    def get_snapshot_history(
+        self,
+        *,
+        weeks: int,
+    ) -> Sequence[CotSnapshotPositionRecord]: ...
+
+
+class CotPriceReader(Protocol):
+    def closes(
+        self,
+        symbol: str,
+        *,
+        start: date,
+        end: date,
+    ) -> Mapping[date, float]: ...
+
+    def closes_many(
+        self,
+        requests: Mapping[str, tuple[date, date]],
+    ) -> Mapping[str, Mapping[date, float]]: ...

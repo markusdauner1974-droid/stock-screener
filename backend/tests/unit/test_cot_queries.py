@@ -18,6 +18,8 @@ class FakeRepository:
         )
         pointer = SimpleNamespace(run_id=7, report_date=date(2026, 9, 8))
         self.publication = SimpleNamespace(run=run, pointer=pointer)
+        self.history_calls = []
+        self.snapshot_history_calls = []
 
     def get_publication(self):
         return self.publication
@@ -37,6 +39,11 @@ class FakeRepository:
         )
 
     def get_history(self, slug, *, limit=None):
+        self.history_calls.append((slug, limit))
+        return self._history_rows(slug, limit=limit)
+
+    @staticmethod
+    def _history_rows(slug, *, limit=None):
         definition = next(item for item in COT_INSTRUMENTS if item.slug == slug)
         latest = date(2026, 9, 8)
         weeks = []
@@ -66,6 +73,15 @@ class FakeRepository:
             weeks = [row for row in weeks if row.report_date in selected_dates]
         return tuple(weeks)
 
+    def get_snapshot_history(self, *, weeks):
+        self.snapshot_history_calls.append(weeks)
+        return tuple(
+            SimpleNamespace(instrument_slug=definition.slug, **vars(row))
+            for definition in COT_INSTRUMENTS
+            for row in self._history_rows(definition.slug, limit=weeks)
+            if row.participant == definition.focal_participant.value
+        )
+
     def get_snapshot(self):
         return tuple(
             row
@@ -78,12 +94,20 @@ class FakePriceReader:
     def __init__(self):
         self.external_calls = []
         self.requests = []
+        self.batch_calls = []
 
     def closes(self, symbol, *, start, end):
         self.requests.append((symbol, start, end))
         return {
             start + timedelta(days=index): 100.0 + index
             for index in range((end - start).days + 1)
+        }
+
+    def closes_many(self, requests):
+        self.batch_calls.append(dict(requests))
+        return {
+            symbol: self.closes(symbol, start=start, end=end)
+            for symbol, (start, end) in requests.items()
         }
 
 
@@ -102,14 +126,19 @@ def service():
 
 
 def test_history_uses_week_counts_and_cached_prices_only():
-    query_service = service()
+    price_reader = FakePriceReader()
+    query_service = CotQueryService(
+        FakeRepository(),
+        price_reader,
+        now=lambda: datetime(2026, 9, 12, tzinfo=timezone.utc),
+    )
 
     history = query_service.history("sp-500", "1y")
 
     assert len(history.weeks) == 52
     assert history.weeks[-1].report_date.isoformat() == "2026-09-08"
     assert history.weeks[-1].price_date <= history.weeks[-1].report_date
-    assert query_service.external_calls == []
+    assert price_reader.external_calls == []
 
 
 def test_history_reads_pre_range_close_for_first_report_alignment():
@@ -129,9 +158,28 @@ def test_snapshot_preserves_registry_order_and_focal_participants():
     rows = service().snapshot().rows
 
     assert [row.slug for row in rows[:3]] == ["sp-500", "nasdaq-100", "russell-2000"]
-    assert next(row for row in rows if row.slug == "sp-500").focal_participant == "leveraged_funds"
-    assert next(row for row in rows if row.slug == "gold").focal_participant == "managed_money"
+    assert (
+        next(row for row in rows if row.slug == "sp-500").focal_participant
+        == "leveraged_funds"
+    )
+    assert (
+        next(row for row in rows if row.slug == "gold").focal_participant
+        == "managed_money"
+    )
     assert len(next(row for row in rows if row.slug == "gold").net_trend) == 12
+
+
+def test_snapshot_uses_one_repository_batch_and_one_price_batch():
+    repository = FakeRepository()
+    price_reader = FakePriceReader()
+    query_service = CotQueryService(repository, price_reader)
+
+    snapshot = query_service.snapshot()
+
+    assert len(snapshot.rows) == 31
+    assert repository.history_calls == []
+    assert repository.snapshot_history_calls == [52]
+    assert len(price_reader.batch_calls) == 1
 
 
 def test_catalog_exposes_all_official_sources_and_curated_entries():
@@ -139,4 +187,7 @@ def test_catalog_exposes_all_official_sources_and_curated_entries():
 
     assert catalog.default_slug == "sp-500"
     assert len(catalog.instruments) == 31
-    assert {source.dataset_id for source in catalog.sources} == {"72hh-3qpy", "gpe5-46if"}
+    assert {source.dataset_id for source in catalog.sources} == {
+        "72hh-3qpy",
+        "gpe5-46if",
+    }

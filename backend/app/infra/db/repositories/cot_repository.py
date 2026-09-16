@@ -22,7 +22,11 @@ from app.infra.db.models.cot import (
     CotPublicationPointer,
     CotWeeklyPosition,
 )
-from app.use_cases.cot.ports import CotPublicationSignature, CotRunRequest
+from app.use_cases.cot.ports import (
+    CotPublicationSignature,
+    CotRunRequest,
+    CotSnapshotPositionRecord,
+)
 
 LATEST_PUBLICATION_KEY = "latest_published"
 
@@ -217,32 +221,75 @@ class SqlCotRepository:
         rows = tuple(self._session.scalars(statement))
         return tuple(sorted(rows, key=lambda row: (row.report_date, row.participant)))
 
-    def get_snapshot(self) -> tuple[CotWeeklyPosition, ...]:
-        latest = (
+    def get_snapshot_history(
+        self,
+        *,
+        weeks: int,
+    ) -> tuple[CotSnapshotPositionRecord, ...]:
+        if weeks <= 0:
+            raise ValueError("snapshot history weeks must be positive")
+        ranked = (
             select(
-                CotWeeklyPosition.instrument_id,
-                func.max(CotWeeklyPosition.report_date).label("report_date"),
+                CotWeeklyPosition.id.label("position_id"),
+                CotInstrument.slug.label("instrument_slug"),
+                CotInstrument.instrument_order.label("instrument_order"),
+                func.row_number()
+                .over(
+                    partition_by=CotWeeklyPosition.instrument_id,
+                    order_by=CotWeeklyPosition.report_date.desc(),
+                )
+                .label("week_rank"),
             )
-            .group_by(CotWeeklyPosition.instrument_id)
+            .join(
+                CotInstrument,
+                CotInstrument.id == CotWeeklyPosition.instrument_id,
+            )
+            .where(
+                CotInstrument.active.is_(True),
+                CotWeeklyPosition.participant == CotInstrument.focal_participant,
+            )
             .subquery()
         )
-        return tuple(
-            self._session.scalars(
-                select(CotWeeklyPosition)
-                .join(
-                    latest,
-                    (latest.c.instrument_id == CotWeeklyPosition.instrument_id)
-                    & (latest.c.report_date == CotWeeklyPosition.report_date),
-                )
-                .join(
-                    CotInstrument,
-                    CotInstrument.id == CotWeeklyPosition.instrument_id,
-                )
-                .order_by(
-                    CotInstrument.instrument_order,
-                    CotWeeklyPosition.participant,
-                )
+        rows = self._session.execute(
+            select(
+                ranked.c.instrument_slug,
+                CotWeeklyPosition.report_date,
+                CotWeeklyPosition.participant,
+                CotWeeklyPosition.long,
+                CotWeeklyPosition.short,
+                CotWeeklyPosition.open_interest,
+                CotWeeklyPosition.net,
+                CotWeeklyPosition.delta_long,
+                CotWeeklyPosition.delta_short,
+                CotWeeklyPosition.delta_net,
+                CotWeeklyPosition.net_pct_open_interest,
+                CotWeeklyPosition.percentile_3y,
+                CotWeeklyPosition.percentile_status,
             )
+            .join(ranked, ranked.c.position_id == CotWeeklyPosition.id)
+            .where(ranked.c.week_rank <= weeks)
+            .order_by(
+                ranked.c.instrument_order,
+                CotWeeklyPosition.report_date,
+            )
+        ).all()
+        return tuple(
+            CotSnapshotPositionRecord(
+                instrument_slug=row.instrument_slug,
+                report_date=row.report_date,
+                participant=row.participant,
+                long=int(row.long),
+                short=int(row.short),
+                open_interest=int(row.open_interest),
+                net=int(row.net),
+                delta_long=row.delta_long,
+                delta_short=row.delta_short,
+                delta_net=row.delta_net,
+                net_pct_open_interest=row.net_pct_open_interest,
+                percentile_3y=row.percentile_3y,
+                percentile_status=row.percentile_status,
+            )
+            for row in rows
         )
 
     def _sync_registry(

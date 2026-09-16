@@ -16,7 +16,6 @@ from app.use_cases.cot.queries import (
 )
 from app.wiring.bootstrap import get_cot_queries
 
-
 router = APIRouter()
 
 
@@ -42,7 +41,9 @@ def get_cot_catalog(
         cached = cache.get(key)
         if cached is not None:
             return CotCatalogResponse.model_validate_json(cached)
-        response = CotCatalogResponse.from_view(queries.catalog())
+        response = CotCatalogResponse.from_view(
+            queries.catalog(publication=publication)
+        )
         cache.set(key, response.model_dump_json())
         return response
     except CotPublicationUnavailable as exc:
@@ -70,7 +71,9 @@ def get_cot_history(
         cached = cache.get(key)
         if cached is not None:
             return CotHistoryResponse.model_validate_json(cached)
-        response = CotHistoryResponse.from_view(queries.history(slug, range_name))
+        response = CotHistoryResponse.from_view(
+            queries.history(slug, range_name, publication=publication)
+        )
         cache.set(key, response.model_dump_json())
         return response
     except CotInstrumentUnavailable as exc:
@@ -93,7 +96,9 @@ def get_cot_snapshot(
         cached = cache.get(key)
         if cached is not None:
             return CotSnapshotResponse.model_validate_json(cached)
-        response = CotSnapshotResponse.from_view(queries.snapshot())
+        response = CotSnapshotResponse.from_view(
+            queries.snapshot(publication=publication)
+        )
         cache.set(key, response.model_dump_json())
         return response
     except CotPublicationUnavailable as exc:

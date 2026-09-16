@@ -79,11 +79,14 @@ derivation and publication. Identical signatures retain the existing pointer.
 
 ## Batched snapshot read
 
-The snapshot repository query returns the most recent 12 report weeks for the
+The snapshot repository query returns the most recent 52 report weeks for the
 focal participant of every active instrument in curated order. The query
 service fetches publication once, builds all rows in one pass, and requests
 cached prices through one batch price-reader call. The existing single-history
 path remains unchanged for chart requests and static per-instrument export.
+
+The 52-week batch preserves the existing one-year price-coverage semantics;
+only the most recent 12 net values are exposed as the table trend.
 
 The snapshot endpoint continues returning the exact existing payload. Cache
 behavior remains publication-keyed.

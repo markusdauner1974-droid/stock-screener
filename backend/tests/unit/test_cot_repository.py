@@ -102,6 +102,10 @@ def test_publish_upserts_history_and_advances_pointer_in_one_commit(
     assert signature.calculation_version == run_request().calculation_version
     assert signature.schema_version == run_request().schema_version
     assert dict(signature.source_fingerprints) == {"gold-2026-09-08": "fingerprint-40"}
+    snapshot_rows = repository.get_snapshot_history(weeks=52)
+    assert [
+        (row.instrument_slug, row.participant, row.net) for row in snapshot_rows
+    ] == [("gold", Participant.MANAGED_MONEY.value, 40)]
 
 
 def test_failed_publish_keeps_previous_pointer(repository, session):

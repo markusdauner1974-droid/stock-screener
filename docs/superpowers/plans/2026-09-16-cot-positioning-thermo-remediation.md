@@ -117,7 +117,7 @@ Commit: `fix: version COT publication identity`
 - Test: `backend/tests/unit/test_cot_repository.py`
 
 **Interfaces:**
-- Produces: `CotSnapshotPositionRecord`, `CotReadRepository.get_snapshot_history(weeks=12)`, and `CotPriceReader.closes_many(requests)`.
+- Produces: `CotSnapshotPositionRecord`, `CotReadRepository.get_snapshot_history(weeks=52)`, and `CotPriceReader.closes_many(requests)`.
 - Removes: `CotQueryService.external_calls` and snapshot recursion through `history()`.
 
 - [ ] **Step 1: Write a failing bounded-call test**
@@ -127,7 +127,7 @@ def test_snapshot_uses_one_repository_batch_and_one_price_batch():
     snapshot = query_service.snapshot()
     assert len(snapshot.rows) == 31
     assert repository.history_calls == []
-    assert repository.snapshot_history_calls == [12]
+    assert repository.snapshot_history_calls == [52]
     assert price_reader.batch_calls == 1
 ```
 
@@ -137,7 +137,7 @@ Run: `cd backend && ./venv/bin/pytest -q tests/unit/test_cot_queries.py`
 
 - [ ] **Step 3: Add the SQL/read DTO batch and assemble rows once**
 
-Use a window-ranked subquery to select the last 12 dates per instrument, filtered to each instrument's focal participant. Batch price requests by symbol and align each instrument independently.
+Use a window-ranked subquery to select the last 52 dates per instrument, filtered to each instrument's focal participant. Batch price requests by symbol and align each instrument independently; expose only the last 12 net values as the trend.
 
 - [ ] **Step 4: Run API/query/repository tests and commit**
 
