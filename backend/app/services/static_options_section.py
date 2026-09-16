@@ -14,7 +14,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.infra.serialization import json_safe
+from app.services.static_artifact_io import write_static_json
 from app.services.static_options_artifact_selector import StaticOptionsArtifactSelector
 from app.services.static_options_contract import StaticOptionsArtifactError
 from app.services.static_options_exporter import (
@@ -29,15 +29,6 @@ OptionsExporterFactory = Callable[[Session], StaticOptionsExporter]
 class StaticOptionsSectionResult:
     selected: bool
     warnings: tuple[str, ...] = ()
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(json_safe(payload), allow_nan=False, indent=2, sort_keys=True)
-        + "\n",
-        encoding="utf-8",
-    )
 
 
 def _default_exporter_factory(db: Session) -> StaticOptionsExporter:
@@ -62,7 +53,7 @@ class StaticOptionsSection:
         )
         self._exporter_factory = exporter_factory or _default_exporter_factory
         self._selector = selector or StaticOptionsArtifactSelector()
-        self._write_json = json_writer or _write_json
+        self._write_json = json_writer or write_static_json
 
     def compose_live(
         self,

@@ -20,20 +20,17 @@ from app.services.static_artifact_combiner import (
     StaticArtifactCombiner,
     StaticArtifactFormulaError,
 )
+from app.services.static_global_artifacts import (
+    GLOBAL_STATIC_ARTIFACTS,
+    find_global_artifact,
+    global_artifact_as_of_date,
+)
 from app.services.static_market_artifact_contract import (
     STATIC_MARKET_METADATA_FILENAME,
     StaticMarketArtifactContractError,
     expected_market_from_static_market_manifest_path,
     market_from_static_market_artifact_name,
     read_static_market_manifest,
-)
-from app.services.static_options_contract import (
-    StaticOptionsArtifactError,
-    validate_static_options_artifact,
-)
-from app.services.static_cot_contract import (
-    StaticCotArtifactError,
-    validate_static_cot_artifact,
 )
 
 
@@ -312,51 +309,25 @@ def downloaded_market_as_of_date(target_dir: Path) -> date | None:
 
 
 def find_options_artifact_dir(base: Path) -> Path | None:
-    candidates = [base]
-    if base.exists():
-        candidates.extend(path.parent for path in base.rglob("manifest.json"))
-    for candidate in candidates:
-        try:
-            validate_static_options_artifact(candidate)
-        except StaticOptionsArtifactError:
-            continue
-        return candidate
-    return None
+    return find_global_artifact(GLOBAL_STATIC_ARTIFACTS["options"], base)
 
 
 def downloaded_options_as_of_date(target_dir: Path) -> date | None:
-    options_dir = find_options_artifact_dir(target_dir)
-    if options_dir is None:
-        return None
-    try:
-        manifest = validate_static_options_artifact(options_dir)
-    except StaticOptionsArtifactError:
-        return None
-    return _coerce_manifest_date(manifest.get("source_as_of_date"))
+    return global_artifact_as_of_date(
+        GLOBAL_STATIC_ARTIFACTS["options"],
+        target_dir,
+    )
 
 
 def find_cot_artifact_dir(base: Path) -> Path | None:
-    candidates = [base]
-    if base.exists():
-        candidates.extend(path.parent for path in base.rglob("index.json"))
-    for candidate in candidates:
-        try:
-            validate_static_cot_artifact(candidate)
-        except StaticCotArtifactError:
-            continue
-        return candidate
-    return None
+    return find_global_artifact(GLOBAL_STATIC_ARTIFACTS["cot"], base)
 
 
 def downloaded_cot_as_of_date(target_dir: Path) -> date | None:
-    cot_dir = find_cot_artifact_dir(target_dir)
-    if cot_dir is None:
-        return None
-    try:
-        index = validate_static_cot_artifact(cot_dir)
-    except StaticCotArtifactError:
-        return None
-    return _coerce_manifest_date(index.get("report_date"))
+    return global_artifact_as_of_date(
+        GLOBAL_STATIC_ARTIFACTS["cot"],
+        target_dir,
+    )
 
 
 def _candidate_is_newer(
@@ -550,15 +521,20 @@ def download_fallback_artifacts(
     current_markets = collect_current_markets(current_dir)
     fallback_markets: set[str] = set()
     fallback_dates_by_market: dict[str, date | None] = {}
-    fallback_options_date: date | None = None
-    fallback_cot_date: date | None = None
-    if (
-        current_options_dir is not None
-        and find_options_artifact_dir(current_options_dir) is not None
-    ):
-        print("Current run already has a compatible static US options artifact.")
-    if current_cot_dir is not None and find_cot_artifact_dir(current_cot_dir) is not None:
-        print("Current run already has a compatible global COT artifact.")
+    global_directories = {
+        "options": (current_options_dir, fallback_options_dir),
+        "cot": (current_cot_dir, fallback_cot_dir),
+    }
+    global_fallback_dates: dict[str, date | None] = {
+        key: None for key in global_directories
+    }
+    for key, (current_global_dir, _fallback_global_dir) in global_directories.items():
+        spec = GLOBAL_STATIC_ARTIFACTS[key]
+        if (
+            current_global_dir is not None
+            and find_global_artifact(spec, current_global_dir) is not None
+        ):
+            print(f"Current run already has a compatible {spec.label} artifact.")
     if current_markets:
         print(
             f"Current run already has market artifacts: {', '.join(sorted(current_markets))}.",
@@ -601,79 +577,48 @@ def download_fallback_artifacts(
             if not artifact.get("expired")
         }
 
-        cot_artifact = artifacts_by_name.get("static-cot-global")
-        if (
-            cot_artifact is not None
-            and fallback_cot_dir is not None
-            and not _run_cannot_beat_incumbent(
-                run_upper_bound=run_upper_bound,
-                incumbent_date=fallback_cot_date,
-            )
-        ):
-            artifact_name = "static-cot-global"
+        for key, (
+            _current_global_dir,
+            fallback_global_dir,
+        ) in global_directories.items():
+            spec = GLOBAL_STATIC_ARTIFACTS[key]
+            incumbent_date = global_fallback_dates[key]
+            if (
+                spec.artifact_name not in artifacts_by_name
+                or fallback_global_dir is None
+                or _run_cannot_beat_incumbent(
+                    run_upper_bound=run_upper_bound,
+                    incumbent_date=incumbent_date,
+                )
+            ):
+                continue
             candidate = _download_candidate(
                 repo=repo,
                 run_id=int(run_id),
-                artifact_name=artifact_name,
+                artifact_name=spec.artifact_name,
                 parent_dir=fallback_dir,
-                finder=find_cot_artifact_dir,
-                date_reader=downloaded_cot_as_of_date,
+                finder=partial(find_global_artifact, spec),
+                date_reader=partial(global_artifact_as_of_date, spec),
                 missing_warning=(
-                    f"{artifact_name} from run {run_id} is not a compatible "
-                    "static COT artifact."
+                    f"{spec.artifact_name} from run {run_id} is not a compatible "
+                    f"{spec.label} artifact."
                 ),
             )
-            if candidate is not None:
-                if _candidate_is_newer(candidate.as_of_date, fallback_cot_date):
-                    fallback_cot_dir.parent.mkdir(parents=True, exist_ok=True)
-                    _install_market_candidate(
-                        target_dir=fallback_cot_dir,
-                        candidate_dir=candidate.artifact_dir,
-                    )
-                    fallback_cot_date = candidate.as_of_date
-                    print(
-                        f"Using fallback artifact {artifact_name} from Static Site "
-                        f"run {run_id} on {branch_name}.",
-                        flush=True,
-                    )
-                shutil.rmtree(candidate.wrapper_dir, ignore_errors=True)
-
-        options_artifact = artifacts_by_name.get("static-options-US")
-        if (
-            options_artifact is not None
-            and fallback_options_dir is not None
-            and not _run_cannot_beat_incumbent(
-                run_upper_bound=run_upper_bound,
-                incumbent_date=fallback_options_date,
-            )
-        ):
-            artifact_name = "static-options-US"
-            candidate = _download_candidate(
-                repo=repo,
-                run_id=int(run_id),
-                artifact_name=artifact_name,
-                parent_dir=fallback_dir,
-                finder=find_options_artifact_dir,
-                date_reader=downloaded_options_as_of_date,
-                missing_warning=(
-                    f"{artifact_name} from run {run_id} is not a compatible "
-                    "static options artifact."
-                ),
-            )
-            if candidate is not None:
-                if _candidate_is_newer(candidate.as_of_date, fallback_options_date):
-                    fallback_options_dir.parent.mkdir(parents=True, exist_ok=True)
-                    _install_market_candidate(
-                        target_dir=fallback_options_dir,
-                        candidate_dir=candidate.artifact_dir,
-                    )
-                    fallback_options_date = candidate.as_of_date
-                    print(
-                        f"Using fallback artifact {artifact_name} from Static Site "
-                        f"run {run_id} on {branch_name}.",
-                        flush=True,
-                    )
-                shutil.rmtree(candidate.wrapper_dir, ignore_errors=True)
+            if candidate is None:
+                continue
+            if _candidate_is_newer(candidate.as_of_date, incumbent_date):
+                fallback_global_dir.parent.mkdir(parents=True, exist_ok=True)
+                _install_market_candidate(
+                    target_dir=fallback_global_dir,
+                    candidate_dir=candidate.artifact_dir,
+                )
+                global_fallback_dates[key] = candidate.as_of_date
+                print(
+                    f"Using fallback artifact {spec.artifact_name} from Static Site "
+                    f"run {run_id} on {branch_name}.",
+                    flush=True,
+                )
+            shutil.rmtree(candidate.wrapper_dir, ignore_errors=True)
 
         for artifact_name in sorted(artifacts_by_name):
             market = market_from_static_market_artifact_name(artifact_name)

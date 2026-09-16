@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import math
 from pathlib import Path
 from typing import Any
 
@@ -11,45 +9,30 @@ from pydantic import ValidationError
 
 from app.domain.cot.models import STATIC_COT_SCHEMA_VERSION
 from app.schemas.cot import CotCatalogResponse, CotHistoryResponse
+from app.services.static_artifact_io import load_finite_json, safe_artifact_path
 
 
 class StaticCotArtifactError(ValueError):
     """Raised when a static COT bundle is unsafe or internally inconsistent."""
 
 
-def _require_finite(value: Any, *, location: str) -> None:
-    if isinstance(value, float) and not math.isfinite(value):
-        raise StaticCotArtifactError(f"non-finite number at {location}")
-    if isinstance(value, dict):
-        for key, item in value.items():
-            _require_finite(item, location=f"{location}.{key}")
-    elif isinstance(value, list):
-        for index, item in enumerate(value):
-            _require_finite(item, location=f"{location}[{index}]")
-
-
 def _load_json(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise StaticCotArtifactError(f"invalid COT artifact file: {path}") from exc
-    if not isinstance(payload, dict):
-        raise StaticCotArtifactError(f"COT artifact must be an object: {path}")
-    _require_finite(payload, location=path.as_posix())
-    return payload
+    return load_finite_json(
+        path,
+        label="COT",
+        error=StaticCotArtifactError,
+    )
 
 
 def _history_path(cot_dir: Path, advertised: str) -> Path:
-    relative = Path(str(advertised))
-    if relative.is_absolute() or ".." in relative.parts:
-        raise StaticCotArtifactError(f"unsafe COT history path: {advertised}")
-    if len(relative.parts) != 2 or relative.parts[0] != "cot":
-        raise StaticCotArtifactError(f"unsafe COT history path: {advertised}")
-    root = cot_dir.resolve()
-    resolved = (root / relative.parts[1]).resolve()
-    if root not in resolved.parents:
-        raise StaticCotArtifactError(f"unsafe COT history path: {advertised}")
-    return resolved
+    return safe_artifact_path(
+        cot_dir,
+        advertised,
+        prefix="cot",
+        label="COT history",
+        error=StaticCotArtifactError,
+        exact_depth=2,
+    )
 
 
 def _same_publication(

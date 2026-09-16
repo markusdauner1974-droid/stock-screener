@@ -2,26 +2,16 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
-from app.infra.serialization import json_safe
 from app.schemas.cot import CotCatalogResponse, CotHistoryResponse
 from app.services.atomic_directory_publisher import AtomicDirectoryPublisher
+from app.services.static_artifact_io import write_static_json
 from app.services.static_cot_contract import (
     STATIC_COT_SCHEMA_VERSION,
     validate_static_cot_artifact,
 )
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(json_safe(payload), allow_nan=False, indent=2, sort_keys=True)
-        + "\n",
-        encoding="utf-8",
-    )
 
 
 class StaticCotExporter:
@@ -41,13 +31,11 @@ class StaticCotExporter:
                 history = CotHistoryResponse.from_view(
                     self._queries.history(instrument.slug, "5y")
                 )
-                _write_json(
+                write_static_json(
                     stage / f"{instrument.slug}.json",
                     history.model_dump(mode="json"),
                 )
-                histories[instrument.slug] = {
-                    "path": f"cot/{instrument.slug}.json"
-                }
+                histories[instrument.slug] = {"path": f"cot/{instrument.slug}.json"}
             publication = catalog.publication
             index = {
                 "schema_version": STATIC_COT_SCHEMA_VERSION,
@@ -60,7 +48,7 @@ class StaticCotExporter:
                 "catalog": catalog.model_dump(mode="json"),
                 "histories": histories,
             }
-            _write_json(stage / "index.json", index)
+            write_static_json(stage / "index.json", index)
             return index
 
         return self._publisher.publish(

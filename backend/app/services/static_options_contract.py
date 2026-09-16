@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import math
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +12,7 @@ from app.schemas.options_analytics import (
     OptionsSymbolDetailResponse,
     StaticOptionsManifest,
 )
+from app.services.static_artifact_io import load_finite_json, safe_artifact_path
 from app.use_cases.options_analytics import (
     OPTIONS_ANALYTICS_CALCULATION_VERSION,
 )
@@ -26,46 +25,21 @@ class StaticOptionsArtifactError(ValueError):
 
 
 def _load_json(path: Path) -> dict[str, Any]:
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise StaticOptionsArtifactError(
-            f"invalid options artifact file: {path}"
-        ) from exc
-    if not isinstance(payload, dict):
-        raise StaticOptionsArtifactError(f"options artifact must be an object: {path}")
-    _require_finite(payload, location=path.as_posix())
-    return payload
-
-
-def _require_finite(value: Any, *, location: str) -> None:
-    if isinstance(value, float) and not math.isfinite(value):
-        raise StaticOptionsArtifactError(f"non-finite number at {location}")
-    if isinstance(value, dict):
-        for key, item in value.items():
-            _require_finite(item, location=f"{location}.{key}")
-    elif isinstance(value, list):
-        for index, item in enumerate(value):
-            _require_finite(item, location=f"{location}[{index}]")
+    return load_finite_json(
+        path,
+        label="options",
+        error=StaticOptionsArtifactError,
+    )
 
 
 def _artifact_path(options_dir: Path, advertised_path: str) -> Path:
-    relative = Path(str(advertised_path))
-    if relative.is_absolute() or ".." in relative.parts:
-        raise StaticOptionsArtifactError(
-            f"unsafe options artifact path: {advertised_path}"
-        )
-    if not relative.parts or relative.parts[0] != "options":
-        raise StaticOptionsArtifactError(
-            f"unsafe options artifact path: {advertised_path}"
-        )
-    root = options_dir.resolve()
-    resolved = (root / Path(*relative.parts[1:])).resolve()
-    if resolved != root and root not in resolved.parents:
-        raise StaticOptionsArtifactError(
-            f"unsafe options artifact path: {advertised_path}"
-        )
-    return resolved
+    return safe_artifact_path(
+        options_dir,
+        advertised_path,
+        prefix="options",
+        label="options artifact",
+        error=StaticOptionsArtifactError,
+    )
 
 
 def _same_run(payload: Any, manifest: dict[str, Any], *, location: str) -> None:

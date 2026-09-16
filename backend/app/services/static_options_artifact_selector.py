@@ -8,8 +8,8 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-from app.infra.serialization import json_safe
 from app.services.atomic_directory_publisher import AtomicDirectoryPublisher
+from app.services.static_artifact_io import write_static_json
 from app.services.static_options_contract import (
     StaticOptionsArtifactError,
     validate_static_options_artifact,
@@ -36,14 +36,6 @@ def _stale_order_key(artifact: tuple[Path, dict[str, Any]]) -> tuple[date, datet
     )
 
 
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.write_text(
-        json.dumps(json_safe(payload), allow_nan=False, indent=2, sort_keys=True)
-        + "\n",
-        encoding="utf-8",
-    )
-
-
 def _mark_stale(options_dir: Path, *, equity_run_id: int, equity_date: date) -> None:
     manifest_path = options_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -55,7 +47,7 @@ def _mark_stale(options_dir: Path, *, equity_run_id: int, equity_date: date) -> 
     if "stale_relative_to_equity" not in reasons:
         reasons.append("stale_relative_to_equity")
     manifest["reason_codes"] = reasons
-    _write_json(manifest_path, manifest)
+    write_static_json(manifest_path, manifest)
 
     payload_paths = [options_dir / "command-center.json"]
     payload_paths.extend(
@@ -69,7 +61,7 @@ def _mark_stale(options_dir: Path, *, equity_run_id: int, equity_date: date) -> 
         if "stale_relative_to_equity" not in reason_codes:
             reason_codes.append("stale_relative_to_equity")
         payload["reason_codes"] = reason_codes
-        _write_json(path, payload)
+        write_static_json(path, payload)
 
 
 class StaticOptionsArtifactSelector:
@@ -144,7 +136,7 @@ class StaticOptionsArtifactSelector:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 manifest["equity_feature_run_id"] = equity_feature_run_id
                 manifest["equity_as_of_date"] = equity_as_of_date.isoformat()
-                _write_json(manifest_path, manifest)
+                write_static_json(manifest_path, manifest)
 
         self._publisher.publish(
             output,
