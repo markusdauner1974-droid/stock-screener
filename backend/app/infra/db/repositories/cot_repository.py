@@ -296,7 +296,7 @@ class SqlCotRepository:
         if dialect_name not in {"postgresql", "sqlite"}:
             raise RuntimeError(f"unsupported COT repository dialect: {dialect_name}")
         insert = postgresql_insert if dialect_name == "postgresql" else sqlite_insert
-        statement = insert(CotWeeklyPosition).values(values)
+        statement = insert(CotWeeklyPosition)
         update_fields = {
             field: getattr(statement.excluded, field)
             for field in (
@@ -321,7 +321,8 @@ class SqlCotRepository:
             statement.on_conflict_do_update(
                 index_elements=("instrument_id", "report_date", "participant"),
                 set_=update_fields,
-            )
+            ),
+            values,
         )
 
     @staticmethod

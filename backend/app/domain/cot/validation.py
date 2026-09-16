@@ -20,6 +20,7 @@ EXPECTED_DATASET_BY_FAMILY = {
     ReportFamily.DISAGGREGATED_FUTURES_ONLY: "72hh-3qpy",
     ReportFamily.TFF_FUTURES_ONLY: "gpe5-46if",
 }
+MINIMUM_INITIAL_HISTORY_WEEKS = 156
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,7 @@ def validate_cot_snapshot(
     snapshot = tuple(weeks)
     definitions = tuple(instruments)
     definitions_by_slug = {definition.slug: definition for definition in definitions}
+    persisted_keys = set(existing_keys)
     reasons: list[str] = []
 
     def reject(reason: str) -> None:
@@ -139,8 +141,14 @@ def validate_cot_snapshot(
         ):
             reject("nonreportable_short_reconciliation_failed")
 
-    if not set(existing_keys).issubset(observed_keys):
+    if not persisted_keys.issubset(observed_keys):
         reject("source_history_truncated")
+
+    if not persisted_keys and any(
+        len(weeks_by_slug.get(definition.slug, ())) < MINIMUM_INITIAL_HISTORY_WEEKS
+        for definition in definitions
+    ):
+        reject("insufficient_initial_history")
 
     latest_report_dates: dict[str, date] = {}
     definitions_by_family: dict[
@@ -164,6 +172,12 @@ def validate_cot_snapshot(
             reject("incomplete_latest_family_coverage")
             continue
         latest_report_dates[family.value] = next(iter(common_latest_dates))
+
+    if (
+        len(latest_report_dates) == len(definitions_by_family)
+        and len(set(latest_report_dates.values())) > 1
+    ):
+        reject("mixed_latest_report_dates")
 
     return CotValidationResult(
         valid=not reasons,

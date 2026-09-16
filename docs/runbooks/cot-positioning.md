@@ -26,6 +26,8 @@ cd backend
 
 Publication is atomic. A CFTC fetch, validation, or persistence failure leaves the prior publication pointer active, so users continue to see the last valid dataset.
 
+The first publication requires at least 156 weekly observations for every curated instrument, and every report family must share one latest Tuesday. These guards prevent a truncated initial backfill or mixed-date commodities/financials snapshot from becoming current.
+
 If a refresh fails:
 
 1. Inspect the most recent failed row in `cot_import_runs`, including its status, validation reasons, dataset IDs, and registry/calculation versions.

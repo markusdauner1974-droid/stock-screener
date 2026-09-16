@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date
+from datetime import date, timedelta
 
 from app.domain.cot.models import NormalizedCotWeek, Participant, RawParticipantPosition
 from app.domain.cot.registry import instrument_by_slug
@@ -13,22 +13,38 @@ def make_valid_week(
     *,
     slug: str = "gold",
 ) -> NormalizedCotWeek:
-    positions = (
-        RawParticipantPosition(Participant.PRODUCER_MERCHANT, 100, 200, 0),
-        RawParticipantPosition(Participant.SWAP_DEALER, 100, 100, 50),
-        RawParticipantPosition(Participant.MANAGED_MONEY, 200, 100, 50),
-        RawParticipantPosition(Participant.OTHER_REPORTABLES, 100, 100, 50),
-        RawParticipantPosition(Participant.NONREPORTABLES, 350, 350, 0),
+    definition = instrument_by_slug(slug)
+    reportables = tuple(
+        participant
+        for participant in definition.participants
+        if participant is not Participant.NONREPORTABLES
+    )
+    reportable_positions = tuple(
+        RawParticipantPosition(participant, 100, 100, 0)
+        for participant in reportables
+    )
+    reported_total = 100 * len(reportables)
+    positions = reportable_positions + (
+        RawParticipantPosition(
+            Participant.NONREPORTABLES,
+            1000 - reported_total,
+            1000 - reported_total,
+            0,
+        ),
     )
     return NormalizedCotWeek(
-        source_dataset_id="72hh-3qpy",
+        source_dataset_id=(
+            "gpe5-46if"
+            if definition.report_family.value == "tff_futures_only"
+            else "72hh-3qpy"
+        ),
         source_row_id=f"{slug}-{report_date.isoformat()}",
         source_fingerprint=f"fingerprint-{slug}-{report_date.isoformat()}",
         instrument_slug=slug,
         report_date=report_date,
         open_interest=1000,
-        reported_long_total=650,
-        reported_short_total=650,
+        reported_long_total=reported_total,
+        reported_short_total=reported_total,
         positions=positions,
     )
 
@@ -55,13 +71,17 @@ def replace_position(
 
 
 def test_validation_accepts_a_complete_reconciled_snapshot():
-    week = make_valid_week(date(2026, 9, 8))
+    latest = date(2026, 9, 8)
+    weeks = tuple(
+        make_valid_week(latest - timedelta(weeks=index))
+        for index in range(156)
+    )
 
-    result = validate_cot_snapshot((week,), (definition_for(week),), ())
+    result = validate_cot_snapshot(weeks, (definition_for(weeks[0]),), ())
 
     assert result.valid is True
     assert result.reason_codes == ()
-    assert result.week_count == 1
+    assert result.week_count == 156
 
 
 def test_validation_rejects_duplicate_instrument_week():
@@ -111,6 +131,29 @@ def test_validation_requires_every_family_instrument_at_the_common_latest_date()
 
     assert result.valid is False
     assert "incomplete_latest_family_coverage" in result.reason_codes
+
+
+def test_validation_requires_a_common_latest_date_across_report_families():
+    gold = make_valid_week(date(2026, 9, 8), slug="gold")
+    sp_500 = make_valid_week(date(2026, 9, 1), slug="sp-500")
+
+    result = validate_cot_snapshot(
+        (gold, sp_500),
+        (instrument_by_slug("gold"), instrument_by_slug("sp-500")),
+        (("gold", gold.report_date), ("sp-500", sp_500.report_date)),
+    )
+
+    assert result.valid is False
+    assert "mixed_latest_report_dates" in result.reason_codes
+
+
+def test_validation_rejects_truncated_initial_history():
+    week = make_valid_week(date(2026, 9, 8))
+
+    result = validate_cot_snapshot((week,), (definition_for(week),), ())
+
+    assert result.valid is False
+    assert "insufficient_initial_history" in result.reason_codes
 
 
 def test_validation_rejects_wrong_official_dataset_identity():

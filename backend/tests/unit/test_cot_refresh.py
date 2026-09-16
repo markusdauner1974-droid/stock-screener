@@ -54,18 +54,12 @@ def make_week(definition, report_date: date, sequence: int) -> NormalizedCotWeek
 class FakeSource:
     def __init__(self) -> None:
         latest = date(2026, 9, 8)
-        gold = next(item for item in COT_INSTRUMENTS if item.slug == "gold")
         start = latest - timedelta(weeks=156)
-        gold_history = tuple(
-            make_week(gold, start + timedelta(weeks=index), index)
+        self.weeks = tuple(
+            make_week(definition, start + timedelta(weeks=index), index)
+            for definition in COT_INSTRUMENTS
             for index in range(157)
         )
-        latest_only = tuple(
-            make_week(definition, latest, 156)
-            for definition in COT_INSTRUMENTS
-            if definition.slug != "gold"
-        )
-        self.weeks = gold_history + latest_only
 
     def fetch(self, _instruments):
         return CotSourceSnapshot(
@@ -180,6 +174,21 @@ def test_refresh_publishes_complete_valid_source_even_when_prices_fail():
     assert result.instrument_count == 31
     assert result.price_unavailable_count == 31
     assert repository.published_run_id == result.run_id
+
+
+def test_refresh_rejects_a_truncated_first_backfill():
+    use_case, source, repository = make_use_case()
+    source.weeks = tuple(
+        week
+        for week in source.weeks
+        if week.instrument_slug != "gold" or week.report_date == date(2026, 9, 8)
+    )
+
+    result = use_case.execute(CotRefreshCommand(origin="test", force=False))
+
+    assert result.status == "failed_quality"
+    assert "insufficient_initial_history" in result.reason_codes
+    assert repository.published_run_id is None
 
 
 def test_refresh_no_change_does_not_move_pointer():

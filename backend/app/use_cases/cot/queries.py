@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -240,7 +240,7 @@ class CotQueryService:
         if definition.price.yahoo_symbol is not None:
             closes = self._price_reader.closes(
                 definition.price.yahoo_symbol,
-                start=report_dates[0],
+                start=report_dates[0] - timedelta(days=7),
                 end=report_dates[-1],
             )
         aligned = align_prices_to_report_dates(report_dates, closes)
