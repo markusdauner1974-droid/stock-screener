@@ -60,6 +60,7 @@ def export_static_site_data(
             clean=True,
             markets=normalized_markets,
             options_fallback_dir=target / "options",
+            cot_fallback_dir=target / "cot",
         )
     except NoPublishedStaticMarketArtifact as exc:
         logger.warning("Static export skipped: %s", exc)

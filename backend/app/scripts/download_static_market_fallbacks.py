@@ -31,6 +31,10 @@ from app.services.static_options_contract import (
     StaticOptionsArtifactError,
     validate_static_options_artifact,
 )
+from app.services.static_cot_contract import (
+    StaticCotArtifactError,
+    validate_static_cot_artifact,
+)
 
 
 def warn(message: str) -> None:
@@ -331,6 +335,30 @@ def downloaded_options_as_of_date(target_dir: Path) -> date | None:
     return _coerce_manifest_date(manifest.get("source_as_of_date"))
 
 
+def find_cot_artifact_dir(base: Path) -> Path | None:
+    candidates = [base]
+    if base.exists():
+        candidates.extend(path.parent for path in base.rglob("index.json"))
+    for candidate in candidates:
+        try:
+            validate_static_cot_artifact(candidate)
+        except StaticCotArtifactError:
+            continue
+        return candidate
+    return None
+
+
+def downloaded_cot_as_of_date(target_dir: Path) -> date | None:
+    cot_dir = find_cot_artifact_dir(target_dir)
+    if cot_dir is None:
+        return None
+    try:
+        index = validate_static_cot_artifact(cot_dir)
+    except StaticCotArtifactError:
+        return None
+    return _coerce_manifest_date(index.get("report_date"))
+
+
 def _candidate_is_newer(
     candidate_date: date | None,
     incumbent_date: date | None,
@@ -479,6 +507,8 @@ def download_fallback_artifacts(
     required_formula_by_market: Mapping[str, str] | None = None,
     current_options_dir: Path | None = None,
     fallback_options_dir: Path | None = None,
+    current_cot_dir: Path | None = None,
+    fallback_cot_dir: Path | None = None,
 ) -> set[str]:
     fallback_dir.mkdir(parents=True, exist_ok=True)
     formula_requirements = {
@@ -521,11 +551,14 @@ def download_fallback_artifacts(
     fallback_markets: set[str] = set()
     fallback_dates_by_market: dict[str, date | None] = {}
     fallback_options_date: date | None = None
+    fallback_cot_date: date | None = None
     if (
         current_options_dir is not None
         and find_options_artifact_dir(current_options_dir) is not None
     ):
         print("Current run already has a compatible static US options artifact.")
+    if current_cot_dir is not None and find_cot_artifact_dir(current_cot_dir) is not None:
+        print("Current run already has a compatible global COT artifact.")
     if current_markets:
         print(
             f"Current run already has market artifacts: {', '.join(sorted(current_markets))}.",
@@ -567,6 +600,43 @@ def download_fallback_artifacts(
             for artifact in artifacts
             if not artifact.get("expired")
         }
+
+        cot_artifact = artifacts_by_name.get("static-cot-global")
+        if (
+            cot_artifact is not None
+            and fallback_cot_dir is not None
+            and not _run_cannot_beat_incumbent(
+                run_upper_bound=run_upper_bound,
+                incumbent_date=fallback_cot_date,
+            )
+        ):
+            artifact_name = "static-cot-global"
+            candidate = _download_candidate(
+                repo=repo,
+                run_id=int(run_id),
+                artifact_name=artifact_name,
+                parent_dir=fallback_dir,
+                finder=find_cot_artifact_dir,
+                date_reader=downloaded_cot_as_of_date,
+                missing_warning=(
+                    f"{artifact_name} from run {run_id} is not a compatible "
+                    "static COT artifact."
+                ),
+            )
+            if candidate is not None:
+                if _candidate_is_newer(candidate.as_of_date, fallback_cot_date):
+                    fallback_cot_dir.parent.mkdir(parents=True, exist_ok=True)
+                    _install_market_candidate(
+                        target_dir=fallback_cot_dir,
+                        candidate_dir=candidate.artifact_dir,
+                    )
+                    fallback_cot_date = candidate.as_of_date
+                    print(
+                        f"Using fallback artifact {artifact_name} from Static Site "
+                        f"run {run_id} on {branch_name}.",
+                        flush=True,
+                    )
+                shutil.rmtree(candidate.wrapper_dir, ignore_errors=True)
 
         options_artifact = artifacts_by_name.get("static-options-US")
         if (
@@ -703,6 +773,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--current-options-dir", type=Path)
     parser.add_argument("--fallback-options-dir", type=Path)
+    parser.add_argument("--current-cot-dir", type=Path)
+    parser.add_argument("--fallback-cot-dir", type=Path)
     args = parser.parse_args(argv)
 
     if not args.repo:
@@ -717,6 +789,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         required_formula_by_market=args.fallback_rs_formula_overrides_json,
         current_options_dir=args.current_options_dir,
         fallback_options_dir=args.fallback_options_dir,
+        current_cot_dir=args.current_cot_dir,
+        fallback_cot_dir=args.fallback_cot_dir,
     )
     return 0
 

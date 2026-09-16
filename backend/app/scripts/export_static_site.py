@@ -276,6 +276,33 @@ def _run_static_options_refresh(source_run_id: int) -> dict[str, Any]:
         }
 
 
+def _run_static_cot_refresh() -> dict[str, Any]:
+    from app.use_cases.cot.refresh import CotRefreshCommand
+    from app.wiring.bootstrap import get_refresh_cot_use_case
+
+    try:
+        with SessionLocal() as db:
+            result = get_refresh_cot_use_case(db).execute(
+                CotRefreshCommand(origin="static_build", force=False)
+            )
+        return {
+            "status": result.status,
+            "run_id": result.run_id,
+            "report_date": (
+                result.report_date.isoformat() if result.report_date else None
+            ),
+            "instrument_count": result.instrument_count,
+            "price_unavailable_count": result.price_unavailable_count,
+            "reason_codes": list(result.reason_codes),
+        }
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "reason_codes": ["cot_refresh_failed"],
+            "error": str(exc),
+        }
+
+
 def _write_market_diagnostics(output_dir: Path, market: str, snapshot: Mapping[str, Any]) -> Path:
     diagnostics_dir = output_dir / "diagnostics" / market.lower()
     diagnostics_dir.mkdir(parents=True, exist_ok=True)
@@ -1193,6 +1220,8 @@ def _run_daily_refresh(
                             "Static US Options Analytics did not publish; "
                             "last-good options may be used independently."
                         )
+                cot_result = _run_static_cot_refresh()
+                results["cot"] = cot_result
             elif default_run_id is not None:
                 warnings.append(
                     f"{STATIC_DEFAULT_MARKET} feature snapshot returned status "
@@ -1239,6 +1268,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--fallback-options-artifacts-dir",
         help="Optional last-good options directory selected independently in combine mode.",
+    )
+    parser.add_argument(
+        "--cot-artifacts-dir",
+        help="Optional current global COT directory selected independently in combine mode.",
+    )
+    parser.add_argument(
+        "--fallback-cot-artifacts-dir",
+        help="Optional last-good global COT directory selected independently in combine mode.",
     )
     parser.add_argument(
         "--build-mode",
@@ -1310,6 +1347,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.options_artifacts_dir or args.fallback_options_artifacts_dir
     ) and not args.combine_artifacts_dir:
         raise SystemExit("options artifact directories require --combine-artifacts-dir")
+    if (
+        args.cot_artifacts_dir or args.fallback_cot_artifacts_dir
+    ) and not args.combine_artifacts_dir:
+        raise SystemExit("COT artifact directories require --combine-artifacts-dir")
     if args.rrg_history_dir and not args.market:
         raise SystemExit("--rrg-history-dir requires --market")
     if args.combine_artifacts_dir and args.rrg_history_dir:
@@ -1347,6 +1388,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.fallback_options_artifacts_dir:
             options_combine_kwargs["fallback_options_artifacts_dir"] = Path(
                 args.fallback_options_artifacts_dir
+            )
+        if args.cot_artifacts_dir:
+            options_combine_kwargs["cot_artifacts_dir"] = Path(
+                args.cot_artifacts_dir
+            )
+        if args.fallback_cot_artifacts_dir:
+            options_combine_kwargs["fallback_cot_artifacts_dir"] = Path(
+                args.fallback_cot_artifacts_dir
             )
         result = StaticSiteExportService.combine_market_artifacts(
             Path(args.combine_artifacts_dir),

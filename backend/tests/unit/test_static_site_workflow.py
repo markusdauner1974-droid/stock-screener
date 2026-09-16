@@ -69,6 +69,16 @@ def _fallback_download_step() -> str:
     )
 
 
+def test_static_site_workflow_publishes_and_combines_global_cot_artifact() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "static-site.yml").read_text()
+
+    assert "static-cot-global" in workflow
+    assert "--current-cot-dir /tmp/static-cot-current" in workflow
+    assert "--fallback-cot-dir /tmp/static-cot-fallback" in workflow
+    assert "--cot-artifacts-dir /tmp/static-cot-current" in workflow
+    assert "--fallback-cot-artifacts-dir /tmp/static-cot-fallback" in workflow
+
+
 def test_fake_gh_launcher_handles_python_path_with_spaces(
     tmp_path, monkeypatch
 ) -> None:

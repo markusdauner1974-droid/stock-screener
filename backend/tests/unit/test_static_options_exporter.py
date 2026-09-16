@@ -300,3 +300,4 @@ def test_server_static_export_supplies_existing_options_as_last_good_fallback(
 
     assert result["status"] == "completed"
     assert captured["options_fallback_dir"] == target / "options"
+    assert captured["cot_fallback_dir"] == target / "cot"

@@ -215,6 +215,7 @@ class StaticSiteExportService:
         rs_formula_version_overrides: Mapping[str, str] | None = None,
         feature_run_ids_by_market: Mapping[str, int] | None = None,
         options_fallback_dir: Path | None = None,
+        cot_fallback_dir: Path | None = None,
     ) -> StaticSiteExportResult:
         output_dir = Path(output_dir)
         generated_at = (
@@ -304,7 +305,7 @@ class StaticSiteExportService:
                 db=db,
                 output_dir=output_dir,
                 generated_at=generated_at,
-                fallback_cot_dir=None,
+                fallback_cot_dir=cot_fallback_dir,
                 global_assets=global_assets,
             )
             warnings.extend(cot_result.warnings)
@@ -340,6 +341,8 @@ class StaticSiteExportService:
         optional_markets: Iterable[str] = (),
         options_artifacts_dir: Path | None = None,
         fallback_options_artifacts_dir: Path | None = None,
+        cot_artifacts_dir: Path | None = None,
+        fallback_cot_artifacts_dir: Path | None = None,
     ) -> StaticSiteExportResult:
         combined = StaticArtifactCombiner(
             schema_version=STATIC_SITE_SCHEMA_VERSION,
@@ -379,6 +382,19 @@ class StaticSiteExportService:
             market_metadata_path=(Path(output_dir) / cls._market_metadata_path("US")),
         )
         warnings.extend(options_result.warnings)
+        cot_result = StaticCotSection(
+            enabled=(
+                cot_artifacts_dir is not None
+                or fallback_cot_artifacts_dir is not None
+            )
+        ).compose_combined(
+            output_dir=Path(output_dir),
+            current_cot_dir=cot_artifacts_dir,
+            fallback_cot_dir=fallback_cot_artifacts_dir,
+            global_assets=manifest.setdefault("assets", {}),
+        )
+        warnings.extend(cot_result.warnings)
+        cls._write_json(Path(output_dir) / "manifest.json", manifest)
         cls.assert_live_only_isolation(Path(output_dir))
         return StaticSiteExportResult(
             output_dir=combined.output_dir,

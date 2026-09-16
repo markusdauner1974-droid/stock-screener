@@ -403,6 +403,7 @@ jobs:
             echo "has_price_bundle=false" >> "$GITHUB_OUTPUT"
             echo "rrg_history_publishable=false" >> "$GITHUB_OUTPUT"
             echo "has_options_artifact=false" >> "$GITHUB_OUTPUT"
+            echo "has_cot_artifact=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "$status" -eq 79 ]; then
@@ -412,6 +413,7 @@ jobs:
             echo "has_price_bundle=$has_price_bundle" >> "$GITHUB_OUTPUT"
             echo "rrg_history_publishable=false" >> "$GITHUB_OUTPUT"
             echo "has_options_artifact=false" >> "$GITHUB_OUTPUT"
+            echo "has_cot_artifact=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "$status" -ne 0 ]; then
@@ -429,12 +431,18 @@ jobs:
             echo "has_artifact=false" >> "$GITHUB_OUTPUT"
             echo "rrg_history_publishable=false" >> "$GITHUB_OUTPUT"
             echo "has_options_artifact=false" >> "$GITHUB_OUTPUT"
+            echo "has_cot_artifact=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "${{ matrix.market }}" = "US" ] && [ -f /tmp/static-data/options/manifest.json ]; then
             echo "has_options_artifact=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_options_artifact=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "${{ matrix.market }}" = "US" ] && [ -f /tmp/static-data/cot/index.json ]; then
+            echo "has_cot_artifact=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_cot_artifact=false" >> "$GITHUB_OUTPUT"
           fi
           echo "has_artifact=true" >> "$GITHUB_OUTPUT"
 
@@ -575,6 +583,14 @@ jobs:
           path: /tmp/static-data/options
           if-no-files-found: error
 
+      - name: Upload current global COT artifact
+        if: ${{ steps.export-market.outputs.has_cot_artifact == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: static-cot-global
+          path: /tmp/static-data/cot
+          if-no-files-found: error
+
       - name: Publish US options history
         if: ${{ steps.export-market.outputs.has_options_artifact == 'true' && steps.restore-options-history.outputs.safe_to_publish == 'true' }}
         continue-on-error: true
@@ -693,6 +709,13 @@ jobs:
           name: static-options-US
           path: /tmp/static-options-current
 
+      - name: Download current global COT artifact
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: static-cot-global
+          path: /tmp/static-cot-current
+
       - name: Download per-market fallback artifacts
         continue-on-error: true
         env:
@@ -708,6 +731,8 @@ jobs:
             --fallback-dir /tmp/static-market-artifacts-fallback \
             --current-options-dir /tmp/static-options-current \
             --fallback-options-dir /tmp/static-options-fallback \
+            --current-cot-dir /tmp/static-cot-current \
+            --fallback-cot-dir /tmp/static-cot-fallback \
             --fallback-rs-formula-overrides-json "$RS_FORMULA_OVERRIDES"
 
       - name: Validate market artifacts
@@ -721,6 +746,8 @@ jobs:
             --fallback-dir /tmp/static-market-artifacts-fallback \
             --current-options-dir /tmp/static-options-current \
             --fallback-options-dir /tmp/static-options-fallback \
+            --current-cot-dir /tmp/static-cot-current \
+            --fallback-cot-dir /tmp/static-cot-fallback \
             --selected-markets "${SELECTED_MARKETS}"
 
       - name: Combine static data bundle
@@ -734,6 +761,8 @@ jobs:
             --fallback-artifacts-dir /tmp/static-market-artifacts-fallback \
             --options-artifacts-dir /tmp/static-options-current \
             --fallback-options-artifacts-dir /tmp/static-options-fallback \
+            --cot-artifacts-dir /tmp/static-cot-current \
+            --fallback-cot-artifacts-dir /tmp/static-cot-fallback \
             --rs-formula-overrides-json "$RS_FORMULA_OVERRIDES"
 
       - name: Build static frontend

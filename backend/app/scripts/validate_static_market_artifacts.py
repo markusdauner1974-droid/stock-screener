@@ -19,6 +19,10 @@ from app.services.static_options_contract import (
     StaticOptionsArtifactError,
     validate_static_options_artifact,
 )
+from app.services.static_cot_contract import (
+    StaticCotArtifactError,
+    validate_static_cot_artifact,
+)
 
 
 class StaticMarketArtifactValidationError(RuntimeError):
@@ -291,6 +295,22 @@ def validate_optional_options_artifacts(
     return None
 
 
+def validate_optional_cot_artifacts(
+    current_dir: Path | None,
+    fallback_dir: Path | None,
+) -> dict | None:
+    for source in (current_dir, fallback_dir):
+        if source is None or not source.exists():
+            continue
+        candidates = [source, *(path.parent for path in source.rglob("index.json"))]
+        for candidate in candidates:
+            try:
+                return validate_static_cot_artifact(candidate)
+            except StaticCotArtifactError:
+                continue
+    return None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--current-dir", type=Path, required=True)
@@ -298,6 +318,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--selected-markets", default="[]")
     parser.add_argument("--current-options-dir", type=Path)
     parser.add_argument("--fallback-options-dir", type=Path)
+    parser.add_argument("--current-cot-dir", type=Path)
+    parser.add_argument("--fallback-cot-dir", type=Path)
     args = parser.parse_args(argv)
 
     try:
@@ -310,6 +332,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         options_manifest = validate_optional_options_artifacts(
             args.current_options_dir,
             args.fallback_options_dir,
+        )
+        cot_index = validate_optional_cot_artifacts(
+            args.current_cot_dir,
+            args.fallback_cot_dir,
         )
     except (json.JSONDecodeError, StaticMarketArtifactValidationError) as exc:
         print(f"::error::{exc}", flush=True)
@@ -344,6 +370,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             "Compatible static options artifact present for run "
             f"{options_manifest['published_run_id']}."
+        )
+    if cot_index is None:
+        print("::warning::No compatible static COT artifact is available.")
+    else:
+        print(
+            "Compatible static COT artifact present for report date "
+            f"{cot_index['report_date']}."
         )
     return 0
 
