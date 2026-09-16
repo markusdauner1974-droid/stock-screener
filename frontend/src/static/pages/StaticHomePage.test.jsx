@@ -12,6 +12,7 @@ const useStaticMarket = vi.fn();
 const modalSpy = vi.fn();
 const priceSparklineSpy = vi.fn();
 const correctionPanelSpy = vi.fn();
+const staticCotSpy = vi.fn();
 
 vi.mock('../dataClient', () => ({
   fetchStaticJson: (...args) => fetchStaticJson(...args),
@@ -53,6 +54,13 @@ vi.mock('../../components/Scan/RSSparkline', () => ({
 
 vi.mock('../../components/MarketScan/MarketHealthExposure', () => ({
   default: () => <div data-testid="market-health-exposure" />,
+}));
+
+vi.mock('../components/StaticCotSection', () => ({
+  default: ({ manifest: rootManifest }) => {
+    staticCotSpy(rootManifest);
+    return rootManifest?.assets?.cot ? <div data-testid="static-cot-section" /> : null;
+  },
 }));
 
 vi.mock('../../components/shared/CorrectionSurvivorsPanel', async () => {
@@ -136,6 +144,8 @@ describe('StaticHomePage', () => {
     modalSpy.mockClear();
     priceSparklineSpy.mockClear();
     correctionPanelSpy.mockClear();
+    staticCotSpy.mockClear();
+    delete manifest.assets;
     delete manifest.markets.US.features;
     useStaticManifest.mockReturnValue({
       data: manifest,
@@ -662,5 +672,17 @@ describe('StaticHomePage', () => {
     expect(
       fetchStaticJson.mock.calls.every(([path]) => !String(path).includes('social'))
     ).toBe(true);
+  });
+
+  it('places root-global COT after Market Health and before scan candidates', async () => {
+    manifest.assets = { cot: { path: 'cot/index.json' } };
+    renderWithProviders(<StaticHomePage />);
+
+    const health = await screen.findByTestId('market-health-exposure');
+    const cot = screen.getByTestId('static-cot-section');
+    const candidates = screen.getByTestId('top-scan-candidates-section');
+    expect(health.compareDocumentPosition(cot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(cot.compareDocumentPosition(candidates) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(staticCotSpy.mock.calls.at(-1)[0].assets.cot.path).toBe('cot/index.json');
   });
 });
