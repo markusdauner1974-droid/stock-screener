@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from enum import Enum
-
+from types import MappingProxyType
 
 COT_SCHEMA_VERSION = "cot-v1"
 COT_CALCULATION_VERSION = "cot-positions-v1"
@@ -15,6 +16,11 @@ STATIC_COT_SCHEMA_VERSION = "static-cot-v1"
 class ReportFamily(str, Enum):
     DISAGGREGATED_FUTURES_ONLY = "disaggregated_futures_only"
     TFF_FUTURES_ONLY = "tff_futures_only"
+
+
+class CotDatasetId(str, Enum):
+    DISAGGREGATED_FUTURES_ONLY = "72hh-3qpy"
+    TFF_FUTURES_ONLY = "gpe5-46if"
 
 
 class Participant(str, Enum):
@@ -51,6 +57,33 @@ class PriceCoverageState(str, Enum):
     COMPLETE = "complete"
     PARTIAL = "partial"
     UNAVAILABLE = "unavailable"
+
+
+ParticipantFields = tuple[str, str, str | None]
+
+
+@dataclass(frozen=True)
+class CotDatasetDefinition:
+    report_family: ReportFamily
+    dataset_id: CotDatasetId
+    label: str
+    url: str
+    participants: tuple[Participant, ...]
+    participant_fields: Mapping[Participant, ParticipantFields]
+
+    def __post_init__(self) -> None:
+        _require_nonempty(label=self.label, url=self.url)
+        if not self.participants or len(self.participants) != len(
+            set(self.participants)
+        ):
+            raise ValueError("dataset participants must be unique and non-empty")
+        if set(self.participant_fields) != set(self.participants):
+            raise ValueError("dataset participant fields must match report family")
+        object.__setattr__(
+            self,
+            "participant_fields",
+            MappingProxyType(dict(self.participant_fields)),
+        )
 
 
 @dataclass(frozen=True)
@@ -133,7 +166,9 @@ class CotInstrumentDefinition:
             instrument_order=self.instrument_order,
         )
         if self.focal_participant not in self.participants:
-            raise ValueError("focal participant must be available for the report family")
+            raise ValueError(
+                "focal participant must be available for the report family"
+            )
 
 
 @dataclass(frozen=True)

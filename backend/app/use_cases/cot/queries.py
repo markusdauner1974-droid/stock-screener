@@ -11,10 +11,13 @@ from app.domain.cot.calculations import align_prices_to_report_dates
 from app.domain.cot.models import PriceCoverageState
 from app.domain.cot.registry import (
     CATEGORY_ORDER,
+    COT_DATASETS,
     COT_INSTRUMENTS,
     PARTICIPANT_LABELS,
+    dataset_for_family,
     instrument_by_slug,
 )
+
 RANGE_WEEKS = {"1y": 52, "3y": 156, "5y": 260}
 _NEW_YORK = ZoneInfo("America/New_York")
 
@@ -168,12 +171,10 @@ class CotQueryService:
         retrieved_at = (
             datetime.fromisoformat(retrieved)
             if isinstance(retrieved, str)
-            else publication.run.published_at
-            or datetime.now(timezone.utc)
+            else publication.run.published_at or datetime.now(timezone.utc)
         )
         age_days = (
-            self._now().astimezone(_NEW_YORK).date()
-            - publication.pointer.report_date
+            self._now().astimezone(_NEW_YORK).date() - publication.pointer.report_date
         ).days
         return CotPublicationView(
             schema_version=publication.run.schema_version,
@@ -191,17 +192,13 @@ class CotQueryService:
             publication=publication,
             default_slug="sp-500",
             categories=tuple(category.value for category in CATEGORY_ORDER),
-            sources=(
+            sources=tuple(
                 CotSourceView(
-                    dataset_id="72hh-3qpy",
-                    label="CFTC Disaggregated Futures Only",
-                    url="https://publicreporting.cftc.gov/resource/72hh-3qpy.json",
-                ),
-                CotSourceView(
-                    dataset_id="gpe5-46if",
-                    label="CFTC Traders in Financial Futures - Futures Only",
-                    url="https://publicreporting.cftc.gov/resource/gpe5-46if.json",
-                ),
+                    dataset_id=dataset.dataset_id.value,
+                    label=dataset.label,
+                    url=dataset.url,
+                )
+                for dataset in COT_DATASETS
             ),
             instruments=tuple(
                 CotCatalogInstrumentView(
@@ -212,7 +209,9 @@ class CotQueryService:
                     instrument_order=item.instrument_order,
                     report_family=item.report_family.value,
                     focal_participant=item.focal_participant.value,
-                    participants=tuple(participant.value for participant in item.participants),
+                    participants=tuple(
+                        participant.value for participant in item.participants
+                    ),
                     price_symbol=item.price.yahoo_symbol,
                     price_mapping_kind=item.price.kind.value,
                     tradingview_url=item.price.tradingview_url,
@@ -264,7 +263,11 @@ class CotQueryService:
                     CotPositionView(
                         participant=row.participant,
                         label=PARTICIPANT_LABELS[
-                            next(p for p in definition.participants if p.value == row.participant)
+                            next(
+                                p
+                                for p in definition.participants
+                                if p.value == row.participant
+                            )
                         ],
                         long=int(row.long),
                         short=int(row.short),
@@ -280,7 +283,11 @@ class CotQueryService:
                     for row in sorted(
                         grouped[report_date],
                         key=lambda value: definition.participants.index(
-                            next(p for p in definition.participants if p.value == value.participant)
+                            next(
+                                p
+                                for p in definition.participants
+                                if p.value == value.participant
+                            )
                         ),
                     )
                 ),
@@ -294,11 +301,9 @@ class CotQueryService:
             display_name=definition.display_name,
             category=definition.category.value,
             report_family=definition.report_family.value,
-            source_dataset_id=(
-                "gpe5-46if"
-                if definition.report_family.value == "tff_futures_only"
-                else "72hh-3qpy"
-            ),
+            source_dataset_id=dataset_for_family(
+                definition.report_family
+            ).dataset_id.value,
             focal_participant=definition.focal_participant.value,
             price_symbol=definition.price.yahoo_symbol,
             price_mapping_kind=definition.price.kind.value,

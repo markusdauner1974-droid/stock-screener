@@ -7,7 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.domain.cot.models import Participant
+from app.domain.cot.models import CotDatasetId, Participant
 from app.domain.cot.registry import PARTICIPANT_LABELS
 
 
@@ -26,7 +26,7 @@ class CotPublicationMetadataResponse(_StrictModel):
 
 
 class CotSourceResponse(_StrictModel):
-    dataset_id: Literal["72hh-3qpy", "gpe5-46if"]
+    dataset_id: CotDatasetId
     label: str = Field(min_length=1)
     url: str = Field(min_length=1)
 
@@ -46,7 +46,9 @@ class CotCatalogInstrumentResponse(_StrictModel):
     focal_participant: str
     participants: list[CotParticipantMetadataResponse]
     price_symbol: str | None
-    price_mapping_kind: Literal["exact_future", "etf_proxy", "index_proxy", "unavailable"]
+    price_mapping_kind: Literal[
+        "exact_future", "etf_proxy", "index_proxy", "unavailable"
+    ]
     tradingview_url: str | None
 
 
@@ -58,7 +60,7 @@ class CotCatalogResponse(_StrictModel):
     instruments: list[CotCatalogInstrumentResponse]
 
     @classmethod
-    def from_view(cls, view: Any) -> "CotCatalogResponse":
+    def from_view(cls, view: Any) -> CotCatalogResponse:
         return cls(
             publication=view.publication,
             default_slug=view.default_slug,
@@ -160,17 +162,19 @@ class CotHistoryResponse(_StrictModel):
     display_name: str
     category: str
     report_family: Literal["disaggregated_futures_only", "tff_futures_only"]
-    source_dataset_id: Literal["72hh-3qpy", "gpe5-46if"]
+    source_dataset_id: CotDatasetId
     focal_participant: str
     price_symbol: str | None
-    price_mapping_kind: Literal["exact_future", "etf_proxy", "index_proxy", "unavailable"]
+    price_mapping_kind: Literal[
+        "exact_future", "etf_proxy", "index_proxy", "unavailable"
+    ]
     price_coverage_state: Literal["complete", "partial", "unavailable"]
     price_history_start: date | None
     tradingview_url: str | None
     weeks: list[CotHistoryWeekResponse]
 
     @classmethod
-    def from_view(cls, view: Any) -> "CotHistoryResponse":
+    def from_view(cls, view: Any) -> CotHistoryResponse:
         return cls.model_validate(view, from_attributes=True)
 
     @model_validator(mode="after")
@@ -210,7 +214,9 @@ class CotSnapshotRowResponse(_StrictModel):
     percentile_status: Literal["available", "insufficient_history"]
     net_trend: list[int] = Field(max_length=12)
     price_change_pct: float | None
-    price_mapping_kind: Literal["exact_future", "etf_proxy", "index_proxy", "unavailable"]
+    price_mapping_kind: Literal[
+        "exact_future", "etf_proxy", "index_proxy", "unavailable"
+    ]
     price_coverage_state: Literal["complete", "partial", "unavailable"]
 
 
@@ -219,7 +225,7 @@ class CotSnapshotResponse(_StrictModel):
     rows: list[CotSnapshotRowResponse]
 
     @classmethod
-    def from_view(cls, view: Any) -> "CotSnapshotResponse":
+    def from_view(cls, view: Any) -> CotSnapshotResponse:
         return cls.model_validate(view, from_attributes=True)
 
     @model_validator(mode="after")

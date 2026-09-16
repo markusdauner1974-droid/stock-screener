@@ -9,9 +9,8 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from app.domain.cot.models import STATIC_COT_SCHEMA_VERSION
 from app.schemas.cot import CotCatalogResponse, CotHistoryResponse
-
-STATIC_COT_SCHEMA_VERSION = "static-cot-v1"
 
 
 class StaticCotArtifactError(ValueError):

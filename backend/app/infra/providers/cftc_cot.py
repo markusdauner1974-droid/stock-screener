@@ -13,78 +13,12 @@ import httpx
 from app.domain.cot.models import (
     CotInstrumentDefinition,
     NormalizedCotWeek,
-    Participant,
     RawParticipantPosition,
     ReportFamily,
 )
+from app.domain.cot.registry import dataset_for_family
 from app.use_cases.cot.ports import CotSourceMetadata, CotSourceSnapshot
 
-
-DATASET_BY_FAMILY = {
-    ReportFamily.DISAGGREGATED_FUTURES_ONLY: "72hh-3qpy",
-    ReportFamily.TFF_FUTURES_ONLY: "gpe5-46if",
-}
-
-DISAGGREGATED_FIELDS = {
-    Participant.PRODUCER_MERCHANT: (
-        "prod_merc_positions_long",
-        "prod_merc_positions_short",
-        None,
-    ),
-    Participant.SWAP_DEALER: (
-        "swap_positions_long_all",
-        "swap__positions_short_all",
-        "swap__positions_spread_all",
-    ),
-    Participant.MANAGED_MONEY: (
-        "m_money_positions_long_all",
-        "m_money_positions_short_all",
-        "m_money_positions_spread",
-    ),
-    Participant.OTHER_REPORTABLES: (
-        "other_rept_positions_long",
-        "other_rept_positions_short",
-        "other_rept_positions_spread",
-    ),
-    Participant.NONREPORTABLES: (
-        "nonrept_positions_long_all",
-        "nonrept_positions_short_all",
-        None,
-    ),
-}
-
-TFF_FIELDS = {
-    Participant.DEALER_INTERMEDIARY: (
-        "dealer_positions_long_all",
-        "dealer_positions_short_all",
-        "dealer_positions_spread_all",
-    ),
-    Participant.ASSET_MANAGER: (
-        "asset_mgr_positions_long",
-        "asset_mgr_positions_short",
-        "asset_mgr_positions_spread",
-    ),
-    Participant.LEVERAGED_FUNDS: (
-        "lev_money_positions_long",
-        "lev_money_positions_short",
-        "lev_money_positions_spread",
-    ),
-    Participant.OTHER_REPORTABLES: (
-        "other_rept_positions_long",
-        "other_rept_positions_short",
-        "other_rept_positions_spread",
-    ),
-    Participant.NONREPORTABLES: (
-        "nonrept_positions_long_all",
-        "nonrept_positions_short_all",
-        None,
-    ),
-}
-
-_FIELDS_BY_FAMILY = {
-    ReportFamily.DISAGGREGATED_FUTURES_ONLY: DISAGGREGATED_FIELDS,
-    ReportFamily.TFF_FUTURES_ONLY: TFF_FIELDS,
-}
 _TRANSIENT_STATUSES = frozenset({429, 502, 503, 504})
 _BASE_FIELDS = (
     "id",
@@ -145,7 +79,7 @@ class CftcCotSource:
             family_instruments = by_family.get(family, [])
             if not family_instruments:
                 continue
-            dataset_id = DATASET_BY_FAMILY[family]
+            dataset_id = dataset_for_family(family).dataset_id.value
             rows, family_retries = self._fetch_dataset(
                 dataset_id,
                 family,
@@ -223,7 +157,9 @@ class CftcCotSource:
         retries = 0
         for attempt in range(4):
             try:
-                response = self._client.get(f"/resource/{dataset_id}.json", params=params)
+                response = self._client.get(
+                    f"/resource/{dataset_id}.json", params=params
+                )
             except httpx.TimeoutException as exc:
                 if attempt == 3:
                     raise CftcCotError("CFTC request timed out after retries") from exc
@@ -268,10 +204,14 @@ class CftcCotSource:
         retries = 0
         for attempt in range(4):
             try:
-                response = self._client.get(f"/resource/{dataset_id}.json", params=params)
+                response = self._client.get(
+                    f"/resource/{dataset_id}.json", params=params
+                )
             except httpx.TimeoutException as exc:
                 if attempt == 3:
-                    raise CftcCotError("CFTC count request timed out after retries") from exc
+                    raise CftcCotError(
+                        "CFTC count request timed out after retries"
+                    ) from exc
                 retries += 1
                 self._sleep(min(2.0**attempt, 60.0))
                 continue
@@ -306,7 +246,9 @@ class CftcCotSource:
     @staticmethod
     def _selected_fields(family: ReportFamily) -> tuple[str, ...]:
         fields = list(_BASE_FIELDS)
-        for long_field, short_field, spreading_field in _FIELDS_BY_FAMILY[family].values():
+        for long_field, short_field, spreading_field in dataset_for_family(
+            family
+        ).participant_fields.values():
             fields.extend((long_field, short_field))
             if spreading_field is not None:
                 fields.append(spreading_field)
@@ -359,14 +301,12 @@ class CftcCotSource:
                 long_field,
                 short_field,
                 spreading_field,
-            ) in _FIELDS_BY_FAMILY[family].items()
+            ) in dataset_for_family(family).participant_fields.items()
         )
         report_date = _report_date(row)
         source_row_id = _required_text(row, "id")
         open_interest = _contract_count(row, "open_interest_all")
-        reported_long_total = _contract_count(
-            row, "tot_rept_positions_long_all"
-        )
+        reported_long_total = _contract_count(row, "tot_rept_positions_long_all")
         reported_short_total = _contract_count(row, "tot_rept_positions_short")
         canonical = {
             "dataset_id": dataset_id,

@@ -13,13 +13,8 @@ from app.domain.cot.models import (
     Participant,
     ReportFamily,
 )
-from app.domain.cot.registry import participants_for
+from app.domain.cot.registry import dataset_for_family, participants_for
 
-
-EXPECTED_DATASET_BY_FAMILY = {
-    ReportFamily.DISAGGREGATED_FUTURES_ONLY: "72hh-3qpy",
-    ReportFamily.TFF_FUTURES_ONLY: "gpe5-46if",
-}
 MINIMUM_INITIAL_HISTORY_WEEKS = 156
 
 
@@ -91,18 +86,15 @@ def validate_cot_snapshot(
         weeks_by_slug[week.instrument_slug].append(week)
         if (
             week.source_dataset_id
-            != EXPECTED_DATASET_BY_FAMILY[definition.report_family]
+            != dataset_for_family(definition.report_family).dataset_id.value
         ):
             reject("source_dataset_mismatch")
 
         expected_participants = participants_for(definition.report_family)
-        actual_participants = tuple(
-            position.participant for position in week.positions
-        )
-        if (
-            len(actual_participants) != len(set(actual_participants))
-            or set(actual_participants) != set(expected_participants)
-        ):
+        actual_participants = tuple(position.participant for position in week.positions)
+        if len(actual_participants) != len(set(actual_participants)) or set(
+            actual_participants
+        ) != set(expected_participants):
             reject("participant_structure_mismatch")
             continue
 
@@ -112,12 +104,10 @@ def validate_cot_snapshot(
             if position.participant is not Participant.NONREPORTABLES
         )
         computed_reported_long = sum(
-            position.long + position.spreading
-            for position in reportable_positions
+            position.long + position.spreading for position in reportable_positions
         )
         computed_reported_short = sum(
-            position.short + position.spreading
-            for position in reportable_positions
+            position.short + position.spreading for position in reportable_positions
         )
         if computed_reported_long != week.reported_long_total:
             reject("reported_long_reconciliation_failed")
@@ -146,7 +136,7 @@ def validate_cot_snapshot(
         reject("source_history_truncated")
 
     expected_dataset_ids = {
-        EXPECTED_DATASET_BY_FAMILY[definition.report_family]
+        dataset_for_family(definition.report_family).dataset_id.value
         for definition in definitions
     }
     if set(expected_dataset_row_counts) != expected_dataset_ids:
@@ -167,9 +157,9 @@ def validate_cot_snapshot(
         reject("insufficient_initial_history")
 
     latest_report_dates: dict[str, date] = {}
-    definitions_by_family: dict[
-        ReportFamily, list[CotInstrumentDefinition]
-    ] = defaultdict(list)
+    definitions_by_family: dict[ReportFamily, list[CotInstrumentDefinition]] = (
+        defaultdict(list)
+    )
     for definition in definitions:
         definitions_by_family[definition.report_family].append(definition)
 
@@ -184,7 +174,10 @@ def validate_cot_snapshot(
                 week.report_date for week in instrument_weeks
             )
         common_latest_dates = set(latest_by_slug.values())
-        if len(latest_by_slug) != len(family_definitions) or len(common_latest_dates) != 1:
+        if (
+            len(latest_by_slug) != len(family_definitions)
+            or len(common_latest_dates) != 1
+        ):
             reject("incomplete_latest_family_coverage")
             continue
         latest_report_dates[family.value] = next(iter(common_latest_dates))
