@@ -10,7 +10,6 @@ import pytest
 from app.domain.cot.registry import instrument_by_slug
 from app.infra.providers.cftc_cot import CftcCotSchemaError, CftcCotSource
 
-
 FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures"
 
 
@@ -63,7 +62,9 @@ def test_disaggregated_fields_normalize_to_five_participants():
 
     assert week.source_dataset_id == "72hh-3qpy"
     assert week.open_interest == 316244
-    assert [(p.participant.value, p.long, p.short, p.spreading) for p in week.positions] == [
+    assert [
+        (p.participant.value, p.long, p.short, p.spreading) for p in week.positions
+    ] == [
         ("producer_merchant", 37353, 85943, 0),
         ("swap_dealer", 76373, 16895, 14058),
         ("managed_money", 65114, 84004, 38692),
@@ -102,7 +103,9 @@ def test_source_paginates_until_a_short_page():
         for index in range(length):
             row = deepcopy(base)
             row["id"] = f"row-{offset + index}"
-            row["report_date_as_yyyy_mm_dd"] = f"2026-08-{offset + index + 1:02d}T00:00:00.000"
+            row["report_date_as_yyyy_mm_dd"] = (
+                f"2026-08-{offset + index + 1:02d}T00:00:00.000"
+            )
             row["cftc_contract_market_code"] = "088691"
             rows.append(row)
         return httpx.Response(200, json=rows)
@@ -161,6 +164,32 @@ def test_source_retries_transient_responses_and_records_retry_count():
 
     assert result.metadata.retry_count == 1
     assert sleeps == [60.0]
+
+
+@pytest.mark.parametrize(
+    ("select", "expected_payload"),
+    [
+        ("id", load_fixture("cot/disaggregated_wheat.json")),
+        ("count(*) as count", [{"count": "1"}]),
+    ],
+)
+def test_page_and_count_share_one_request_retry_operation(select, expected_payload):
+    sleeps: list[float] = []
+    source = source_with_rows(
+        load_fixture("cot/disaggregated_wheat.json"),
+        statuses=(503, 503, 200),
+        sleeps=sleeps,
+    )
+
+    payload, retries = source._request_json(
+        "72hh-3qpy",
+        {"$select": select},
+        operation="test",
+    )
+
+    assert payload == expected_payload
+    assert retries == 2
+    assert sleeps == [60.0, 60.0]
 
 
 def test_source_rejects_a_combined_row_even_if_the_provider_returns_it():

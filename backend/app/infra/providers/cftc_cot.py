@@ -154,43 +154,16 @@ class CftcCotSource:
             "$limit": str(self._page_size),
             "$offset": str(offset),
         }
-        retries = 0
-        for attempt in range(4):
-            try:
-                response = self._client.get(
-                    f"/resource/{dataset_id}.json", params=params
-                )
-            except httpx.TimeoutException as exc:
-                if attempt == 3:
-                    raise CftcCotError("CFTC request timed out after retries") from exc
-                retries += 1
-                self._sleep(min(2.0**attempt, 60.0))
-                continue
-
-            if response.status_code in _TRANSIENT_STATUSES:
-                if attempt == 3:
-                    raise CftcCotError(
-                        f"CFTC request failed after retries: {response.status_code}"
-                    )
-                retries += 1
-                self._sleep(self._retry_delay(response, attempt))
-                continue
-            try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                raise CftcCotError(
-                    f"CFTC request failed: {response.status_code}"
-                ) from exc
-            try:
-                payload = response.json()
-            except ValueError as exc:
-                raise CftcCotSchemaError("CFTC response was not valid JSON") from exc
-            if not isinstance(payload, list) or not all(
-                isinstance(row, dict) for row in payload
-            ):
-                raise CftcCotSchemaError("CFTC response must be a list of rows")
-            return payload, retries
-        raise AssertionError("unreachable")
+        payload, retries = self._request_json(
+            dataset_id,
+            params,
+            operation="data",
+        )
+        if not isinstance(payload, list) or not all(
+            isinstance(row, dict) for row in payload
+        ):
+            raise CftcCotSchemaError("CFTC response must be a list of rows")
+        return payload, retries
 
     def _request_count(
         self,
@@ -201,6 +174,29 @@ class CftcCotSource:
             "$select": "count(*) as count",
             "$where": self._where_clause(instruments),
         }
+        payload, retries = self._request_json(
+            dataset_id,
+            params,
+            operation="count",
+        )
+        try:
+            value = payload[0]["count"]
+            count = int(value)
+        except (ValueError, TypeError, KeyError, IndexError) as exc:
+            raise CftcCotSchemaError(
+                "CFTC count response was outside the expected schema"
+            ) from exc
+        if count < 0:
+            raise CftcCotSchemaError("CFTC count response cannot be negative")
+        return count, retries
+
+    def _request_json(
+        self,
+        dataset_id: str,
+        params: Mapping[str, str],
+        *,
+        operation: str,
+    ) -> tuple[Any, int]:
         retries = 0
         for attempt in range(4):
             try:
@@ -210,7 +206,7 @@ class CftcCotSource:
             except httpx.TimeoutException as exc:
                 if attempt == 3:
                     raise CftcCotError(
-                        "CFTC count request timed out after retries"
+                        f"CFTC {operation} request timed out after retries"
                     ) from exc
                 retries += 1
                 self._sleep(min(2.0**attempt, 60.0))
@@ -219,7 +215,8 @@ class CftcCotSource:
             if response.status_code in _TRANSIENT_STATUSES:
                 if attempt == 3:
                     raise CftcCotError(
-                        f"CFTC count request failed after retries: {response.status_code}"
+                        f"CFTC {operation} request failed after retries: "
+                        f"{response.status_code}"
                     )
                 retries += 1
                 self._sleep(self._retry_delay(response, attempt))
@@ -228,19 +225,14 @@ class CftcCotSource:
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
                 raise CftcCotError(
-                    f"CFTC count request failed: {response.status_code}"
+                    f"CFTC {operation} request failed: {response.status_code}"
                 ) from exc
             try:
-                payload = response.json()
-                value = payload[0]["count"]
-                count = int(value)
-            except (ValueError, TypeError, KeyError, IndexError) as exc:
+                return response.json(), retries
+            except ValueError as exc:
                 raise CftcCotSchemaError(
-                    "CFTC count response was outside the expected schema"
+                    f"CFTC {operation} response was not valid JSON"
                 ) from exc
-            if count < 0:
-                raise CftcCotSchemaError("CFTC count response cannot be negative")
-            return count, retries
         raise AssertionError("unreachable")
 
     @staticmethod
