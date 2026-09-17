@@ -188,7 +188,11 @@ class FakePriceResult:
 
 
 class FakePriceHydrator:
+    def __init__(self):
+        self.calls = 0
+
     def hydrate(self, _instruments):
+        self.calls += 1
         return FakePriceResult()
 
 
@@ -237,12 +241,21 @@ def test_refresh_rejects_a_truncated_first_backfill():
 
 
 def test_refresh_no_change_does_not_move_pointer():
-    use_case, _source, repository = make_use_case()
+    source = FakeSource()
+    repository = FakeRepository()
+    price_hydrator = FakePriceHydrator()
+    use_case = RefreshCotUseCase(
+        source=source,
+        repository=repository,
+        price_hydrator=price_hydrator,
+    )
     first = use_case.execute(CotRefreshCommand(origin="test", force=False))
 
     second = use_case.execute(CotRefreshCommand(origin="test", force=False))
 
     assert second.status == "no_change"
+    assert second.price_unavailable_count == 31
+    assert price_hydrator.calls == 2
     assert repository.published_run_id == first.run_id
 
 

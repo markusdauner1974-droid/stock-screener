@@ -105,13 +105,21 @@ class RefreshCotUseCase:
                 not command.force
                 and requested_signature == self._repository.publication_signature()
             ):
-                self._repository.mark_no_change(run_id, validation.as_dict())
+                failure_status = "failed_price_hydration"
+                price_result = self._price_hydrator.hydrate(COT_INSTRUMENTS)
+                self._repository.mark_no_change(
+                    run_id,
+                    {
+                        "validation": validation.as_dict(),
+                        "prices": price_result.as_dict(),
+                    },
+                )
                 return CotRefreshResult(
                     status="no_change",
                     run_id=run_id,
                     report_date=report_date,
                     instrument_count=instrument_count,
-                    price_unavailable_count=0,
+                    price_unavailable_count=int(price_result.unavailable_count),
                 )
 
             failure_status = "failed_calculation"

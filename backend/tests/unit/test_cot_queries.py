@@ -3,8 +3,9 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
 from app.domain.cot.registry import COT_INSTRUMENTS
-from app.use_cases.cot.queries import CotQueryService
+from app.use_cases.cot.queries import CotPublicationUnavailable, CotQueryService
 
 
 class FakeRepository:
@@ -198,3 +199,12 @@ def test_catalog_exposes_all_official_sources_and_curated_entries():
         "72hh-3qpy",
         "gpe5-46if",
     }
+
+
+def test_queries_reject_a_publication_from_an_incompatible_registry():
+    repository = FakeRepository()
+    repository.publication.run.registry_version = "cot-curated-old"
+    query_service = CotQueryService(repository, FakePriceReader())
+
+    with pytest.raises(CotPublicationUnavailable, match="registry"):
+        query_service.catalog()
