@@ -42,10 +42,18 @@ describe('COT contract', () => {
 
   it('slices static five-year data without changing percentile values', () => {
     const history = makeCotHistory({ weekCount: 260, range: '5y' });
+    history.price_coverage_state = 'partial';
+    history.weeks.slice(0, -52).forEach((week) => {
+      week.price_date = null;
+      week.price_close = null;
+      week.price_change_pct = null;
+    });
     const sliced = sliceCotHistory(history, '1y');
     expect(sliced.weeks).toHaveLength(52);
     expect(sliced.weeks.at(-1).positions[0].percentile_3y)
       .toBe(history.weeks.at(-1).positions[0].percentile_3y);
+    expect(sliced.price_coverage_state).toBe('complete');
+    expect(sliced.price_history_start).toBe(sliced.weeks[0].price_date);
   });
 
   it('rejects unsafe paths and publication identity mismatches', () => {

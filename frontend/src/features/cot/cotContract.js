@@ -110,7 +110,20 @@ export const normalizeStaticCotIndex = (payload) => {
 export const sliceCotHistory = (history, range) => {
   if (!RANGES.has(range)) fail('unknown range');
   const normalized = normalizeCotHistory(history);
-  return { ...normalized, range, weeks: normalized.weeks.slice(-COT_RANGES[range]) };
+  const weeks = normalized.weeks.slice(-COT_RANGES[range]);
+  const pricedWeeks = weeks.filter((week) => week.price_close !== null);
+  const priceCoverageState = pricedWeeks.length === 0
+    ? 'unavailable'
+    : pricedWeeks.length === weeks.length
+      ? 'complete'
+      : 'partial';
+  return {
+    ...normalized,
+    range,
+    price_coverage_state: priceCoverageState,
+    price_history_start: pricedWeeks[0]?.price_date ?? null,
+    weeks,
+  };
 };
 
 export const cotCatalogQueryKey = (mode, publicationId = null, path = null) => [

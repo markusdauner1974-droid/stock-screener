@@ -420,6 +420,11 @@ jobs:
             exit "$status"
           fi
           echo "has_price_bundle=true" >> "$GITHUB_OUTPUT"
+          if [ "${{ matrix.market }}" = "US" ] && [ -f /tmp/static-data/cot/index.json ]; then
+            echo "has_cot_artifact=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_cot_artifact=false" >> "$GITHUB_OUTPUT"
+          fi
           if grep -q "using benchmark-backed as-of date" "$EXPORT_LOG"; then
             echo "Rolling RRG history publication disabled for ${{ matrix.market }} because the market export rewound to an older benchmark-backed date."
             echo "rrg_history_publishable=false" >> "$GITHUB_OUTPUT"
@@ -431,18 +436,12 @@ jobs:
             echo "has_artifact=false" >> "$GITHUB_OUTPUT"
             echo "rrg_history_publishable=false" >> "$GITHUB_OUTPUT"
             echo "has_options_artifact=false" >> "$GITHUB_OUTPUT"
-            echo "has_cot_artifact=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           if [ "${{ matrix.market }}" = "US" ] && [ -f /tmp/static-data/options/manifest.json ]; then
             echo "has_options_artifact=true" >> "$GITHUB_OUTPUT"
           else
             echo "has_options_artifact=false" >> "$GITHUB_OUTPUT"
-          fi
-          if [ "${{ matrix.market }}" = "US" ] && [ -f /tmp/static-data/cot/index.json ]; then
-            echo "has_cot_artifact=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_cot_artifact=false" >> "$GITHUB_OUTPUT"
           fi
           echo "has_artifact=true" >> "$GITHUB_OUTPUT"
 
