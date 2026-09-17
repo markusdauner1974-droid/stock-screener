@@ -29,6 +29,7 @@ from app.use_cases.cot.ports import (
 )
 
 LATEST_PUBLICATION_KEY = "latest_published"
+_COT_PUBLICATION_LOCK_ID = 0x434F5450
 
 
 @dataclass(frozen=True)
@@ -103,7 +104,7 @@ class SqlCotRepository:
         weeks: Sequence[DerivedCotWeek],
         diagnostics: Mapping[str, Any] | None = None,
         source_metadata: Mapping[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         derived_weeks = tuple(weeks)
         self._reject_duplicate_natural_keys(derived_weeks)
         if not derived_weeks:
@@ -113,10 +114,30 @@ class SqlCotRepository:
             run = self._require_run(run_id)
             if run.status != "staged":
                 raise ValueError(f"COT run {run_id} is not staged")
+            report_date = max(week.report_date for week in derived_weeks)
+            pointer = self._lock_publication_pointer()
+            if pointer is not None and (
+                pointer.run_id > run_id or pointer.report_date > report_date
+            ):
+                now = datetime.now(timezone.utc)
+                run.status = "superseded"
+                run.observed_report_date = report_date
+                run.observed_instrument_count = len(
+                    {week.instrument_slug for week in derived_weeks}
+                )
+                run.coverage_json = dict((diagnostics or {}).get("validation", {}))
+                run.diagnostics_json = {
+                    **dict(diagnostics or {}),
+                    "superseded_by_run_id": int(pointer.run_id),
+                }
+                run.source_metadata_json = dict(source_metadata or {})
+                run.completed_at = now
+                self._session.commit()
+                return False
+
             instruments_by_slug = self._sync_registry(tuple(registry))
             self._upsert_positions(run_id, derived_weeks, instruments_by_slug)
 
-            report_date = max(week.report_date for week in derived_weeks)
             now = datetime.now(timezone.utc)
             run.status = "published"
             run.observed_report_date = report_date
@@ -129,7 +150,6 @@ class SqlCotRepository:
             run.completed_at = now
             run.published_at = now
 
-            pointer = self._session.get(CotPublicationPointer, LATEST_PUBLICATION_KEY)
             if pointer is None:
                 self._session.add(
                     CotPublicationPointer(
@@ -142,9 +162,23 @@ class SqlCotRepository:
                 pointer.run_id = run_id
                 pointer.report_date = report_date
             self._session.commit()
+            return True
         except Exception:
             self._session.rollback()
             raise
+
+    def _lock_publication_pointer(self) -> CotPublicationPointer | None:
+        bind = self._session.get_bind()
+        if bind.dialect.name == "postgresql":
+            self._session.execute(
+                select(func.pg_advisory_xact_lock(_COT_PUBLICATION_LOCK_ID))
+            )
+        return self._session.scalar(
+            select(CotPublicationPointer)
+            .where(CotPublicationPointer.key == LATEST_PUBLICATION_KEY)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
 
     def mark_no_change(
         self,

@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
+
 from app.domain.cot.models import (
     COT_CALCULATION_VERSION,
     COT_REGISTRY_VERSION,
@@ -125,6 +126,7 @@ class FakeRepository:
         self.statuses = {}
         self.signature = None
         self.existing_key_slugs = ()
+        self.publish_result = True
 
     def start_run(self, _request):
         run_id = self.next_run_id
@@ -148,6 +150,9 @@ class FakeRepository:
 
     def publish(self, run_id, *, registry, weeks, diagnostics, source_metadata):
         assert len(registry) == 31
+        if not self.publish_result:
+            self.statuses[run_id] = "superseded"
+            return False
         self.weeks = tuple(weeks)
         self.fingerprints = {
             week.source_row_id: week.source_fingerprint for week in weeks
@@ -160,6 +165,7 @@ class FakeRepository:
         )
         self.published_run_id = run_id
         self.statuses[run_id] = "published"
+        return True
 
     def mark_no_change(self, run_id, _diagnostics):
         self.statuses[run_id] = "no_change"
@@ -257,6 +263,16 @@ def test_refresh_no_change_does_not_move_pointer():
     assert second.price_unavailable_count == 31
     assert price_hydrator.calls == 2
     assert repository.published_run_id == first.run_id
+
+
+def test_refresh_reports_a_superseded_publication_as_a_successful_noop():
+    use_case, _source, repository = make_use_case()
+    repository.publish_result = False
+
+    result = use_case.execute(CotRefreshCommand(origin="test", force=True))
+
+    assert result.status == "superseded"
+    assert repository.statuses[result.run_id] == "superseded"
 
 
 def test_refresh_republishes_when_calculation_version_changes():

@@ -123,7 +123,7 @@ class CotWriteRepository(Protocol):
         weeks: Sequence[DerivedCotWeek],
         diagnostics: Mapping[str, object],
         source_metadata: Mapping[str, object],
-    ) -> None: ...
+    ) -> bool: ...
 
     def mark_no_change(
         self,

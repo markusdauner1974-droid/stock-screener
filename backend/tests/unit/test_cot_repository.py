@@ -59,14 +59,18 @@ def run_request() -> CotRunRequest:
     return CotRunRequest(origin="test", expected_instrument_count=31)
 
 
-def derived_weeks(*, net: int = 40) -> tuple[DerivedCotWeek, ...]:
+def derived_weeks(
+    *,
+    net: int = 40,
+    report_date: date = date(2026, 9, 8),
+) -> tuple[DerivedCotWeek, ...]:
     return (
         DerivedCotWeek(
             source_dataset_id="72hh-3qpy",
-            source_row_id="gold-2026-09-08",
+            source_row_id=f"gold-{report_date.isoformat()}",
             source_fingerprint=f"fingerprint-{net}",
             instrument_slug="gold",
-            report_date=date(2026, 9, 8),
+            report_date=report_date,
             open_interest=1000,
             positions=(
                 DerivedParticipantPosition(
@@ -151,6 +155,50 @@ def test_later_publication_updates_canonical_row_and_pointer(repository, session
     assert (
         session.get(CotPublicationPointer, "latest_published").run_id == second_run_id
     )
+
+
+def test_older_run_cannot_overwrite_a_newer_publication(repository, session):
+    older_run_id = repository.start_run(run_request())
+    newer_run_id = repository.start_run(run_request())
+    assert repository.publish(
+        newer_run_id,
+        registry=COT_INSTRUMENTS,
+        weeks=derived_weeks(net=55),
+    ) is True
+
+    published = repository.publish(
+        older_run_id,
+        registry=COT_INSTRUMENTS,
+        weeks=derived_weeks(net=40),
+    )
+
+    assert published is False
+    assert session.get(CotPublicationPointer, "latest_published").run_id == newer_run_id
+    assert session.query(CotWeeklyPosition).one().net == 55
+    assert session.get(CotImportRun, older_run_id).status == "superseded"
+
+
+def test_newer_run_cannot_roll_publication_back_to_an_older_report_date(
+    repository, session
+):
+    current_run_id = repository.start_run(run_request())
+    repository.publish(
+        current_run_id,
+        registry=COT_INSTRUMENTS,
+        weeks=derived_weeks(net=55),
+    )
+    backfill_run_id = repository.start_run(run_request())
+
+    published = repository.publish(
+        backfill_run_id,
+        registry=COT_INSTRUMENTS,
+        weeks=derived_weeks(net=40, report_date=date(2026, 9, 1)),
+    )
+
+    assert published is False
+    assert session.get(CotPublicationPointer, "latest_published").run_id == current_run_id
+    assert session.query(CotWeeklyPosition).one().net == 55
+    assert session.get(CotImportRun, backfill_run_id).status == "superseded"
 
 
 def test_history_repopulates_cached_positions_after_an_external_publish(

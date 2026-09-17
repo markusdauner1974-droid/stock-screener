@@ -43,3 +43,21 @@ def test_backfill_returns_nonzero_for_quality_failure():
         yield FakeUseCase()
 
     assert main([], use_case_factory=fake_factory) == 1
+
+
+def test_backfill_treats_a_newer_competing_publication_as_success():
+    class FakeUseCase:
+        def execute(self, _command):
+            return CotRefreshResult(
+                status="superseded",
+                run_id=41,
+                report_date=date(2026, 9, 8),
+                instrument_count=31,
+                price_unavailable_count=0,
+            )
+
+    @contextmanager
+    def fake_factory():
+        yield FakeUseCase()
+
+    assert main([], use_case_factory=fake_factory) == 0

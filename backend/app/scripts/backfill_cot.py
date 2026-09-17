@@ -54,7 +54,7 @@ def main(
             sort_keys=True,
         )
     )
-    return 0 if result.status in {"published", "no_change"} else 1
+    return 0 if result.status in {"published", "no_change", "superseded"} else 1
 
 
 if __name__ == "__main__":

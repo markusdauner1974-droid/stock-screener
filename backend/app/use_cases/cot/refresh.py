@@ -127,7 +127,7 @@ class RefreshCotUseCase:
             failure_status = "failed_price_hydration"
             price_result = self._price_hydrator.hydrate(COT_INSTRUMENTS)
             failure_status = "failed_publish"
-            self._repository.publish(
+            published = self._repository.publish(
                 run_id,
                 registry=COT_INSTRUMENTS,
                 weeks=derived,
@@ -138,7 +138,7 @@ class RefreshCotUseCase:
                 source_metadata=source_snapshot.metadata.as_dict(),
             )
             return CotRefreshResult(
-                status="published",
+                status="published" if published else "superseded",
                 run_id=run_id,
                 report_date=report_date,
                 instrument_count=instrument_count,
