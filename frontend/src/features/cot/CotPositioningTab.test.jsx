@@ -37,20 +37,28 @@ describe('CotPositioningTab', () => {
   it('loads defaults and refetches for instrument and range controls', async () => {
     renderTab();
     expect(await screen.findByRole('heading', { name: /COT Positioning/i })).toBeInTheDocument();
-    await waitFor(() => expect(getCotHistory).toHaveBeenCalledWith('sp-500', '1y'));
-    expect(getCotSnapshot).toHaveBeenCalled();
+    await waitFor(() => expect(getCotHistory).toHaveBeenCalledWith('sp-500', '1y', 7));
+    expect(getCotSnapshot).toHaveBeenCalledWith(7);
 
     fireEvent.change(screen.getByLabelText('COT instrument'), { target: { value: 'nasdaq-100' } });
-    await waitFor(() => expect(getCotHistory).toHaveBeenCalledWith('nasdaq-100', '1y'));
+    await waitFor(() => expect(getCotHistory).toHaveBeenCalledWith('nasdaq-100', '1y', 7));
     await screen.findByLabelText('COT instrument');
     fireEvent.click(screen.getByRole('button', { name: '3Y' }));
-    await waitFor(() => expect(getCotHistory).toHaveBeenCalledWith('nasdaq-100', '3y'));
+    await waitFor(() => expect(getCotHistory).toHaveBeenCalledWith('nasdaq-100', '3y', 7));
   });
 
   it('keeps the snapshot table visible when history fails', async () => {
     getCotHistory.mockRejectedValue(new Error('history unavailable'));
     renderTab();
-    expect(await screen.findByText('S&P 500')).toBeInTheDocument();
+    expect(await screen.findByRole('table', { name: 'COT positioning snapshot' })).toBeInTheDocument();
     expect(await screen.findByText(/Unable to load COT positioning/i)).toBeInTheDocument();
+  });
+
+  it('shows a table error when the snapshot request fails', async () => {
+    getCotSnapshot.mockRejectedValue(new Error('snapshot unavailable'));
+
+    renderTab();
+
+    expect(await screen.findByText(/Unable to load the COT market table/i)).toBeInTheDocument();
   });
 });

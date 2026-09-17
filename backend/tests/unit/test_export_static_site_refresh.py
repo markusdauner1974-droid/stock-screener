@@ -290,7 +290,7 @@ def test_static_daily_refresh_rewinds_to_latest_benchmark_backed_session(
 
 
 def test_static_daily_refresh_skips_exposure_when_breadth_history_errors(monkeypatch):
-    monkeypatch.setattr(export_static_site, "STATIC_EXPORT_MARKETS", ("HK",))
+    monkeypatch.setattr(export_static_site, "STATIC_EXPORT_MARKETS", ("US",))
     monkeypatch.setattr(export_static_site, "SessionLocal", lambda: _FakeSession())
     monkeypatch.setattr(export_static_site, "disable_serialized_data_fetch_lock", nullcontext)
     monkeypatch.setattr(export_static_site, "disable_serialized_market_workload", nullcontext)
@@ -361,18 +361,24 @@ def test_static_daily_refresh_skips_exposure_when_breadth_history_errors(monkeyp
         "_enrich_feature_run_with_ibd_metadata",
         lambda **kwargs: {"status": "completed"},
     )
+    monkeypatch.setattr(
+        export_static_site,
+        "_run_static_cot_refresh",
+        lambda: {"status": "published", "run_id": 99},
+    )
 
     results, warnings = export_static_site._run_daily_refresh(
-        market="HK",
+        market="US",
         skip_universe_refresh=True,
         skip_fundamentals_refresh=True,
         rs_formula_version=BALANCED_RS_FORMULA_VERSION,
     )
 
-    assert results["market_exposure"]["HK"]["error"] == "market_breadth_not_ready"
-    assert results["feature_snapshots"]["HK"]["reason"] == "market_exposure_not_ready"
+    assert results["market_exposure"]["US"]["error"] == "market_breadth_not_ready"
+    assert results["feature_snapshots"]["US"]["reason"] == "market_exposure_not_ready"
+    assert results["cot"] == {"status": "published", "run_id": 99}
     assert (
-        "Static export market HK exposure not stored for 2026-07-31: "
+        "Static export market US exposure not stored for 2026-07-31: "
         "market_breadth_not_ready."
     ) in warnings
 

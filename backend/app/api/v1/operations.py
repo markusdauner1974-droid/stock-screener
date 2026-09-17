@@ -6,10 +6,14 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from ...database import get_db
-from ...schemas.operations import OperationsCancelJobResponse, OperationsJobsResponse
+from ...schemas.operations import (
+    CotOperationsResponse,
+    OperationsCancelJobResponse,
+    OperationsJobsResponse,
+)
+from ...services.cot_operations_service import CotOperationsService
 from ...services.operations_job_service import OperationsJobService
 from ...services.social_signal_operations_service import SocialSignalOperationsService
-from ...services.cot_operations_service import CotOperationsService
 
 router = APIRouter(prefix="/operations", tags=["operations"])
 
@@ -39,7 +43,7 @@ def get_social_signal_operations(db: Session = Depends(get_db)) -> dict:
     return _social_service.snapshot(db)
 
 
-@router.get("/cot")
-def get_cot_operations(db: Session = Depends(get_db)) -> dict:
+@router.get("/cot", response_model=CotOperationsResponse)
+def get_cot_operations(db: Session = Depends(get_db)) -> CotOperationsResponse:
     """Return redacted CFTC import, publication, and price coverage health."""
-    return _cot_service.snapshot(db)
+    return CotOperationsResponse(**_cot_service.snapshot(db))

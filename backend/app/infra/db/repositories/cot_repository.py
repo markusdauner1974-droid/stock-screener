@@ -56,13 +56,20 @@ class SqlCotRepository:
         self._session.commit()
         return int(run.id)
 
-    def existing_week_keys(self) -> frozenset[tuple[str, date]]:
+    def existing_week_keys(
+        self,
+        instrument_slugs: Sequence[str],
+    ) -> frozenset[tuple[str, date]]:
+        slugs = tuple(dict.fromkeys(instrument_slugs))
+        if not slugs:
+            return frozenset()
         rows = self._session.execute(
             select(CotInstrument.slug, CotWeeklyPosition.report_date)
             .join(
                 CotWeeklyPosition,
                 CotWeeklyPosition.instrument_id == CotInstrument.id,
             )
+            .where(CotInstrument.slug.in_(slugs))
             .distinct()
         ).all()
         return frozenset((slug, report_date) for slug, report_date in rows)
@@ -159,6 +166,7 @@ class SqlCotRepository:
     ) -> None:
         if not status.startswith("failed"):
             raise ValueError("failed run status must begin with 'failed'")
+        self._session.rollback()
         run = self._require_run(run_id)
         run.status = status
         run.failure_reason = status

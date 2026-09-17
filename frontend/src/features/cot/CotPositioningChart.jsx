@@ -23,14 +23,19 @@ import {
 
 const COLORS = ['#4f7cac', '#d96c75', '#d9a441', '#6da77f', '#8e7cc3'];
 
-const CotTooltip = ({ active, payload, history }) => {
+const CotTooltip = ({ active, payload, history, mode, participant, visibleParticipants }) => {
   if (!active || !payload?.length) return null;
   const row = payload[0]?.payload;
   if (!row) return null;
+  const positions = Object.values(row.positions).filter((position) => (
+    mode === 'net'
+      ? visibleParticipants.includes(position.participant)
+      : position.participant === participant
+  ));
   return (
     <Box sx={{ bgcolor: 'background.paper', border: 1, borderColor: 'divider', p: 1, maxWidth: 300 }}>
       <Typography variant="subtitle2">{row.reportDate}</Typography>
-      {Object.values(row.positions).map((position) => (
+      {positions.map((position) => (
         <Typography variant="caption" display="block" key={position.participant}>
           {position.label}: Long {formatCotNumber(position.long)} · Short {formatCotNumber(position.short)} · Net {formatCotNumber(position.net)} · 3Y {position.percentile_status === 'available' ? formatCotPercent(position.percentile_3y, 0) : 'building'}
         </Typography>
@@ -76,7 +81,14 @@ const CotPositioningChart = ({ history, mode, participant, visibleParticipants, 
             <YAxis yAxisId="position" tickFormatter={formatCotNumber} />
             <YAxis yAxisId="price" orientation="right" tickFormatter={formatCotNumber} />
             <ReferenceLine yAxisId="position" y={0} stroke="currentColor" opacity={0.45} />
-            <Tooltip content={<CotTooltip history={history} />} />
+            <Tooltip content={(
+              <CotTooltip
+                history={history}
+                mode={mode}
+                participant={participant}
+                visibleParticipants={visible}
+              />
+            )} />
             <Legend />
             {mode === 'net' ? participants.map((item, index) => (
               visible.includes(item.participant) && (

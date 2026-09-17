@@ -69,13 +69,17 @@ class RefreshCotUseCase:
     def execute(self, command: CotRefreshCommand) -> CotRefreshResult:
         run_request = command.to_run_request()
         run_id = self._repository.start_run(run_request)
+        failure_status = "failed_fetch"
         try:
             source_snapshot = self._source.fetch(COT_INSTRUMENTS)
             raw_weeks = source_snapshot.weeks
+            failure_status = "failed_validation"
             validation = validate_cot_snapshot(
                 raw_weeks,
                 COT_INSTRUMENTS,
-                self._repository.existing_week_keys(),
+                self._repository.existing_week_keys(
+                    tuple(item.slug for item in COT_INSTRUMENTS)
+                ),
                 source_snapshot.metadata.expected_dataset_row_counts,
             )
             if not validation.valid:
@@ -110,8 +114,11 @@ class RefreshCotUseCase:
                     price_unavailable_count=0,
                 )
 
+            failure_status = "failed_calculation"
             derived = derive_all_instrument_series(raw_weeks)
+            failure_status = "failed_price_hydration"
             price_result = self._price_hydrator.hydrate(COT_INSTRUMENTS)
+            failure_status = "failed_publish"
             self._repository.publish(
                 run_id,
                 registry=COT_INSTRUMENTS,
@@ -132,7 +139,7 @@ class RefreshCotUseCase:
         except Exception as exc:
             self._repository.mark_failed(
                 run_id,
-                "failed_fetch",
+                failure_status,
                 {"exception_type": type(exc).__name__},
             )
             raise

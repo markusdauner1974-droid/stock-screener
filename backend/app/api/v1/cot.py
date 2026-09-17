@@ -34,7 +34,7 @@ def get_cot_catalog(
     _set_cache_control(response)
     queries = get_cot_queries(db)
     try:
-        return queries.catalog()
+        return CotCatalogResponse.from_view(queries.catalog())
     except CotPublicationUnavailable as exc:
         raise _unavailable("cot_publication_unavailable") from exc
 
@@ -49,7 +49,7 @@ def get_cot_history(
     _set_cache_control(response)
     queries = get_cot_queries(db)
     try:
-        return queries.history(slug, range_name)
+        return CotHistoryResponse.from_view(queries.history(slug, range_name))
     except CotInstrumentUnavailable as exc:
         raise _unavailable("cot_instrument_unavailable") from exc
     except CotPublicationUnavailable as exc:
@@ -64,6 +64,6 @@ def get_cot_snapshot(
     _set_cache_control(response)
     queries = get_cot_queries(db)
     try:
-        return queries.snapshot()
+        return CotSnapshotResponse.from_view(queries.snapshot())
     except CotPublicationUnavailable as exc:
         raise _unavailable("cot_publication_unavailable") from exc

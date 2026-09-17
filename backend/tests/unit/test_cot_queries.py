@@ -114,7 +114,10 @@ class FakePriceReader:
 class PreRangeOnlyPriceReader(FakePriceReader):
     def closes(self, symbol, *, start, end):
         self.requests.append((symbol, start, end))
-        return {start + timedelta(days=6): 99.0}
+        return {
+            start + timedelta(days=7): 99.0,
+            start + timedelta(days=14): 100.0,
+        }
 
 
 def service():
@@ -126,9 +129,10 @@ def service():
 
 
 def test_history_uses_week_counts_and_cached_prices_only():
+    repository = FakeRepository()
     price_reader = FakePriceReader()
     query_service = CotQueryService(
-        FakeRepository(),
+        repository,
         price_reader,
         now=lambda: datetime(2026, 9, 12, tzinfo=timezone.utc),
     )
@@ -138,6 +142,8 @@ def test_history_uses_week_counts_and_cached_prices_only():
     assert len(history.weeks) == 52
     assert history.weeks[-1].report_date.isoformat() == "2026-09-08"
     assert history.weeks[-1].price_date <= history.weeks[-1].report_date
+    assert history.weeks[0].price_change_pct is not None
+    assert repository.history_calls == [("sp-500", 53)]
     assert price_reader.external_calls == []
 
 
@@ -149,9 +155,10 @@ def test_history_reads_pre_range_close_for_first_report_alignment():
     history = query_service.history("sp-500", "1y")
 
     first_report = history.weeks[0].report_date
-    assert price_reader.requests[0][1] == first_report - timedelta(days=7)
-    assert history.weeks[0].price_date == first_report - timedelta(days=1)
-    assert history.weeks[0].price_close == 99.0
+    assert price_reader.requests[0][1] == first_report - timedelta(days=14)
+    assert history.weeks[0].price_date == first_report
+    assert history.weeks[0].price_close == 100.0
+    assert history.weeks[0].price_change_pct == 100.0 / 99.0
 
 
 def test_snapshot_preserves_registry_order_and_focal_participants():

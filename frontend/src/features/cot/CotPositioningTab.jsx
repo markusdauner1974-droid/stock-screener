@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Box } from '@mui/material';
+import { Alert, Box } from '@mui/material';
 import { useQuery } from '@tanstack/react-query';
 
 import { getCotCatalog, getCotHistory, getCotSnapshot } from '../../api/cot';
@@ -24,12 +24,14 @@ const CotPositioningTab = () => {
     queryKey: cotHistoryQueryKey({
       mode: 'live', publicationId, slug: selectedSlug, range,
     }),
-    queryFn: () => getCotHistory(selectedSlug, range),
+    queryFn: () => getCotHistory(selectedSlug, range, publicationId),
+    enabled: publicationId !== null,
     staleTime: 60_000,
   });
   const snapshotQuery = useQuery({
     queryKey: cotSnapshotQueryKey(publicationId),
-    queryFn: getCotSnapshot,
+    queryFn: () => getCotSnapshot(publicationId),
+    enabled: publicationId !== null,
     staleTime: 60_000,
   });
 
@@ -52,6 +54,9 @@ const CotPositioningTab = () => {
             selectedSlug={selectedSlug}
             onSelectInstrument={setSelectedSlug}
           />
+        )}
+        {snapshotQuery.error && (
+          <Alert severity="error">Unable to load the COT market table.</Alert>
         )}
       </Box>
     </Box>

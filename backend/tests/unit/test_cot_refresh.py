@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
 from app.domain.cot.models import (
     COT_CALCULATION_VERSION,
     COT_REGISTRY_VERSION,
@@ -123,6 +124,7 @@ class FakeRepository:
         self.weeks = ()
         self.statuses = {}
         self.signature = None
+        self.existing_key_slugs = ()
 
     def start_run(self, _request):
         run_id = self.next_run_id
@@ -130,9 +132,12 @@ class FakeRepository:
         self.statuses[run_id] = "staged"
         return run_id
 
-    def existing_week_keys(self):
+    def existing_week_keys(self, instrument_slugs):
+        self.existing_key_slugs = tuple(instrument_slugs)
         return frozenset(
-            (week.instrument_slug, week.report_date) for week in self.weeks
+            (week.instrument_slug, week.report_date)
+            for week in self.weeks
+            if week.instrument_slug in self.existing_key_slugs
         )
 
     def stored_fingerprints(self):
@@ -210,6 +215,9 @@ def test_refresh_publishes_complete_valid_source_even_when_prices_fail():
     assert result.instrument_count == 31
     assert result.price_unavailable_count == 31
     assert repository.published_run_id == result.run_id
+    assert repository.existing_key_slugs == tuple(
+        item.slug for item in COT_INSTRUMENTS
+    )
 
 
 def test_refresh_rejects_a_truncated_first_backfill():
@@ -265,3 +273,56 @@ def test_historical_correction_rebuilds_later_deltas_and_percentiles():
     assert second.status == "published"
     assert repository.gold_position_at(156).delta_net != prior_delta
     assert repository.gold_position_at(156).percentile_3y != prior_percentile
+
+
+def test_refresh_records_calculation_failures_by_phase(monkeypatch):
+    use_case, _source, repository = make_use_case()
+    monkeypatch.setattr(
+        "app.use_cases.cot.refresh.derive_all_instrument_series",
+        lambda _weeks: (_ for _ in ()).throw(RuntimeError("calculation failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="calculation failed"):
+        use_case.execute(CotRefreshCommand(origin="test"))
+
+    assert repository.statuses[1] == "failed_calculation"
+
+
+def test_refresh_records_price_hydration_failures_by_phase():
+    source = FakeSource()
+    repository = FakeRepository()
+
+    class FailingPriceHydrator:
+        def hydrate(self, _instruments):
+            raise RuntimeError("price hydration failed")
+
+    use_case = RefreshCotUseCase(
+        source=source,
+        repository=repository,
+        price_hydrator=FailingPriceHydrator(),
+    )
+
+    with pytest.raises(RuntimeError, match="price hydration failed"):
+        use_case.execute(CotRefreshCommand(origin="test"))
+
+    assert repository.statuses[1] == "failed_price_hydration"
+
+
+def test_refresh_records_publication_failures_by_phase():
+    source = FakeSource()
+
+    class FailingPublishRepository(FakeRepository):
+        def publish(self, *args, **kwargs):
+            raise RuntimeError("publish failed")
+
+    repository = FailingPublishRepository()
+    use_case = RefreshCotUseCase(
+        source=source,
+        repository=repository,
+        price_hydrator=FakePriceHydrator(),
+    )
+
+    with pytest.raises(RuntimeError, match="publish failed"):
+        use_case.execute(CotRefreshCommand(origin="test"))
+
+    assert repository.statuses[1] == "failed_publish"

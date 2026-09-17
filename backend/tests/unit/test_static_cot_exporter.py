@@ -4,13 +4,13 @@ import json
 import shutil
 
 import pytest
-
 from app.services.static_cot_artifact_selector import (
     StaticCotArtifactSelector,
     StaticCotUnavailable,
 )
 from app.services.static_cot_contract import validate_static_cot_artifact
 from app.services.static_cot_exporter import StaticCotExporter
+
 from tests.unit.test_cot_queries import service
 
 
@@ -41,6 +41,24 @@ def test_static_export_rejects_corrupt_or_unsafe_history_paths(tmp_path):
     index_path.write_text(json.dumps(index))
 
     with pytest.raises(ValueError, match="unsafe"):
+        validate_static_cot_artifact(cot_dir)
+
+
+@pytest.mark.parametrize("generated_at", [None, 17, "not-a-timestamp"])
+def test_static_export_contract_rejects_invalid_generated_at(
+    tmp_path, generated_at
+):
+    cot_dir = tmp_path / "cot"
+    StaticCotExporter(service()).export(
+        cot_dir,
+        generated_at="2026-09-16T09:00:00Z",
+    )
+    index_path = cot_dir / "index.json"
+    index = json.loads(index_path.read_text())
+    index["generated_at"] = generated_at
+    index_path.write_text(json.dumps(index))
+
+    with pytest.raises(ValueError, match="generated timestamp"):
         validate_static_cot_artifact(cot_dir)
 
 

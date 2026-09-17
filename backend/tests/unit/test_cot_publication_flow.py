@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from sqlalchemy import create_engine, event, select
-from sqlalchemy.orm import sessionmaker
-
 from app.database import Base
 from app.domain.cot.models import Participant
 from app.infra.db.models.cot import (
@@ -13,6 +10,9 @@ from app.infra.db.models.cot import (
 )
 from app.infra.db.repositories.cot_repository import SqlCotRepository
 from app.use_cases.cot.refresh import CotRefreshCommand, RefreshCotUseCase
+from sqlalchemy import create_engine, event, select
+from sqlalchemy.orm import sessionmaker
+
 from tests.unit.test_cot_refresh import FakePriceHydrator, FakeSource
 
 

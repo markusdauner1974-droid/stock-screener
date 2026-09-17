@@ -20,21 +20,26 @@ from app.domain.relative_strength import (
 from app.infra.db.models.feature_store import FeatureRunPointer
 from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
 from app.scripts._runtime import prepare_runtime, repo_root
+from app.services.benchmark_cache_service import BenchmarkFallbackPolicy
+from app.services.benchmark_resolution import BenchmarkResolution
 from app.services.breadth_calculator_service import BreadthCalculatorService
 from app.services.bulk_data_fetcher import BulkDataFetcher
-from app.services.ibd_industry_service import IBDIndustryService
 from app.services.group_rank_history_backfill_service import (
     DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
     GroupRankHistoryBackfillResult,
     GroupRankHistoryBackfillService,
     GroupRankHistoryBackfillStatus,
 )
-from app.services.benchmark_cache_service import BenchmarkFallbackPolicy
-from app.services.benchmark_resolution import BenchmarkResolution
+from app.services.ibd_industry_service import IBDIndustryService
 from app.services.market_exposure_service import EXPOSURE_BACKFILL_DAYS
-from app.services.static_daily_price_refresh_service import (
-    StaticDailyPriceRefreshService,
-    static_daily_price_refresh_batch_size as _static_daily_price_refresh_batch_size,
+from app.services.market_rs_result_contract import (
+    MARKET_RS_REASON_BENCHMARK_ADJUSTED_ANCHOR_MISSING,
+)
+from app.services.static_breadth_contributor_metadata_contract import (
+    build_static_breadth_contributor_metadata_plan,
+)
+from app.services.static_breadth_contributor_metadata_finalizer import (
+    StaticBreadthContributorMetadataFinalizer,
 )
 from app.services.static_breadth_eligibility import (
     classify_static_breadth_eligibility,
@@ -43,32 +48,29 @@ from app.services.static_breadth_history_coordinator import (
     StaticBreadthHistoryCoordinator,
     StaticBreadthHistoryRequest,
 )
-from app.services.static_breadth_contributor_metadata_contract import (
-    build_static_breadth_contributor_metadata_plan,
+from app.services.static_daily_price_refresh_service import (
+    StaticDailyPriceRefreshService,
 )
-from app.services.static_breadth_contributor_metadata_finalizer import (
-    StaticBreadthContributorMetadataFinalizer,
-)
-from app.services.static_site_export_service import (
-    NoPublishedStaticMarketArtifact,
-    STATIC_SITE_SCHEMA_VERSION,
-    StaticSiteExportService,
-)
-from app.services.static_groups_rrg_export import (
-    StaticGroupsRRGRollingHistoryExportSession,
+from app.services.static_daily_price_refresh_service import (
+    static_daily_price_refresh_batch_size as _static_daily_price_refresh_batch_size,
 )
 from app.services.static_group_snapshot_coordinator import (
     build_static_group_snapshot_coordinator,
 )
-from app.services.static_rrg_history_contract import StaticRRGHistoryBundleError
-from app.services.market_rs_result_contract import (
-    MARKET_RS_REASON_BENCHMARK_ADJUSTED_ANCHOR_MISSING,
+from app.services.static_groups_rrg_export import (
+    StaticGroupsRRGRollingHistoryExportSession,
 )
 from app.services.static_market_publish_policy import (
     OPTIONAL_STATIC_MARKETS,
     StaticMarketRsArtifactState,
     classify_static_market_rs_artifact_result,
     collect_static_no_current_artifact_failures,
+)
+from app.services.static_rrg_history_contract import StaticRRGHistoryBundleError
+from app.services.static_site_export_service import (
+    STATIC_SITE_SCHEMA_VERSION,
+    NoPublishedStaticMarketArtifact,
+    StaticSiteExportService,
 )
 from app.tasks.data_fetch_lock import disable_serialized_data_fetch_lock
 from app.tasks.workload_coordination import disable_serialized_market_workload
@@ -79,7 +81,6 @@ from app.wiring.bootstrap import (
     get_price_cache,
     get_provider_snapshot_service,
 )
-
 
 STATIC_BREADTH_HISTORY_MIN_TRADING_DAYS = 20
 STATIC_BREADTH_HISTORY_LOOKBACK_DAYS = 90
@@ -1220,8 +1221,6 @@ def _run_daily_refresh(
                             "Static US Options Analytics did not publish; "
                             "last-good options may be used independently."
                         )
-                cot_result = _run_static_cot_refresh()
-                results["cot"] = cot_result
             elif default_run_id is not None:
                 warnings.append(
                     f"{STATIC_DEFAULT_MARKET} feature snapshot returned status "
@@ -1232,6 +1231,9 @@ def _run_daily_refresh(
                     f"No {STATIC_DEFAULT_MARKET} feature snapshot produced a run id; "
                     "'latest_published' was not updated."
                 )
+
+        if STATIC_DEFAULT_MARKET in selected_markets:
+            results["cot"] = _run_static_cot_refresh()
 
     return results, warnings
 

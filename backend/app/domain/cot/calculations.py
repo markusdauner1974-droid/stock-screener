@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from collections.abc import Mapping, Sequence
-from datetime import date
+from datetime import date, timedelta
 
 from app.domain.cot.models import (
     AlignedPrice,
@@ -12,8 +12,8 @@ from app.domain.cot.models import (
     Participant,
 )
 
-
 PERCENTILE_WINDOW = 156
+MAX_PRICE_AGE = timedelta(days=5)
 
 
 def midrank_percentile(window: Sequence[int], current: int) -> float:
@@ -154,9 +154,15 @@ def align_prices_to_report_dates(
         ):
             latest_price_date, latest_close = ordered_closes[price_index]
             price_index += 1
+        close_is_fresh = (
+            latest_price_date is not None
+            and report_date - latest_price_date <= MAX_PRICE_AGE
+        )
+        aligned_price_date = latest_price_date if close_is_fresh else None
+        aligned_close = latest_close if close_is_fresh else None
         weekly_change_pct = (
-            100.0 * (latest_close - previous_aligned_close) / previous_aligned_close
-            if latest_close is not None
+            100.0 * (aligned_close - previous_aligned_close) / previous_aligned_close
+            if aligned_close is not None
             and previous_aligned_close is not None
             and previous_aligned_close != 0
             else None
@@ -164,11 +170,11 @@ def align_prices_to_report_dates(
         aligned.append(
             AlignedPrice(
                 report_date=report_date,
-                price_date=latest_price_date,
-                close=latest_close,
+                price_date=aligned_price_date,
+                close=aligned_close,
                 weekly_change_pct=weekly_change_pct,
             )
         )
-        previous_aligned_close = latest_close
+        previous_aligned_close = aligned_close
 
     return tuple(aligned)

@@ -58,6 +58,7 @@ GATE_3 = \
   tests/integration/test_setup_engine_query_integration.py \
   tests/integration/test_opportunity_state_surface_parity.py \
   tests/integration/test_options_static_live_parity.py \
+  tests/unit/test_cot_static_live_parity.py \
   tests/integration/test_breadth_revision_cutover.py \
   tests/integration/test_shared_breadth_metrics_migration.py \
   tests/integration/test_common_stock_classification_migration.py \

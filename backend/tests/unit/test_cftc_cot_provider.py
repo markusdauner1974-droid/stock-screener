@@ -6,7 +6,6 @@ from pathlib import Path
 
 import httpx
 import pytest
-
 from app.domain.cot.registry import instrument_by_slug
 from app.infra.providers.cftc_cot import CftcCotSchemaError, CftcCotSource
 
@@ -164,6 +163,46 @@ def test_source_retries_transient_responses_and_records_retry_count():
 
     assert result.metadata.retry_count == 1
     assert sleeps == [60.0]
+
+
+def test_source_retries_internal_server_errors():
+    sleeps: list[float] = []
+    source = source_with_rows(
+        load_fixture("cot/disaggregated_wheat.json"),
+        statuses=(500, 200),
+        sleeps=sleeps,
+    )
+
+    result = source.fetch((instrument_by_slug("wheat-srw"),))
+
+    assert result.metadata.retry_count == 1
+    assert sleeps == [1.0]
+
+
+def test_request_retries_transport_errors():
+    attempts = 0
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ConnectError("connection reset", request=request)
+        return httpx.Response(200, json=[])
+
+    source = CftcCotSource(
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler),
+            base_url="https://publicreporting.cftc.gov",
+        ),
+        sleeper=sleeps.append,
+    )
+
+    payload, retries = source._request_json("72hh-3qpy", {}, operation="test")
+
+    assert payload == []
+    assert retries == 1
+    assert sleeps == [1.0]
 
 
 @pytest.mark.parametrize(

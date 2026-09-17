@@ -15,23 +15,22 @@ from app.domain.cot.registry import (
     dataset_for_family,
     instrument_by_slug,
 )
-from app.schemas.cot import (
-    CotCatalogInstrumentResponse,
-    CotCatalogResponse,
-    CotHistoryResponse,
-    CotHistoryWeekResponse,
-    CotParticipantMetadataResponse,
-    CotPositionResponse,
-    CotPublicationMetadataResponse,
-    CotSnapshotResponse,
-    CotSnapshotRowResponse,
-    CotSourceResponse,
-)
 from app.use_cases.cot.ports import (
     CotHistoryPositionRecord,
     CotPriceReader,
     CotReadRepository,
     CotSnapshotPositionRecord,
+)
+from app.use_cases.cot.read_models import (
+    CotCatalogInstrumentView,
+    CotCatalogView,
+    CotHistoryView,
+    CotHistoryWeekView,
+    CotPositionView,
+    CotPublicationView,
+    CotSnapshotRowView,
+    CotSnapshotView,
+    CotSourceView,
 )
 
 RANGE_WEEKS = {"1y": 52, "3y": 156, "5y": 260}
@@ -58,7 +57,7 @@ class CotQueryService:
         self._price_reader = price_reader
         self._now = now or (lambda: datetime.now(timezone.utc))
 
-    def publication(self) -> CotPublicationMetadataResponse:
+    def publication(self) -> CotPublicationView:
         publication = self._repository.get_publication()
         if publication is None:
             raise CotPublicationUnavailable("no published COT run")
@@ -72,7 +71,7 @@ class CotQueryService:
         age_days = (
             self._now().astimezone(_NEW_YORK).date() - publication.pointer.report_date
         ).days
-        return CotPublicationMetadataResponse(
+        return CotPublicationView(
             schema_version=publication.run.schema_version,
             calculation_version=publication.run.calculation_version,
             registry_version=publication.run.registry_version,
@@ -85,23 +84,23 @@ class CotQueryService:
     def catalog(
         self,
         *,
-        publication: CotPublicationMetadataResponse | None = None,
-    ) -> CotCatalogResponse:
+        publication: CotPublicationView | None = None,
+    ) -> CotCatalogView:
         publication = publication or self.publication()
-        return CotCatalogResponse(
+        return CotCatalogView(
             publication=publication,
             default_slug="sp-500",
-            categories=[category.value for category in CATEGORY_ORDER],
-            sources=[
-                CotSourceResponse(
+            categories=tuple(category.value for category in CATEGORY_ORDER),
+            sources=tuple(
+                CotSourceView(
                     dataset_id=dataset.dataset_id.value,
                     label=dataset.label,
                     url=dataset.url,
                 )
                 for dataset in COT_DATASETS
-            ],
-            instruments=[
-                CotCatalogInstrumentResponse(
+            ),
+            instruments=tuple(
+                CotCatalogInstrumentView(
                     slug=item.slug,
                     display_name=item.display_name,
                     category=item.category.value,
@@ -109,19 +108,15 @@ class CotQueryService:
                     instrument_order=item.instrument_order,
                     report_family=item.report_family.value,
                     focal_participant=item.focal_participant.value,
-                    participants=[
-                        CotParticipantMetadataResponse(
-                            value=participant.value,
-                            label=PARTICIPANT_LABELS[participant],
-                        )
-                        for participant in item.participants
-                    ],
+                    participants=tuple(
+                        participant.value for participant in item.participants
+                    ),
                     price_symbol=item.price.yahoo_symbol,
                     price_mapping_kind=item.price.kind.value,
                     tradingview_url=item.price.tradingview_url,
                 )
                 for item in COT_INSTRUMENTS
-            ],
+            ),
         )
 
     def history(
@@ -129,8 +124,8 @@ class CotQueryService:
         slug: str,
         range_name: str,
         *,
-        publication: CotPublicationMetadataResponse | None = None,
-    ) -> CotHistoryResponse:
+        publication: CotPublicationView | None = None,
+    ) -> CotHistoryView:
         if range_name not in RANGE_WEEKS:
             raise ValueError(f"unknown COT range: {range_name}")
         try:
@@ -138,23 +133,27 @@ class CotQueryService:
         except KeyError as exc:
             raise CotInstrumentUnavailable(slug) from exc
         publication = publication or self.publication()
-        rows = self._repository.get_history(slug, limit=RANGE_WEEKS[range_name])
+        requested_weeks = RANGE_WEEKS[range_name]
+        rows = self._repository.get_history(slug, limit=requested_weeks + 1)
         if not rows:
             raise CotInstrumentUnavailable(slug)
         grouped: dict[date, list[CotHistoryPositionRecord]] = defaultdict(list)
         for row in rows:
             grouped[row.report_date].append(row)
-        report_dates = tuple(sorted(grouped))
+        alignment_dates = tuple(sorted(grouped))
+        report_dates = alignment_dates[-requested_weeks:]
         closes: Mapping[date, float] = {}
         if definition.price.yahoo_symbol is not None:
             closes = self._price_reader.closes(
                 definition.price.yahoo_symbol,
-                start=report_dates[0] - timedelta(days=7),
-                end=report_dates[-1],
+                start=alignment_dates[0] - timedelta(days=7),
+                end=alignment_dates[-1],
             )
-        aligned = align_prices_to_report_dates(report_dates, closes)
+        aligned = align_prices_to_report_dates(alignment_dates, closes)
         aligned_by_date = {item.report_date: item for item in aligned}
-        aligned_count = sum(item.close is not None for item in aligned)
+        aligned_count = sum(
+            aligned_by_date[item].close is not None for item in report_dates
+        )
         coverage = (
             PriceCoverageState.UNAVAILABLE
             if aligned_count == 0
@@ -162,15 +161,15 @@ class CotQueryService:
             if aligned_count == len(report_dates)
             else PriceCoverageState.PARTIAL
         )
-        weeks = [
-            CotHistoryWeekResponse(
+        weeks = tuple(
+            CotHistoryWeekView(
                 report_date=report_date,
                 open_interest=int(grouped[report_date][0].open_interest),
                 price_date=aligned_by_date[report_date].price_date,
                 price_close=aligned_by_date[report_date].close,
                 price_change_pct=aligned_by_date[report_date].weekly_change_pct,
-                positions=[
-                    CotPositionResponse(
+                positions=tuple(
+                    CotPositionView(
                         participant=row.participant,
                         label=PARTICIPANT_LABELS[
                             next(
@@ -200,11 +199,11 @@ class CotQueryService:
                             )
                         ),
                     )
-                ],
+                ),
             )
             for report_date in report_dates
-        ]
-        return CotHistoryResponse(
+        )
+        return CotHistoryView(
             publication=publication,
             range=range_name,
             slug=definition.slug,
@@ -226,8 +225,8 @@ class CotQueryService:
     def snapshot(
         self,
         *,
-        publication: CotPublicationMetadataResponse | None = None,
-    ) -> CotSnapshotResponse:
+        publication: CotPublicationView | None = None,
+    ) -> CotSnapshotView:
         publication = publication or self.publication()
         history_by_slug: dict[str, list[CotSnapshotPositionRecord]] = defaultdict(list)
         for record in self._repository.get_snapshot_history(weeks=RANGE_WEEKS["1y"]):
@@ -256,7 +255,7 @@ class CotQueryService:
                 )
         closes_by_symbol = self._price_reader.closes_many(price_requests)
 
-        rows: list[CotSnapshotRowResponse] = []
+        rows: list[CotSnapshotRowView] = []
         for definition in COT_INSTRUMENTS:
             history = history_by_slug[definition.slug]
             report_dates = tuple(item.report_date for item in history)
@@ -278,7 +277,7 @@ class CotQueryService:
             current = history[-1]
             current_price = aligned_by_date[current.report_date]
             rows.append(
-                CotSnapshotRowResponse(
+                CotSnapshotRowView(
                     slug=definition.slug,
                     display_name=definition.display_name,
                     category=definition.category.value,
@@ -295,10 +294,10 @@ class CotQueryService:
                     net_pct_open_interest=current.net_pct_open_interest,
                     percentile_3y=current.percentile_3y,
                     percentile_status=current.percentile_status,
-                    net_trend=[item.net for item in history[-12:]],
+                    net_trend=tuple(item.net for item in history[-12:]),
                     price_change_pct=current_price.weekly_change_pct,
                     price_mapping_kind=definition.price.kind.value,
                     price_coverage_state=coverage.value,
                 )
             )
-        return CotSnapshotResponse(publication=publication, rows=rows)
+        return CotSnapshotView(publication=publication, rows=tuple(rows))

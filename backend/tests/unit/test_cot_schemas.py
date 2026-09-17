@@ -8,7 +8,7 @@ from tests.unit.test_cot_queries import service
 
 
 def test_history_contract_preserves_integer_positions_exactly():
-    response = service().history("sp-500", "1y")
+    response = CotHistoryResponse.from_view(service().history("sp-500", "1y"))
 
     assert isinstance(response, CotHistoryResponse)
 
@@ -19,7 +19,9 @@ def test_history_contract_preserves_integer_positions_exactly():
 
 
 def test_history_contract_rejects_extra_nonfinite_and_inconsistent_percentile():
-    payload = service().history("sp-500", "1y").model_dump(mode="python")
+    payload = CotHistoryResponse.from_view(
+        service().history("sp-500", "1y")
+    ).model_dump(mode="python")
     extra = deepcopy(payload)
     extra["unexpected"] = True
     with pytest.raises(ValidationError):
@@ -38,7 +40,7 @@ def test_history_contract_rejects_extra_nonfinite_and_inconsistent_percentile():
 
 
 def test_catalog_contract_rejects_duplicate_instruments():
-    payload = service().catalog().model_dump(mode="python")
+    payload = CotCatalogResponse.from_view(service().catalog()).model_dump(mode="python")
     payload["instruments"].append(deepcopy(payload["instruments"][0]))
 
     with pytest.raises(ValidationError, match="duplicate"):

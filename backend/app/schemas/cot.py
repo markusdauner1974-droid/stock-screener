@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.cot.models import CotDatasetId, Participant
 from app.domain.cot.registry import PARTICIPANT_LABELS
+
+if TYPE_CHECKING:
+    from app.use_cases.cot.read_models import (
+        CotCatalogView,
+        CotHistoryView,
+        CotSnapshotView,
+    )
 
 
 class _StrictModel(BaseModel):
@@ -58,6 +65,42 @@ class CotCatalogResponse(_StrictModel):
     categories: list[str]
     sources: list[CotSourceResponse]
     instruments: list[CotCatalogInstrumentResponse]
+
+    @classmethod
+    def from_view(cls, view: CotCatalogView) -> CotCatalogResponse:
+        return cls(
+            publication=view.publication,
+            default_slug=view.default_slug,
+            categories=list(view.categories),
+            sources=list(view.sources),
+            instruments=[
+                {
+                    **{
+                        key: getattr(item, key)
+                        for key in (
+                            "slug",
+                            "display_name",
+                            "category",
+                            "category_order",
+                            "instrument_order",
+                            "report_family",
+                            "focal_participant",
+                            "price_symbol",
+                            "price_mapping_kind",
+                            "tradingview_url",
+                        )
+                    },
+                    "participants": [
+                        {
+                            "value": value,
+                            "label": PARTICIPANT_LABELS[Participant(value)],
+                        }
+                        for value in item.participants
+                    ],
+                }
+                for item in view.instruments
+            ],
+        )
 
     @model_validator(mode="after")
     def validate_catalog(self):
@@ -137,6 +180,10 @@ class CotHistoryResponse(_StrictModel):
     tradingview_url: str | None
     weeks: list[CotHistoryWeekResponse]
 
+    @classmethod
+    def from_view(cls, view: CotHistoryView) -> CotHistoryResponse:
+        return cls.model_validate(view, from_attributes=True)
+
     @model_validator(mode="after")
     def validate_history(self):
         dates = [week.report_date for week in self.weeks]
@@ -183,6 +230,10 @@ class CotSnapshotRowResponse(_StrictModel):
 class CotSnapshotResponse(_StrictModel):
     publication: CotPublicationMetadataResponse
     rows: list[CotSnapshotRowResponse]
+
+    @classmethod
+    def from_view(cls, view: CotSnapshotView) -> CotSnapshotResponse:
+        return cls.model_validate(view, from_attributes=True)
 
     @model_validator(mode="after")
     def validate_rows(self):

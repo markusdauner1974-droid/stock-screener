@@ -26,9 +26,14 @@ describe('live COT client', () => {
       })
       .mockResolvedValueOnce({ data: cotSnapshotFixture });
 
-    expect((await getCotCatalog()).default_slug).toBe('sp-500');
-    expect((await getCotHistory('gold', '3y')).range).toBe('3y');
-    expect((await getCotSnapshot()).rows).toHaveLength(2);
+    expect(await getCotCatalog()).toEqual(cotCatalogFixture);
+    expect(await getCotHistory('gold', '3y', 7)).toEqual({
+      ...cotHistoryFixture,
+      range: '3y',
+      slug: 'gold',
+      display_name: 'Gold',
+    });
+    expect(await getCotSnapshot(7)).toEqual(cotSnapshotFixture);
     expect(apiClient.get.mock.calls).toEqual([
       ['/v1/cot/instruments'],
       ['/v1/cot/instruments/gold/history', { params: { range: '3y' } }],

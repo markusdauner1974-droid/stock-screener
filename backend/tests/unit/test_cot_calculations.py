@@ -1,7 +1,6 @@
 from datetime import date
 
 import pytest
-
 from app.domain.cot.calculations import (
     align_prices_to_report_dates,
     derive_all_instrument_series,
@@ -102,3 +101,15 @@ def test_price_alignment_preserves_missing_values_instead_of_inventing_zero():
     assert aligned[0].price_date is None
     assert aligned[0].close is None
     assert aligned[0].weekly_change_pct is None
+
+
+def test_price_alignment_does_not_carry_a_stale_close_forward_forever():
+    aligned = align_prices_to_report_dates(
+        (date(2026, 9, 1), date(2026, 9, 8)),
+        {date(2026, 9, 1): 100.0},
+    )
+
+    assert aligned[0].close == 100.0
+    assert aligned[1].price_date is None
+    assert aligned[1].close is None
+    assert aligned[1].weekly_change_pct is None

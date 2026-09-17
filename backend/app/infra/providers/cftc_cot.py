@@ -19,7 +19,7 @@ from app.domain.cot.models import (
 from app.domain.cot.registry import dataset_for_family
 from app.use_cases.cot.ports import CotSourceMetadata, CotSourceSnapshot
 
-_TRANSIENT_STATUSES = frozenset({429, 502, 503, 504})
+_TRANSIENT_STATUSES = frozenset({429, 500, 502, 503, 504})
 _BASE_FIELDS = (
     "id",
     "report_date_as_yyyy_mm_dd",
@@ -203,10 +203,10 @@ class CftcCotSource:
                 response = self._client.get(
                     f"/resource/{dataset_id}.json", params=params
                 )
-            except httpx.TimeoutException as exc:
+            except httpx.RequestError as exc:
                 if attempt == 3:
                     raise CftcCotError(
-                        f"CFTC {operation} request timed out after retries"
+                        f"CFTC {operation} request failed after retries"
                     ) from exc
                 retries += 1
                 self._sleep(min(2.0**attempt, 60.0))

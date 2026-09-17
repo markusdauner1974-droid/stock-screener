@@ -3,10 +3,6 @@ from __future__ import annotations
 from datetime import date
 
 import pytest
-from sqlalchemy import create_engine, event
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import sessionmaker
-
 from app.database import Base
 from app.domain.cot.models import (
     DerivedCotWeek,
@@ -22,6 +18,9 @@ from app.infra.db.models.cot import (
 )
 from app.infra.db.repositories.cot_repository import SqlCotRepository
 from app.use_cases.cot.ports import CotRunRequest
+from sqlalchemy import create_engine, event
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import sessionmaker
 
 
 @pytest.fixture
@@ -168,3 +167,35 @@ def test_no_change_run_does_not_move_publication_pointer(repository, session):
         session.get(CotPublicationPointer, "latest_published").run_id
         == published_run_id
     )
+
+
+def test_existing_week_keys_are_scoped_to_the_incoming_registry(repository):
+    run_id = repository.start_run(run_request())
+    repository.publish(run_id, registry=COT_INSTRUMENTS, weeks=derived_weeks())
+
+    assert repository.existing_week_keys(("sp-500",)) == frozenset()
+    assert repository.existing_week_keys(("gold",)) == frozenset(
+        {("gold", date(2026, 9, 8))}
+    )
+
+
+def test_mark_failed_recovers_a_session_left_in_pending_rollback(repository, session):
+    run_id = repository.start_run(run_request())
+    session.add(
+        CotImportRun(
+            id=run_id,
+            origin="duplicate",
+            status="staged",
+            expected_instrument_count=31,
+            observed_instrument_count=0,
+            registry_version="cot-curated-v1",
+            calculation_version="cot-positions-v1",
+            schema_version="cot-v1",
+        )
+    )
+    with pytest.raises(IntegrityError):
+        session.flush()
+
+    repository.mark_failed(run_id, "failed_publish", {"exception_type": "test"})
+
+    assert session.get(CotImportRun, run_id).status == "failed_publish"

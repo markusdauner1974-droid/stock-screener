@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +77,13 @@ def validate_static_cot_artifact(cot_dir: Path) -> dict[str, Any]:
         raise StaticCotArtifactError("incomplete COT index")
     if index["schema_version"] != STATIC_COT_SCHEMA_VERSION:
         raise StaticCotArtifactError("incompatible static COT schema version")
+    generated_at = index["generated_at"]
+    if not isinstance(generated_at, str):
+        raise StaticCotArtifactError("invalid COT generated timestamp")
+    try:
+        datetime.fromisoformat(generated_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise StaticCotArtifactError("invalid COT generated timestamp") from exc
     try:
         catalog = CotCatalogResponse.model_validate(index["catalog"])
     except ValidationError as exc:

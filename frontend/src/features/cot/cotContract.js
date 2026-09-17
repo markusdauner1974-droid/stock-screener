@@ -55,9 +55,15 @@ export const normalizeCotHistory = (payload, context = {}) => {
   return payload;
 };
 
-export const normalizeCotSnapshot = (payload) => {
+export const normalizeCotSnapshot = (payload, context = {}) => {
   requireObject(payload, 'snapshot');
   requirePublication(payload.publication);
+  if (
+    context.expectedPublicationId !== undefined
+    && payload.publication.publication_id !== context.expectedPublicationId
+  ) {
+    fail('publication identity mismatch');
+  }
   return payload;
 };
 

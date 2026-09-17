@@ -525,11 +525,14 @@ def download_fallback_artifacts(
         "options": (current_options_dir, fallback_options_dir),
         "cot": (current_cot_dir, fallback_cot_dir),
     }
-    global_fallback_dates: dict[str, date | None] = {
-        key: None for key in global_directories
-    }
-    for key, (current_global_dir, _fallback_global_dir) in global_directories.items():
+    global_fallback_dates: dict[str, date | None] = {}
+    for key, (current_global_dir, fallback_global_dir) in global_directories.items():
         spec = GLOBAL_STATIC_ARTIFACTS[key]
+        global_fallback_dates[key] = (
+            global_artifact_as_of_date(spec, fallback_global_dir)
+            if fallback_global_dir is not None
+            else None
+        )
         if (
             current_global_dir is not None
             and find_global_artifact(spec, current_global_dir) is not None

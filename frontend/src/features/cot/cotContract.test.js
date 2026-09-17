@@ -34,6 +34,12 @@ describe('COT contract', () => {
     expect(normalizeCotHistory(payload)).toBe(payload);
   });
 
+  it('rejects a snapshot from a different publication', () => {
+    expect(() => normalizeCotSnapshot(cotSnapshotFixture, {
+      expectedPublicationId: cotSnapshotFixture.publication.publication_id + 1,
+    })).toThrow(/publication identity mismatch/i);
+  });
+
   it('slices static five-year data without changing percentile values', () => {
     const history = makeCotHistory({ weekCount: 260, range: '5y' });
     const sliced = sliceCotHistory(history, '1y');

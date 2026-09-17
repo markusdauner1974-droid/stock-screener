@@ -9,7 +9,7 @@ export const getCotCatalog = async () => normalizeCotCatalog(
   (await apiClient.get('/v1/cot/instruments')).data,
 );
 
-export const getCotHistory = async (slug, range = '1y') => {
+export const getCotHistory = async (slug, range = '1y', expectedPublicationId) => {
   const normalizedSlug = String(slug || '').trim().toLowerCase();
   const response = await apiClient.get(
     `/v1/cot/instruments/${encodeURIComponent(normalizedSlug)}/history`,
@@ -18,9 +18,11 @@ export const getCotHistory = async (slug, range = '1y') => {
   return normalizeCotHistory(response.data, {
     expectedSlug: normalizedSlug,
     expectedRange: range,
+    expectedPublicationId,
   });
 };
 
-export const getCotSnapshot = async () => normalizeCotSnapshot(
+export const getCotSnapshot = async (expectedPublicationId) => normalizeCotSnapshot(
   (await apiClient.get('/v1/cot/snapshot')).data,
+  { expectedPublicationId },
 );
