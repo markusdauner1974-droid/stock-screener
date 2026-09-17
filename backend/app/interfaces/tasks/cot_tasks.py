@@ -10,11 +10,10 @@ from app.domain.cot.models import (
     COT_CALCULATION_VERSION,
     COT_REGISTRY_VERSION,
 )
-from app.infra.providers.cftc_cot import DATASET_BY_FAMILY
+from app.domain.cot.registry import COT_DATASETS
 from app.tasks.data_fetch_lock import serialized_data_fetch_task
 from app.use_cases.cot.refresh import CotRefreshCommand
 from app.wiring.bootstrap import get_refresh_cot_use_case
-
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +46,7 @@ def refresh_cot(
     except Exception:
         logger.exception(
             "COT refresh failed datasets=%s registry=%s calculation=%s",
-            sorted(DATASET_BY_FAMILY.values()),
+            sorted(dataset.dataset_id.value for dataset in COT_DATASETS),
             COT_REGISTRY_VERSION,
             COT_CALCULATION_VERSION,
         )

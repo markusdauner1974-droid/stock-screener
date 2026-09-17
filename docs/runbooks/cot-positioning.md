@@ -15,6 +15,14 @@ CFTC history is canonical. Cached Yahoo prices provide best-effort context only;
 
 The 3Y percentile is calculated from the trailing 156 weekly CFTC observations. Changing the visible chart range between 1Y, 3Y, and 5Y does not recalculate or change percentile values.
 
+## Implementation ownership
+
+- `app.domain.cot.registry` is the canonical owner of the curated instrument order, CFTC dataset definitions, participant mappings, and price metadata. Consumers must not duplicate those maps.
+- A publication is reusable only when its source fingerprints and registry, calculation, and schema versions all match the requested refresh.
+- The live snapshot reads the focal-participant history and available prices in batches. Per-instrument history or price queries do not belong in snapshot assembly.
+- `app.services.static_global_artifacts` owns discovery and last-good selection mechanics shared by the root-global COT and Options artifacts. Their product-specific modules continue to own semantic validation.
+- The static site exporter owns optional-section fallback behavior, including translation of unavailable RRG source data. It calls the RRG payload source directly; no adapter wrapper is required.
+
 ## Initial backfill and manual recovery
 
 Run the initial or forced administrative backfill:

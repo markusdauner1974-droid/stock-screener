@@ -62,6 +62,7 @@ from app.services.static_chart_bundle_exporter import StaticChartBundleConfig
 from app.services.static_groups_rrg_export import (
     StaticGroupsRRGPayloadBuilder,
     StaticGroupsRRGUnavailableError,
+    StaticGroupsRRGUnavailableReason,
 )
 from app.services.static_options_section import StaticOptionsSection
 from app.services.static_site_export_service import (
@@ -520,7 +521,9 @@ def test_static_export_uses_persisted_breadth_after_price_cache_changes(
     }
     monkeypatch.setattr(service, "_build_groups_payload", lambda **_kwargs: unavailable)
     monkeypatch.setattr(
-        service, "_build_groups_rrg_payload", lambda **_kwargs: unavailable
+        service,
+        "_rrg_payload_source",
+        SimpleNamespace(build=lambda **_kwargs: unavailable),
     )
     monkeypatch.setattr(
         service,
@@ -625,8 +628,8 @@ def _export_zero_row_feature_run(
     )
     monkeypatch.setattr(
         service,
-        "_build_groups_rrg_payload",
-        lambda **_kwargs: unavailable_section,
+        "_rrg_payload_source",
+        SimpleNamespace(build=lambda **_kwargs: unavailable_section),
     )
     monkeypatch.setattr(
         service,
@@ -971,7 +974,11 @@ def test_export_writes_serializable_manifest_and_page_bundles(
         return _static_rrg_payload("US", "2026-03-31")
 
     monkeypatch.setattr(service, "_build_groups_payload", fake_groups)
-    monkeypatch.setattr(service, "_build_groups_rrg_payload", fake_rrg)
+    monkeypatch.setattr(
+        service,
+        "_rrg_payload_source",
+        SimpleNamespace(build=fake_rrg),
+    )
     monkeypatch.setattr(service, "_build_home_payload", lambda **_kwargs: home_payload)
 
     output_dir = tmp_path / "static-data"
@@ -1108,7 +1115,13 @@ def test_export_writes_india_market_bundle_and_root_manifest(
     monkeypatch.setattr(service, "_export_chart_bundle", lambda **_kwargs: chart_manifest)
     monkeypatch.setattr(service, "_build_breadth_payload", lambda **_kwargs: breadth_payload)
     monkeypatch.setattr(service, "_build_groups_payload", lambda **_kwargs: groups_payload)
-    monkeypatch.setattr(service, "_build_groups_rrg_payload", lambda **_kwargs: _static_rrg_payload("HK", "2026-03-31"))
+    monkeypatch.setattr(
+        service,
+        "_rrg_payload_source",
+        SimpleNamespace(
+            build=lambda **_kwargs: _static_rrg_payload("HK", "2026-03-31")
+        ),
+    )
     monkeypatch.setattr(service, "_build_home_payload", lambda **_kwargs: home_payload)
 
     output_dir = tmp_path / "static-data"
@@ -1201,7 +1214,13 @@ def test_export_can_write_single_market_artifact_without_root_manifest(
     monkeypatch.setattr(service, "_export_chart_bundle", lambda **_kwargs: chart_manifest)
     monkeypatch.setattr(service, "_build_breadth_payload", lambda **_kwargs: breadth_payload)
     monkeypatch.setattr(service, "_build_groups_payload", lambda **_kwargs: groups_payload)
-    monkeypatch.setattr(service, "_build_groups_rrg_payload", lambda **_kwargs: _static_rrg_payload("HK", "2026-03-31"))
+    monkeypatch.setattr(
+        service,
+        "_rrg_payload_source",
+        SimpleNamespace(
+            build=lambda **_kwargs: _static_rrg_payload("HK", "2026-03-31")
+        ),
+    )
     monkeypatch.setattr(service, "_build_home_payload", lambda **_kwargs: home_payload)
 
     output_dir = tmp_path / "market-artifact"
@@ -2414,6 +2433,34 @@ def test_build_manifest_adds_global_assets_only_at_root():
     assert "cot" not in manifest["markets"]["US"]["assets"]
 
 
+def test_optional_section_translates_rrg_unavailability(
+    service_and_session_factory,
+):
+    service, _session_factory = service_and_session_factory
+    warnings: list[str] = []
+
+    def unavailable_rrg():
+        raise StaticGroupsRRGUnavailableError(
+            section="US rrg",
+            reason_code=StaticGroupsRRGUnavailableReason.INSUFFICIENT_HISTORY,
+            reason="RRG history is too short.",
+        )
+
+    payload = service._build_optional_section_payload(  # noqa: SLF001
+        section="US rrg",
+        warnings=warnings,
+        generated_at="2026-04-02T22:00:00Z",
+        expected_as_of_date=date(2026, 4, 2),
+        build=unavailable_rrg,
+    )
+
+    assert payload["available"] is False
+    assert payload["message"] == "RRG history is too short."
+    assert warnings == [
+        "Static US rrg data unavailable for 2026-04-02: RRG history is too short."
+    ]
+
+
 def test_export_marks_optional_sections_unavailable_without_aborting(
     service_and_session_factory,
     monkeypatch,
@@ -3455,7 +3502,7 @@ def test_static_groups_rrg_builder_propagates_sql_errors_after_preflight(
         )
 
 
-def test_build_groups_rrg_payload_propagates_non_missing_table_sql_errors(
+def test_rrg_payload_source_propagates_non_missing_table_sql_errors(
     service_and_session_factory,
 ):
     _service, session_factory = service_and_session_factory
@@ -3470,7 +3517,7 @@ def test_build_groups_rrg_payload_propagates_non_missing_table_sql_errors(
     )
 
     with session_factory() as db, pytest.raises(SQLAlchemyError, match="connection failed"):
-        service._build_groups_rrg_payload(  # noqa: SLF001
+        service._rrg_payload_source.build(  # noqa: SLF001
             db=db,
             generated_at="2026-04-18T22:00:00Z",
             expected_as_of_date=date(2026, 4, 18),

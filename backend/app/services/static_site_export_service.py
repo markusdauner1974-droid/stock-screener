@@ -56,8 +56,8 @@ from app.services.static_group_section_builder import StaticGroupSectionBuilder
 from app.services.static_groups_rrg_export import (
     StaticGroupsRRGDatabasePayloadSource,
     StaticGroupsRRGPayloadSource,
+    StaticGroupsRRGUnavailableError,
 )
-from app.services.static_groups_rrg_section import build_static_groups_rrg_section
 from app.services.static_market_artifact_contract import (
     STATIC_MARKET_METADATA_FILENAME,
     STATIC_SITE_SCHEMA_VERSION,
@@ -476,7 +476,7 @@ class StaticSiteExportService:
             warnings=warnings,
             generated_at=generated_at,
             expected_as_of_date=latest_run.as_of_date,
-            build=lambda: self._build_groups_rrg_payload(
+            build=lambda: self._rrg_payload_source.build(
                 db=db,
                 generated_at=generated_at,
                 expected_as_of_date=latest_run.as_of_date,
@@ -715,24 +715,6 @@ class StaticSiteExportService:
             global_assets=global_assets,
         )
 
-    def _build_groups_rrg_payload(
-        self,
-        *,
-        db: Session,
-        generated_at: str,
-        expected_as_of_date: date,
-        market: str,
-        formula_version: str,
-    ) -> dict[str, Any]:
-        return build_static_groups_rrg_section(
-            self._rrg_payload_source,
-            db=db,
-            generated_at=generated_at,
-            expected_as_of_date=expected_as_of_date,
-            market=market,
-            formula_version=formula_version,
-        )
-
     def _build_optional_section_payload(
         self,
         *,
@@ -744,7 +726,10 @@ class StaticSiteExportService:
     ) -> dict[str, Any]:
         try:
             return build()
-        except StaticSiteSectionUnavailableError as exc:
+        except (
+            StaticGroupsRRGUnavailableError,
+            StaticSiteSectionUnavailableError,
+        ) as exc:
             warnings.append(
                 f"Static {section} data unavailable for {expected_as_of_date.isoformat()}: {exc.reason}"
             )
