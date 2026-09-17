@@ -32,6 +32,23 @@ LATEST_PUBLICATION_KEY = "latest_published"
 _COT_PUBLICATION_LOCK_ID = 0x434F5450
 
 
+def _source_retrieved_at(
+    source_metadata: Mapping[str, Any] | None,
+) -> datetime | None:
+    if source_metadata is None:
+        return None
+    value = source_metadata.get("retrieved_at")
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
 @dataclass(frozen=True)
 class CotPublication:
     pointer: CotPublicationPointer
@@ -116,8 +133,11 @@ class SqlCotRepository:
                 raise ValueError(f"COT run {run_id} is not staged")
             report_date = max(week.report_date for week in derived_weeks)
             pointer = self._lock_publication_pointer()
-            if pointer is not None and (
-                pointer.run_id > run_id or pointer.report_date > report_date
+            if pointer is not None and self._publication_is_newer(
+                pointer,
+                candidate_run_id=run_id,
+                candidate_report_date=report_date,
+                candidate_source_metadata=source_metadata,
             ):
                 now = datetime.now(timezone.utc)
                 run.status = "superseded"
@@ -167,6 +187,30 @@ class SqlCotRepository:
             self._session.rollback()
             raise
 
+    def _publication_is_newer(
+        self,
+        pointer: CotPublicationPointer,
+        *,
+        candidate_run_id: int,
+        candidate_report_date: date,
+        candidate_source_metadata: Mapping[str, Any] | None,
+    ) -> bool:
+        if pointer.report_date != candidate_report_date:
+            return pointer.report_date > candidate_report_date
+
+        published_run = self._session.scalar(
+            select(CotImportRun)
+            .where(CotImportRun.id == pointer.run_id)
+            .execution_options(populate_existing=True)
+        )
+        candidate_retrieved_at = _source_retrieved_at(candidate_source_metadata)
+        published_retrieved_at = _source_retrieved_at(
+            published_run.source_metadata_json if published_run is not None else None
+        )
+        if candidate_retrieved_at is not None and published_retrieved_at is not None:
+            return candidate_retrieved_at < published_retrieved_at
+        return pointer.run_id > candidate_run_id
+
     def _lock_publication_pointer(self) -> CotPublicationPointer | None:
         bind = self._session.get_bind()
         if bind.dialect.name == "postgresql":
@@ -179,7 +223,6 @@ class SqlCotRepository:
             .with_for_update()
             .execution_options(populate_existing=True)
         )
-
     def mark_no_change(
         self,
         run_id: int,

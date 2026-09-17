@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
 from sqlalchemy import create_engine, event, update
@@ -89,6 +89,15 @@ def derived_weeks(
             ),
         ),
     )
+
+
+def source_metadata(retrieved_at: datetime) -> dict[str, object]:
+    return {
+        "retrieved_at": retrieved_at.isoformat(),
+        "retry_count": 0,
+        "dataset_row_counts": {},
+        "expected_dataset_row_counts": {},
+    }
 
 
 def test_publish_upserts_history_and_advances_pointer_in_one_commit(
@@ -199,6 +208,35 @@ def test_newer_run_cannot_roll_publication_back_to_an_older_report_date(
     assert session.get(CotPublicationPointer, "latest_published").run_id == current_run_id
     assert session.query(CotWeeklyPosition).one().net == 55
     assert session.get(CotImportRun, backfill_run_id).status == "superseded"
+
+
+def test_older_same_date_snapshot_cannot_overwrite_a_newer_snapshot(
+    repository, session
+):
+    corrected_run_id = repository.start_run(run_request())
+    stale_run_id = repository.start_run(run_request())
+    repository.publish(
+        corrected_run_id,
+        registry=COT_INSTRUMENTS,
+        weeks=derived_weeks(net=55),
+        source_metadata=source_metadata(
+            datetime(2026, 9, 16, 10, 5, tzinfo=timezone.utc)
+        ),
+    )
+
+    published = repository.publish(
+        stale_run_id,
+        registry=COT_INSTRUMENTS,
+        weeks=derived_weeks(net=40),
+        source_metadata=source_metadata(
+            datetime(2026, 9, 16, 10, 0, tzinfo=timezone.utc)
+        ),
+    )
+
+    assert published is False
+    assert session.get(CotPublicationPointer, "latest_published").run_id == corrected_run_id
+    assert session.query(CotWeeklyPosition).one().net == 55
+    assert session.get(CotImportRun, stale_run_id).status == "superseded"
 
 
 def test_history_repopulates_cached_positions_after_an_external_publish(

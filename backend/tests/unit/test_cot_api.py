@@ -56,14 +56,21 @@ def test_cot_catalog_requires_browser_revalidation(monkeypatch):
     assert response.headers["Cache-Control"] == "private, no-cache"
 
 
-def test_cot_history_keeps_short_private_browser_cache(monkeypatch):
+@pytest.mark.parametrize("handler", ["history", "snapshot"])
+def test_cot_dependent_responses_require_browser_revalidation(
+    monkeypatch,
+    handler,
+):
     from app.api.v1 import cot as module
 
     monkeypatch.setattr(module, "get_cot_queries", lambda _db: service())
     response = Response()
 
-    module.get_cot_history(
-        "sp-500", response=response, range_name="1y", db=object()
-    )
+    if handler == "history":
+        module.get_cot_history(
+            "sp-500", response=response, range_name="1y", db=object()
+        )
+    else:
+        module.get_cot_snapshot(response=response, db=object())
 
-    assert response.headers["Cache-Control"] == "private, max-age=60"
+    assert response.headers["Cache-Control"] == "private, no-cache"
