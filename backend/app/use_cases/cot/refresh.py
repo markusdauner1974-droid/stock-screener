@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 
@@ -62,12 +61,10 @@ class RefreshCotUseCase:
         source: CotSource,
         repository: CotWriteRepository,
         price_hydrator: CotPriceHydratorPort,
-        cache_invalidator: Callable[[], None] | None = None,
     ) -> None:
         self._source = source
         self._repository = repository
         self._price_hydrator = price_hydrator
-        self._cache_invalidator = cache_invalidator or (lambda: None)
 
     def execute(self, command: CotRefreshCommand) -> CotRefreshResult:
         run_request = command.to_run_request()
@@ -125,7 +122,6 @@ class RefreshCotUseCase:
                 },
                 source_metadata=source_snapshot.metadata.as_dict(),
             )
-            self._cache_invalidator()
             return CotRefreshResult(
                 status="published",
                 run_id=run_id,

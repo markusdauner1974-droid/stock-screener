@@ -64,7 +64,7 @@ class StaticCotArtifactSelector:
             populate,
             validate=validate_static_cot_artifact,
         )
-        return validate_static_cot_artifact(Path(output_cot_dir))
+        return selected[1]
 
 
 __all__ = ["StaticCotArtifactSelector", "StaticCotUnavailable"]

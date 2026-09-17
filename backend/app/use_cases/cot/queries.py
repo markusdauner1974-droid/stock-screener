@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -15,6 +14,18 @@ from app.domain.cot.registry import (
     PARTICIPANT_LABELS,
     dataset_for_family,
     instrument_by_slug,
+)
+from app.schemas.cot import (
+    CotCatalogInstrumentResponse,
+    CotCatalogResponse,
+    CotHistoryResponse,
+    CotHistoryWeekResponse,
+    CotParticipantMetadataResponse,
+    CotPositionResponse,
+    CotPublicationMetadataResponse,
+    CotSnapshotResponse,
+    CotSnapshotRowResponse,
+    CotSourceResponse,
 )
 from app.use_cases.cot.ports import (
     CotHistoryPositionRecord,
@@ -35,122 +46,6 @@ class CotInstrumentUnavailable(LookupError):
     pass
 
 
-@dataclass(frozen=True)
-class CotPublicationView:
-    schema_version: str
-    calculation_version: str
-    registry_version: str
-    publication_id: int
-    report_date: date
-    retrieved_at: datetime
-    stale: bool
-
-
-@dataclass(frozen=True)
-class CotSourceView:
-    dataset_id: str
-    label: str
-    url: str
-
-
-@dataclass(frozen=True)
-class CotCatalogInstrumentView:
-    slug: str
-    display_name: str
-    category: str
-    category_order: int
-    instrument_order: int
-    report_family: str
-    focal_participant: str
-    participants: tuple[str, ...]
-    price_symbol: str | None
-    price_mapping_kind: str
-    tradingview_url: str | None
-
-
-@dataclass(frozen=True)
-class CotCatalogView:
-    publication: CotPublicationView
-    default_slug: str
-    categories: tuple[str, ...]
-    sources: tuple[CotSourceView, ...]
-    instruments: tuple[CotCatalogInstrumentView, ...]
-
-
-@dataclass(frozen=True)
-class CotPositionView:
-    participant: str
-    label: str
-    long: int
-    short: int
-    spreading: int
-    net: int
-    delta_long: int | None
-    delta_short: int | None
-    delta_net: int | None
-    net_pct_open_interest: float | None
-    percentile_3y: float | None
-    percentile_status: str
-
-
-@dataclass(frozen=True)
-class CotHistoryWeekView:
-    report_date: date
-    open_interest: int
-    price_date: date | None
-    price_close: float | None
-    price_change_pct: float | None
-    positions: tuple[CotPositionView, ...]
-
-
-@dataclass(frozen=True)
-class CotHistoryView:
-    publication: CotPublicationView
-    range: str
-    slug: str
-    display_name: str
-    category: str
-    report_family: str
-    source_dataset_id: str
-    focal_participant: str
-    price_symbol: str | None
-    price_mapping_kind: str
-    price_coverage_state: str
-    price_history_start: date | None
-    tradingview_url: str | None
-    weeks: tuple[CotHistoryWeekView, ...]
-
-
-@dataclass(frozen=True)
-class CotSnapshotRowView:
-    slug: str
-    display_name: str
-    category: str
-    instrument_order: int
-    focal_participant: str
-    focal_label: str
-    report_date: date
-    long: int
-    short: int
-    net: int
-    delta_long: int | None
-    delta_short: int | None
-    delta_net: int | None
-    net_pct_open_interest: float | None
-    percentile_3y: float | None
-    percentile_status: str
-    net_trend: tuple[int, ...]
-    price_change_pct: float | None
-    price_mapping_kind: str
-    price_coverage_state: str
-
-
-@dataclass(frozen=True)
-class CotSnapshotView:
-    publication: CotPublicationView
-    rows: tuple[CotSnapshotRowView, ...]
-
-
 class CotQueryService:
     def __init__(
         self,
@@ -163,7 +58,7 @@ class CotQueryService:
         self._price_reader = price_reader
         self._now = now or (lambda: datetime.now(timezone.utc))
 
-    def publication(self) -> CotPublicationView:
+    def publication(self) -> CotPublicationMetadataResponse:
         publication = self._repository.get_publication()
         if publication is None:
             raise CotPublicationUnavailable("no published COT run")
@@ -177,7 +72,7 @@ class CotQueryService:
         age_days = (
             self._now().astimezone(_NEW_YORK).date() - publication.pointer.report_date
         ).days
-        return CotPublicationView(
+        return CotPublicationMetadataResponse(
             schema_version=publication.run.schema_version,
             calculation_version=publication.run.calculation_version,
             registry_version=publication.run.registry_version,
@@ -190,23 +85,23 @@ class CotQueryService:
     def catalog(
         self,
         *,
-        publication: CotPublicationView | None = None,
-    ) -> CotCatalogView:
+        publication: CotPublicationMetadataResponse | None = None,
+    ) -> CotCatalogResponse:
         publication = publication or self.publication()
-        return CotCatalogView(
+        return CotCatalogResponse(
             publication=publication,
             default_slug="sp-500",
-            categories=tuple(category.value for category in CATEGORY_ORDER),
-            sources=tuple(
-                CotSourceView(
+            categories=[category.value for category in CATEGORY_ORDER],
+            sources=[
+                CotSourceResponse(
                     dataset_id=dataset.dataset_id.value,
                     label=dataset.label,
                     url=dataset.url,
                 )
                 for dataset in COT_DATASETS
-            ),
-            instruments=tuple(
-                CotCatalogInstrumentView(
+            ],
+            instruments=[
+                CotCatalogInstrumentResponse(
                     slug=item.slug,
                     display_name=item.display_name,
                     category=item.category.value,
@@ -214,15 +109,19 @@ class CotQueryService:
                     instrument_order=item.instrument_order,
                     report_family=item.report_family.value,
                     focal_participant=item.focal_participant.value,
-                    participants=tuple(
-                        participant.value for participant in item.participants
-                    ),
+                    participants=[
+                        CotParticipantMetadataResponse(
+                            value=participant.value,
+                            label=PARTICIPANT_LABELS[participant],
+                        )
+                        for participant in item.participants
+                    ],
                     price_symbol=item.price.yahoo_symbol,
                     price_mapping_kind=item.price.kind.value,
                     tradingview_url=item.price.tradingview_url,
                 )
                 for item in COT_INSTRUMENTS
-            ),
+            ],
         )
 
     def history(
@@ -230,8 +129,8 @@ class CotQueryService:
         slug: str,
         range_name: str,
         *,
-        publication: CotPublicationView | None = None,
-    ) -> CotHistoryView:
+        publication: CotPublicationMetadataResponse | None = None,
+    ) -> CotHistoryResponse:
         if range_name not in RANGE_WEEKS:
             raise ValueError(f"unknown COT range: {range_name}")
         try:
@@ -263,15 +162,15 @@ class CotQueryService:
             if aligned_count == len(report_dates)
             else PriceCoverageState.PARTIAL
         )
-        weeks = tuple(
-            CotHistoryWeekView(
+        weeks = [
+            CotHistoryWeekResponse(
                 report_date=report_date,
                 open_interest=int(grouped[report_date][0].open_interest),
                 price_date=aligned_by_date[report_date].price_date,
                 price_close=aligned_by_date[report_date].close,
                 price_change_pct=aligned_by_date[report_date].weekly_change_pct,
-                positions=tuple(
-                    CotPositionView(
+                positions=[
+                    CotPositionResponse(
                         participant=row.participant,
                         label=PARTICIPANT_LABELS[
                             next(
@@ -301,11 +200,11 @@ class CotQueryService:
                             )
                         ),
                     )
-                ),
+                ],
             )
             for report_date in report_dates
-        )
-        return CotHistoryView(
+        ]
+        return CotHistoryResponse(
             publication=publication,
             range=range_name,
             slug=definition.slug,
@@ -327,8 +226,8 @@ class CotQueryService:
     def snapshot(
         self,
         *,
-        publication: CotPublicationView | None = None,
-    ) -> CotSnapshotView:
+        publication: CotPublicationMetadataResponse | None = None,
+    ) -> CotSnapshotResponse:
         publication = publication or self.publication()
         history_by_slug: dict[str, list[CotSnapshotPositionRecord]] = defaultdict(list)
         for record in self._repository.get_snapshot_history(weeks=RANGE_WEEKS["1y"]):
@@ -357,7 +256,7 @@ class CotQueryService:
                 )
         closes_by_symbol = self._price_reader.closes_many(price_requests)
 
-        rows: list[CotSnapshotRowView] = []
+        rows: list[CotSnapshotRowResponse] = []
         for definition in COT_INSTRUMENTS:
             history = history_by_slug[definition.slug]
             report_dates = tuple(item.report_date for item in history)
@@ -379,7 +278,7 @@ class CotQueryService:
             current = history[-1]
             current_price = aligned_by_date[current.report_date]
             rows.append(
-                CotSnapshotRowView(
+                CotSnapshotRowResponse(
                     slug=definition.slug,
                     display_name=definition.display_name,
                     category=definition.category.value,
@@ -396,10 +295,10 @@ class CotQueryService:
                     net_pct_open_interest=current.net_pct_open_interest,
                     percentile_3y=current.percentile_3y,
                     percentile_status=current.percentile_status,
-                    net_trend=tuple(item.net for item in history[-12:]),
+                    net_trend=[item.net for item in history[-12:]],
                     price_change_pct=current_price.weekly_change_pct,
                     price_mapping_kind=definition.price.kind.value,
                     price_coverage_state=coverage.value,
                 )
             )
-        return CotSnapshotView(publication=publication, rows=tuple(rows))
+        return CotSnapshotResponse(publication=publication, rows=rows)

@@ -23,9 +23,7 @@ ArtifactValidator = Callable[[Path], dict[str, Any]]
 
 @dataclass(frozen=True)
 class StaticGlobalArtifactSpec:
-    key: str
     artifact_name: str
-    directory_name: str
     manifest_filename: str
     as_of_field: str
     label: str
@@ -36,9 +34,7 @@ class StaticGlobalArtifactSpec:
 GLOBAL_STATIC_ARTIFACTS: Mapping[str, StaticGlobalArtifactSpec] = MappingProxyType(
     {
         "options": StaticGlobalArtifactSpec(
-            key="options",
             artifact_name="static-options-US",
-            directory_name="options",
             manifest_filename="manifest.json",
             as_of_field="source_as_of_date",
             label="static options",
@@ -46,9 +42,7 @@ GLOBAL_STATIC_ARTIFACTS: Mapping[str, StaticGlobalArtifactSpec] = MappingProxyTy
             validation_error=StaticOptionsArtifactError,
         ),
         "cot": StaticGlobalArtifactSpec(
-            key="cot",
             artifact_name="static-cot-global",
-            directory_name="cot",
             manifest_filename="index.json",
             as_of_field="report_date",
             label="static COT",

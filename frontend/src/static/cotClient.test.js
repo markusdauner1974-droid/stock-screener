@@ -4,8 +4,6 @@ import { fetchStaticJson } from './dataClient';
 import {
   getStaticCotHistory,
   getStaticCotIndex,
-  staticCotHistoryQueryOptions,
-  staticCotIndexQueryOptions,
 } from './cotClient';
 import {
   makeCotHistory,
@@ -34,13 +32,10 @@ describe('static COT client', () => {
     ]);
   });
 
-  it('disables unadvertised reads and keys immutable data by publication', () => {
-    expect(staticCotIndexQueryOptions({ assets: {} }).enabled).toBe(false);
-    const options = staticCotHistoryQueryOptions(staticCotIndexFixture, 'sp-500', '3y');
-    expect(options.queryKey).toContain(7);
-    expect(options.staleTime).toBe(Infinity);
-    expect(() => staticCotHistoryQueryOptions(staticCotIndexFixture, 'not-listed', '1y'))
-      .toThrow(/advertised/i);
+  it('rejects unadvertised and unlisted reads', async () => {
+    await expect(getStaticCotIndex({ assets: {} })).rejects.toThrow(/advertised/i);
+    await expect(getStaticCotHistory(staticCotIndexFixture, 'not-listed', '1y'))
+      .rejects.toThrow(/advertised/i);
   });
 
   it('contains no live API route', async () => {

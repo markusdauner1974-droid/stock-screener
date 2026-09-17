@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from app.schemas.cot import CotCatalogResponse, CotHistoryResponse
 from app.services.atomic_directory_publisher import AtomicDirectoryPublisher
 from app.services.static_artifact_io import write_static_json
 from app.services.static_cot_contract import (
@@ -23,14 +22,12 @@ class StaticCotExporter:
         destination = Path(cot_dir)
         if destination.name != "cot":
             raise ValueError("Static COT destination must be named 'cot'")
-        catalog = CotCatalogResponse.from_view(self._queries.catalog())
+        catalog = self._queries.catalog()
 
         def populate(stage: Path) -> dict[str, Any]:
             histories: dict[str, dict[str, str]] = {}
             for instrument in catalog.instruments:
-                history = CotHistoryResponse.from_view(
-                    self._queries.history(instrument.slug, "5y")
-                )
+                history = self._queries.history(instrument.slug, "5y")
                 write_static_json(
                     stage / f"{instrument.slug}.json",
                     history.model_dump(mode="json"),

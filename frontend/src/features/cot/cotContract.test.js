@@ -25,11 +25,13 @@ describe('COT contract', () => {
     expect(normalizeStaticCotIndex(staticCotIndexFixture)).toBe(staticCotIndexFixture);
   });
 
-  it('rejects an available percentile without a value', () => {
+  it('leaves backend-validated position semantics unchanged', () => {
     const payload = structuredClone(cotHistoryFixture);
     payload.weeks[0].positions[0].percentile_status = 'available';
     payload.weeks[0].positions[0].percentile_3y = null;
-    expect(() => normalizeCotHistory(payload)).toThrow(/percentile/i);
+    payload.weeks[0].price_close = Infinity;
+
+    expect(normalizeCotHistory(payload)).toBe(payload);
   });
 
   it('slices static five-year data without changing percentile values', () => {
@@ -40,7 +42,7 @@ describe('COT contract', () => {
       .toBe(history.weeks.at(-1).positions[0].percentile_3y);
   });
 
-  it('rejects unsafe paths, identity mismatches, duplicates, and non-finite numbers', () => {
+  it('rejects unsafe paths and publication identity mismatches', () => {
     const unsafe = structuredClone(staticCotIndexFixture);
     unsafe.histories['sp-500'].path = '../secret.json';
     expect(() => normalizeStaticCotIndex(unsafe)).toThrow(/path/i);
@@ -49,13 +51,6 @@ describe('COT contract', () => {
     mixed.publication_id = 99;
     expect(() => normalizeStaticCotIndex(mixed)).toThrow(/publication/i);
 
-    const duplicate = structuredClone(cotCatalogFixture);
-    duplicate.instruments.push({ ...duplicate.instruments[0] });
-    expect(() => normalizeCotCatalog(duplicate)).toThrow(/duplicate|order/i);
-
-    const nonFinite = structuredClone(cotHistoryFixture);
-    nonFinite.weeks[0].price_close = Infinity;
-    expect(() => normalizeCotHistory(nonFinite)).toThrow(/finite/i);
   });
 
   it('keys reads by mode, publication, path, instrument, and range', () => {

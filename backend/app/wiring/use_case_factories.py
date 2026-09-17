@@ -223,7 +223,6 @@ def get_refresh_cot_use_case(session: Session):
     from app.infra.db.repositories.cot_repository import SqlCotRepository
     from app.infra.providers.cftc_cot import CftcCotSource
     from app.services.cot_price_hydrator import CotPriceHydrator
-    from app.services.cot_response_cache import invalidate_cot_response_cache
     from app.use_cases.cot.refresh import RefreshCotUseCase
 
     runtime = resolve_runtime_services()
@@ -231,7 +230,6 @@ def get_refresh_cot_use_case(session: Session):
         source=CftcCotSource(),
         repository=SqlCotRepository(session),
         price_hydrator=CotPriceHydrator(runtime.cache_bundle().price),
-        cache_invalidator=invalidate_cot_response_cache,
     )
 
 

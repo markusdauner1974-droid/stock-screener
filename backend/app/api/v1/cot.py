@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.schemas.cot import CotCatalogResponse, CotHistoryResponse, CotSnapshotResponse
-from app.services.cot_response_cache import cot_cache_key, get_cot_response_cache
 from app.use_cases.cot.queries import (
     CotInstrumentUnavailable,
     CotPublicationUnavailable,
@@ -35,17 +34,7 @@ def get_cot_catalog(
     _set_cache_control(response)
     queries = get_cot_queries(db)
     try:
-        publication = queries.publication()
-        key = cot_cache_key("catalog", publication.publication_id)
-        cache = get_cot_response_cache()
-        cached = cache.get(key)
-        if cached is not None:
-            return CotCatalogResponse.model_validate_json(cached)
-        response = CotCatalogResponse.from_view(
-            queries.catalog(publication=publication)
-        )
-        cache.set(key, response.model_dump_json())
-        return response
+        return queries.catalog()
     except CotPublicationUnavailable as exc:
         raise _unavailable("cot_publication_unavailable") from exc
 
@@ -60,22 +49,7 @@ def get_cot_history(
     _set_cache_control(response)
     queries = get_cot_queries(db)
     try:
-        publication = queries.publication()
-        key = cot_cache_key(
-            "history",
-            publication.publication_id,
-            slug=slug,
-            range_name=range_name,
-        )
-        cache = get_cot_response_cache()
-        cached = cache.get(key)
-        if cached is not None:
-            return CotHistoryResponse.model_validate_json(cached)
-        response = CotHistoryResponse.from_view(
-            queries.history(slug, range_name, publication=publication)
-        )
-        cache.set(key, response.model_dump_json())
-        return response
+        return queries.history(slug, range_name)
     except CotInstrumentUnavailable as exc:
         raise _unavailable("cot_instrument_unavailable") from exc
     except CotPublicationUnavailable as exc:
@@ -90,16 +64,6 @@ def get_cot_snapshot(
     _set_cache_control(response)
     queries = get_cot_queries(db)
     try:
-        publication = queries.publication()
-        key = cot_cache_key("snapshot", publication.publication_id)
-        cache = get_cot_response_cache()
-        cached = cache.get(key)
-        if cached is not None:
-            return CotSnapshotResponse.model_validate_json(cached)
-        response = CotSnapshotResponse.from_view(
-            queries.snapshot(publication=publication)
-        )
-        cache.set(key, response.model_dump_json())
-        return response
+        return queries.snapshot()
     except CotPublicationUnavailable as exc:
         raise _unavailable("cot_publication_unavailable") from exc

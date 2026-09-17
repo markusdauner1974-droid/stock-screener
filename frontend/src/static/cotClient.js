@@ -30,47 +30,30 @@ export const getStaticCotHistory = async (rawIndex, slug, range = '1y') => {
   return sliceCotHistory(history, range);
 };
 
-export const staticCotIndexQueryOptions = (rootManifest) => {
+export const useStaticCotIndex = (rootManifest) => {
   const path = rootManifest?.assets?.cot?.path || null;
-  return {
+  return useQuery({
     queryKey: cotCatalogQueryKey('static', null, path),
     queryFn: () => getStaticCotIndex(rootManifest),
     enabled: Boolean(path),
     staleTime: Infinity,
     gcTime: Infinity,
-  };
+  });
 };
 
-export const staticCotHistoryQueryOptions = (rawIndex, slug, range = '1y') => {
-  const index = normalizeStaticCotIndex(rawIndex);
-  const entry = index.histories[slug];
-  if (!entry) throw new Error(`COT instrument ${slug} is not advertised`);
-  return {
+export const useStaticCotHistory = (index, slug, range = '1y') => {
+  const entry = index?.histories?.[slug];
+  return useQuery({
     queryKey: cotHistoryQueryKey({
       mode: 'static',
-      publicationId: index.publication_id,
+      publicationId: index?.publication_id ?? null,
       slug,
       range,
-      path: entry.path,
+      path: entry?.path ?? null,
     }),
     queryFn: () => getStaticCotHistory(index, slug, range),
+    enabled: Boolean(entry),
     staleTime: Infinity,
     gcTime: Infinity,
-  };
+  });
 };
-
-export const useStaticCotIndex = (rootManifest) => useQuery(
-  staticCotIndexQueryOptions(rootManifest),
-);
-
-export const useStaticCotHistory = (index, slug, range = '1y') => useQuery({
-  ...(index && slug
-    ? staticCotHistoryQueryOptions(index, slug, range)
-    : {
-      queryKey: cotHistoryQueryKey({ mode: 'static', publicationId: null, slug, range }),
-      queryFn: () => Promise.reject(new Error('COT index is unavailable')),
-      staleTime: Infinity,
-      gcTime: Infinity,
-    }),
-  enabled: Boolean(index && slug),
-});
