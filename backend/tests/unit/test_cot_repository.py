@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 
 import pytest
+from sqlalchemy import create_engine, event
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import sessionmaker
+
 from app.database import Base
 from app.domain.cot.models import (
     DerivedCotWeek,
@@ -18,9 +23,6 @@ from app.infra.db.models.cot import (
 )
 from app.infra.db.repositories.cot_repository import SqlCotRepository
 from app.use_cases.cot.ports import CotRunRequest
-from sqlalchemy import create_engine, event
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import sessionmaker
 
 
 @pytest.fixture
@@ -149,6 +151,32 @@ def test_later_publication_updates_canonical_row_and_pointer(repository, session
     assert (
         session.get(CotPublicationPointer, "latest_published").run_id == second_run_id
     )
+
+
+def test_registry_slug_rename_reuses_the_existing_cftc_instrument(repository, session):
+    gold = next(item for item in COT_INSTRUMENTS if item.slug == "gold")
+    first_run_id = repository.start_run(run_request())
+    repository.publish(
+        first_run_id,
+        registry=(gold,),
+        weeks=derived_weeks(),
+    )
+    original_id = session.query(CotInstrument).one().id
+    renamed_gold = replace(gold, slug="gold-futures")
+    renamed_week = replace(derived_weeks(net=55)[0], instrument_slug="gold-futures")
+    second_run_id = repository.start_run(run_request())
+
+    repository.publish(
+        second_run_id,
+        registry=(renamed_gold,),
+        weeks=(renamed_week,),
+    )
+
+    instrument = session.query(CotInstrument).one()
+    assert instrument.id == original_id
+    assert instrument.slug == "gold-futures"
+    assert instrument.cftc_code == gold.cftc_code
+    assert session.query(CotWeeklyPosition).one().net == 55
 
 
 def test_no_change_run_does_not_move_publication_pointer(repository, session):

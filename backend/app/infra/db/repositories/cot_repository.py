@@ -175,10 +175,18 @@ class SqlCotRepository:
         self._session.commit()
 
     def get_publication(self) -> CotPublication | None:
-        pointer = self._session.get(CotPublicationPointer, LATEST_PUBLICATION_KEY)
+        pointer = self._session.scalar(
+            select(CotPublicationPointer)
+            .where(CotPublicationPointer.key == LATEST_PUBLICATION_KEY)
+            .execution_options(populate_existing=True)
+        )
         if pointer is None:
             return None
-        run = self._session.get(CotImportRun, pointer.run_id)
+        run = self._session.scalar(
+            select(CotImportRun)
+            .where(CotImportRun.id == pointer.run_id)
+            .execution_options(populate_existing=True)
+        )
         if run is None:
             return None
         return CotPublication(pointer=pointer, run=run)
@@ -304,20 +312,30 @@ class SqlCotRepository:
         self,
         registry: tuple[CotInstrumentDefinition, ...],
     ) -> dict[str, CotInstrument]:
-        current = {
+        current_by_slug = {
             instrument.slug: instrument
             for instrument in self._session.scalars(select(CotInstrument))
         }
+        current_by_code = {
+            instrument.cftc_code: instrument
+            for instrument in current_by_slug.values()
+        }
         requested_slugs = {definition.slug for definition in registry}
-        for instrument in current.values():
+        for instrument in current_by_slug.values():
             if instrument.slug not in requested_slugs:
                 instrument.active = False
         for definition in registry:
-            instrument = current.get(definition.slug)
+            instrument = current_by_slug.get(definition.slug)
             if instrument is None:
-                instrument = CotInstrument(slug=definition.slug)
-                self._session.add(instrument)
-                current[definition.slug] = instrument
+                instrument = current_by_code.get(definition.cftc_code)
+                if instrument is None:
+                    instrument = CotInstrument(slug=definition.slug)
+                    self._session.add(instrument)
+                    current_by_code[definition.cftc_code] = instrument
+                else:
+                    current_by_slug.pop(instrument.slug, None)
+                    instrument.slug = definition.slug
+                current_by_slug[definition.slug] = instrument
             instrument.cftc_code = definition.cftc_code
             instrument.display_name = definition.display_name
             instrument.category = definition.category.value
@@ -328,7 +346,7 @@ class SqlCotRepository:
             instrument.active = True
             instrument.registry_version = COT_REGISTRY_VERSION
         self._session.flush()
-        return {slug: current[slug] for slug in requested_slugs}
+        return {slug: current_by_slug[slug] for slug in requested_slugs}
 
     def _upsert_positions(
         self,

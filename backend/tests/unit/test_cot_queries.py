@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+
 from app.domain.cot.registry import COT_INSTRUMENTS
 from app.use_cases.cot.queries import CotPublicationUnavailable, CotQueryService
 
@@ -91,6 +92,31 @@ class FakeRepository:
         )
 
 
+class RacingRepository(FakeRepository):
+    def _advance_publication(self):
+        run = SimpleNamespace(
+            id=8,
+            registry_version="cot-curated-v1",
+            calculation_version="cot-positions-v1",
+            schema_version="cot-v1",
+            source_metadata_json={"retrieved_at": "2026-09-18T20:45:00+00:00"},
+        )
+        pointer = SimpleNamespace(run_id=8, report_date=date(2026, 9, 15))
+        self.publication = SimpleNamespace(run=run, pointer=pointer)
+
+    def get_history(self, slug, *, limit=None):
+        rows = super().get_history(slug, limit=limit)
+        if len(self.history_calls) == 1:
+            self._advance_publication()
+        return rows
+
+    def get_snapshot_history(self, *, weeks):
+        rows = super().get_snapshot_history(weeks=weeks)
+        if len(self.snapshot_history_calls) == 1:
+            self._advance_publication()
+        return rows
+
+
 class FakePriceReader:
     def __init__(self):
         self.external_calls = []
@@ -162,6 +188,16 @@ def test_history_reads_pre_range_close_for_first_report_alignment():
     assert history.weeks[0].price_change_pct == 100.0 / 99.0
 
 
+def test_history_retries_when_the_publication_changes_during_the_row_read():
+    repository = RacingRepository()
+    query_service = CotQueryService(repository, FakePriceReader())
+
+    history = query_service.history("sp-500", "1y")
+
+    assert history.publication.publication_id == 8
+    assert repository.history_calls == [("sp-500", 53), ("sp-500", 53)]
+
+
 def test_snapshot_preserves_registry_order_and_focal_participants():
     rows = service().snapshot().rows
 
@@ -188,6 +224,16 @@ def test_snapshot_uses_one_repository_batch_and_one_price_batch():
     assert repository.history_calls == []
     assert repository.snapshot_history_calls == [52]
     assert len(price_reader.batch_calls) == 1
+
+
+def test_snapshot_retries_when_the_publication_changes_during_the_row_read():
+    repository = RacingRepository()
+    query_service = CotQueryService(repository, FakePriceReader())
+
+    snapshot = query_service.snapshot()
+
+    assert snapshot.publication.publication_id == 8
+    assert repository.snapshot_history_calls == [52, 52]
 
 
 def test_catalog_exposes_all_official_sources_and_curated_entries():

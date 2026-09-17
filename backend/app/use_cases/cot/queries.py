@@ -136,9 +136,17 @@ class CotQueryService:
             definition = instrument_by_slug(slug)
         except KeyError as exc:
             raise CotInstrumentUnavailable(slug) from exc
+        fixed_publication = publication is not None
         publication = publication or self.publication()
         requested_weeks = RANGE_WEEKS[range_name]
-        rows = self._repository.get_history(slug, limit=requested_weeks + 1)
+        for attempt in range(2):
+            rows = self._repository.get_history(slug, limit=requested_weeks + 1)
+            current_publication = self.publication()
+            if current_publication.publication_id == publication.publication_id:
+                break
+            if fixed_publication or attempt == 1:
+                raise CotPublicationUnavailable("COT publication changed during read")
+            publication = current_publication
         if not rows:
             raise CotInstrumentUnavailable(slug)
         grouped: dict[date, list[CotHistoryPositionRecord]] = defaultdict(list)
@@ -231,9 +239,18 @@ class CotQueryService:
         *,
         publication: CotPublicationView | None = None,
     ) -> CotSnapshotView:
+        fixed_publication = publication is not None
         publication = publication or self.publication()
+        for attempt in range(2):
+            records = self._repository.get_snapshot_history(weeks=RANGE_WEEKS["1y"])
+            current_publication = self.publication()
+            if current_publication.publication_id == publication.publication_id:
+                break
+            if fixed_publication or attempt == 1:
+                raise CotPublicationUnavailable("COT publication changed during read")
+            publication = current_publication
         history_by_slug: dict[str, list[CotSnapshotPositionRecord]] = defaultdict(list)
-        for record in self._repository.get_snapshot_history(weeks=RANGE_WEEKS["1y"]):
+        for record in records:
             history_by_slug[record.instrument_slug].append(record)
 
         price_requests: dict[str, tuple[date, date]] = {}
