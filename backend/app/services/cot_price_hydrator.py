@@ -7,7 +7,6 @@ from typing import Any
 
 from app.domain.cot.models import CotInstrumentDefinition, PriceCoverageState
 
-
 _COMPLETE_COVERAGE_DAYS = 5 * 365 - 7
 
 
@@ -115,6 +114,17 @@ class CotPriceHydrator:
                     continue
                 history_start = frame.index.min().date()
                 history_end = frame.index.max().date()
+                if (history_end - history_start).days < _COMPLETE_COVERAGE_DAYS:
+                    refreshed_frame = self._price_cache.get_historical_data(
+                        symbol,
+                        period="5y",
+                        market="US",
+                        force_refresh=True,
+                    )
+                    if refreshed_frame is not None and not refreshed_frame.empty:
+                        frame = refreshed_frame
+                        history_start = frame.index.min().date()
+                        history_end = frame.index.max().date()
                 coverage = (
                     PriceCoverageState.COMPLETE
                     if (history_end - history_start).days >= _COMPLETE_COVERAGE_DAYS

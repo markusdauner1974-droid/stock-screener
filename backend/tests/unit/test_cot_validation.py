@@ -190,6 +190,29 @@ def test_validation_rejects_truncated_initial_history():
     assert "insufficient_initial_history" in result.reason_codes
 
 
+def test_validation_requires_initial_history_for_each_new_registry_instrument():
+    latest = date(2026, 9, 8)
+    gold_weeks = tuple(
+        make_valid_week(latest - timedelta(weeks=index), slug="gold")
+        for index in range(156)
+    )
+    silver_week = make_valid_week(latest, slug="silver")
+    weeks = gold_weeks + (silver_week,)
+    existing_gold_keys = tuple(
+        (week.instrument_slug, week.report_date) for week in gold_weeks
+    )
+
+    result = validate_cot_snapshot(
+        weeks,
+        (instrument_by_slug("gold"), instrument_by_slug("silver")),
+        existing_gold_keys,
+        expected_counts(*weeks),
+    )
+
+    assert result.valid is False
+    assert "insufficient_initial_history" in result.reason_codes
+
+
 def test_validation_rejects_wrong_official_dataset_identity():
     week = replace(
         make_valid_week(date(2026, 9, 8)),

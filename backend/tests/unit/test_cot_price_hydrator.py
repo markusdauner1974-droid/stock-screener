@@ -12,8 +12,10 @@ class FakePriceCache:
         self.failures = set(failures)
         self.calls = []
 
-    def get_historical_data(self, symbol, *, period, market):
-        self.calls.append((symbol, period, market))
+    def get_historical_data(
+        self, symbol, *, period, market, force_refresh=False
+    ):
+        self.calls.append((symbol, period, market, force_refresh))
         if symbol in self.failures:
             raise RuntimeError("provider unavailable")
         return self.responses.get(symbol)
@@ -33,9 +35,12 @@ def test_hydrator_requests_five_years_and_never_requests_canola():
 
     result = CotPriceHydrator(cache).hydrate(COT_INSTRUMENTS)
 
-    assert all(period == "5y" and market == "US" for _, period, market in cache.calls)
+    assert all(
+        period == "5y" and market == "US" and not force_refresh
+        for _, period, market, force_refresh in cache.calls
+    )
     assert len(cache.calls) == 30
-    assert all(symbol is not None for symbol, _, _ in cache.calls)
+    assert all(symbol is not None for symbol, _, _, _ in cache.calls)
     assert result.attempted_count == 30
     assert result.unavailable_count == 1
 
@@ -56,3 +61,33 @@ def test_hydrator_accepts_short_lumber_history_as_partial():
 
     assert result.partial_count == 1
     assert result.unavailable_count == 0
+    assert cache.calls == [
+        ("LBR=F", "5y", "US", False),
+        ("LBR=F", "5y", "US", True),
+    ]
+
+
+def test_hydrator_force_refills_a_fresh_but_short_cache():
+    partial = frame("2025-09-01", 300)
+    complete = frame("2021-09-01", 1827)
+
+    class ExpandingPriceCache:
+        def __init__(self):
+            self.calls = []
+
+        def get_historical_data(
+            self, symbol, *, period, market, force_refresh=False
+        ):
+            self.calls.append((symbol, period, market, force_refresh))
+            return complete if force_refresh else partial
+
+    cache = ExpandingPriceCache()
+
+    result = CotPriceHydrator(cache).hydrate((instrument_by_slug("gold"),))
+
+    assert result.available_count == 1
+    assert result.partial_count == 0
+    assert cache.calls == [
+        ("GC=F", "5y", "US", False),
+        ("GC=F", "5y", "US", True),
+    ]

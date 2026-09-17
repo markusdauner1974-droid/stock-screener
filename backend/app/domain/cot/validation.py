@@ -150,8 +150,11 @@ def validate_cot_snapshot(
     ):
         reject("source_row_count_mismatch")
 
-    if not persisted_keys and any(
-        len(weeks_by_slug.get(definition.slug, ())) < MINIMUM_INITIAL_HISTORY_WEEKS
+    persisted_slugs = {slug for slug, _report_date in persisted_keys}
+    if any(
+        definition.slug not in persisted_slugs
+        and len(weeks_by_slug.get(definition.slug, ()))
+        < MINIMUM_INITIAL_HISTORY_WEEKS
         for definition in definitions
     ):
         reject("insufficient_initial_history")
