@@ -247,10 +247,18 @@ def test_catalog_exposes_all_official_sources_and_curated_entries():
     }
 
 
-def test_queries_reject_a_publication_from_an_incompatible_registry():
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("registry_version", "cot-curated-old", "registry"),
+        ("schema_version", "cot-old", "schema"),
+        ("calculation_version", "cot-positions-old", "calculation"),
+    ),
+)
+def test_queries_reject_an_incompatible_publication(field, value, message):
     repository = FakeRepository()
-    repository.publication.run.registry_version = "cot-curated-old"
+    setattr(repository.publication.run, field, value)
     query_service = CotQueryService(repository, FakePriceReader())
 
-    with pytest.raises(CotPublicationUnavailable, match="registry"):
+    with pytest.raises(CotPublicationUnavailable, match=message):
         query_service.catalog()

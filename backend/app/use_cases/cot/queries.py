@@ -6,7 +6,12 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app.domain.cot.calculations import align_prices_to_report_dates
-from app.domain.cot.models import COT_REGISTRY_VERSION, PriceCoverageState
+from app.domain.cot.models import (
+    COT_CALCULATION_VERSION,
+    COT_REGISTRY_VERSION,
+    COT_SCHEMA_VERSION,
+    PriceCoverageState,
+)
 from app.domain.cot.registry import (
     CATEGORY_ORDER,
     COT_DATASETS,
@@ -64,6 +69,14 @@ class CotQueryService:
         if publication.run.registry_version != COT_REGISTRY_VERSION:
             raise CotPublicationUnavailable(
                 "published COT registry is incompatible with the deployed registry"
+            )
+        if publication.run.schema_version != COT_SCHEMA_VERSION:
+            raise CotPublicationUnavailable(
+                "published COT schema is incompatible with the deployed schema"
+            )
+        if publication.run.calculation_version != COT_CALCULATION_VERSION:
+            raise CotPublicationUnavailable(
+                "published COT calculation is incompatible with the deployed calculation"
             )
         metadata = dict(publication.run.source_metadata_json or {})
         retrieved = metadata.get("retrieved_at")
