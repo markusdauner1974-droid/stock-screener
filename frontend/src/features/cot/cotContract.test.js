@@ -65,6 +65,10 @@ describe('COT contract', () => {
     mixed.publication_id = 99;
     expect(() => normalizeStaticCotIndex(mixed)).toThrow(/publication/i);
 
+    const obsolete = structuredClone(staticCotIndexFixture);
+    obsolete.registry_version = 'cot-curated-old';
+    expect(() => normalizeStaticCotIndex(obsolete)).toThrow(/registry/i);
+
   });
 
   it('keys reads by mode, publication, path, instrument, and range', () => {

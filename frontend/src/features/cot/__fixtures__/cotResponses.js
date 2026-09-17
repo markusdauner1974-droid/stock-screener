@@ -125,6 +125,7 @@ export const cotSnapshotFixture = {
 
 export const staticCotIndexFixture = {
   schema_version: 'static-cot-v1',
+  registry_version: 'cot-curated-v1',
   data_schema_version: 'cot-v1',
   calculation_version: 'cot-positions-v1',
   publication_id: 7,

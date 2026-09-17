@@ -39,6 +39,7 @@ class StaticCotExporter:
             publication = catalog.publication
             index = {
                 "schema_version": STATIC_COT_SCHEMA_VERSION,
+                "registry_version": publication.registry_version,
                 "data_schema_version": publication.schema_version,
                 "calculation_version": publication.calculation_version,
                 "publication_id": publication.publication_id,

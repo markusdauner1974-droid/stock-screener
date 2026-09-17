@@ -8,7 +8,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from app.domain.cot.models import STATIC_COT_SCHEMA_VERSION
+from app.domain.cot.models import COT_REGISTRY_VERSION, STATIC_COT_SCHEMA_VERSION
 from app.schemas.cot import CotCatalogResponse, CotHistoryResponse
 from app.services.static_artifact_io import load_finite_json, safe_artifact_path
 
@@ -44,6 +44,7 @@ def _same_publication(
 ) -> None:
     publication = payload.publication
     expected = {
+        "registry_version": index["registry_version"],
         "schema_version": index["data_schema_version"],
         "calculation_version": index["calculation_version"],
         "publication_id": index["publication_id"],
@@ -64,6 +65,7 @@ def validate_static_cot_artifact(cot_dir: Path) -> dict[str, Any]:
     index = _load_json(cot_dir / "index.json")
     required = {
         "schema_version",
+        "registry_version",
         "data_schema_version",
         "calculation_version",
         "publication_id",
@@ -77,6 +79,8 @@ def validate_static_cot_artifact(cot_dir: Path) -> dict[str, Any]:
         raise StaticCotArtifactError("incomplete COT index")
     if index["schema_version"] != STATIC_COT_SCHEMA_VERSION:
         raise StaticCotArtifactError("incompatible static COT schema version")
+    if index["registry_version"] != COT_REGISTRY_VERSION:
+        raise StaticCotArtifactError("incompatible COT registry version")
     generated_at = index["generated_at"]
     if not isinstance(generated_at, str):
         raise StaticCotArtifactError("invalid COT generated timestamp")
@@ -88,6 +92,8 @@ def validate_static_cot_artifact(cot_dir: Path) -> dict[str, Any]:
         catalog = CotCatalogResponse.model_validate(index["catalog"])
     except ValidationError as exc:
         raise StaticCotArtifactError("invalid COT catalog contract") from exc
+    if index["registry_version"] != catalog.publication.registry_version:
+        raise StaticCotArtifactError("COT registry version mismatch")
     if index["data_schema_version"] != catalog.publication.schema_version:
         raise StaticCotArtifactError("COT data schema version mismatch")
     if index["calculation_version"] != catalog.publication.calculation_version:

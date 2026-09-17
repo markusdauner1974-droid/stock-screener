@@ -4,6 +4,7 @@ const fail = (message) => {
 
 export const COT_RANGES = Object.freeze({ '1y': 52, '3y': 156, '5y': 260 });
 export const COT_DEFAULT_SLUG = 'sp-500';
+export const COT_REGISTRY_VERSION = 'cot-curated-v1';
 export const COT_SCHEMA_VERSION = 'cot-v1';
 export const COT_CALCULATION_VERSION = 'cot-positions-v1';
 export const STATIC_COT_SCHEMA_VERSION = 'static-cot-v1';
@@ -81,6 +82,7 @@ export const requireSafeCotPath = (path, location = 'path') => {
 export const normalizeStaticCotIndex = (payload) => {
   requireObject(payload, 'static index');
   if (payload.schema_version !== STATIC_COT_SCHEMA_VERSION) fail('static schema version mismatch');
+  if (payload.registry_version !== COT_REGISTRY_VERSION) fail('registry version mismatch');
   if (payload.data_schema_version !== COT_SCHEMA_VERSION) fail('data schema version mismatch');
   if (payload.calculation_version !== COT_CALCULATION_VERSION) {
     fail('calculation version mismatch');
@@ -90,6 +92,7 @@ export const normalizeStaticCotIndex = (payload) => {
   if (
     payload.publication_id !== catalog.publication.publication_id
     || payload.report_date !== catalog.publication.report_date
+    || payload.registry_version !== catalog.publication.registry_version
     || payload.data_schema_version !== catalog.publication.schema_version
     || payload.calculation_version !== catalog.publication.calculation_version
   ) fail('publication identity mismatch');
