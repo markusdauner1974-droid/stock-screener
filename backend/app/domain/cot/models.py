@@ -3,14 +3,23 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from enum import Enum
 from types import MappingProxyType
+from zoneinfo import ZoneInfo
 
 COT_SCHEMA_VERSION = "cot-v1"
 COT_CALCULATION_VERSION = "cot-positions-v1"
 COT_REGISTRY_VERSION = "cot-curated-v1"
 STATIC_COT_SCHEMA_VERSION = "static-cot-v1"
+COT_STALE_AFTER_DAYS = 10
+_COT_REPORT_TIMEZONE = ZoneInfo("America/New_York")
+
+
+def is_cot_publication_stale(report_date: date, *, at: datetime) -> bool:
+    return (
+        at.astimezone(_COT_REPORT_TIMEZONE).date() - report_date
+    ).days > COT_STALE_AFTER_DAYS
 
 
 class ReportFamily(str, Enum):

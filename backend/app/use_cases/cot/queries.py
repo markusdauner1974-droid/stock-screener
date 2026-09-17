@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable, Mapping
 from datetime import date, datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 
 from app.domain.cot.calculations import align_prices_to_report_dates
 from app.domain.cot.models import (
@@ -11,6 +10,7 @@ from app.domain.cot.models import (
     COT_REGISTRY_VERSION,
     COT_SCHEMA_VERSION,
     PriceCoverageState,
+    is_cot_publication_stale,
 )
 from app.domain.cot.registry import (
     CATEGORY_ORDER,
@@ -39,7 +39,6 @@ from app.use_cases.cot.read_models import (
 )
 
 RANGE_WEEKS = {"1y": 52, "3y": 156, "5y": 260}
-_NEW_YORK = ZoneInfo("America/New_York")
 
 
 class CotPublicationUnavailable(LookupError):
@@ -85,9 +84,6 @@ class CotQueryService:
             if isinstance(retrieved, str)
             else publication.run.published_at or datetime.now(timezone.utc)
         )
-        age_days = (
-            self._now().astimezone(_NEW_YORK).date() - publication.pointer.report_date
-        ).days
         return CotPublicationView(
             schema_version=publication.run.schema_version,
             calculation_version=publication.run.calculation_version,
@@ -95,7 +91,10 @@ class CotQueryService:
             publication_id=publication.run.id,
             report_date=publication.pointer.report_date,
             retrieved_at=retrieved_at,
-            stale=age_days > 10,
+            stale=is_cot_publication_stale(
+                publication.pointer.report_date,
+                at=self._now(),
+            ),
         )
 
     def catalog(

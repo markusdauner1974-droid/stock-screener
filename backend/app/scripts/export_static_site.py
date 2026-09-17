@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
@@ -48,6 +48,7 @@ from app.services.static_breadth_history_coordinator import (
     StaticBreadthHistoryCoordinator,
     StaticBreadthHistoryRequest,
 )
+from app.services.static_cot_section import StaticCotSection
 from app.services.static_daily_price_refresh_service import (
     StaticDailyPriceRefreshService,
 )
@@ -302,6 +303,26 @@ def _run_static_cot_refresh() -> dict[str, Any]:
             "reason_codes": ["cot_refresh_failed"],
             "error": str(exc),
         }
+
+
+def _export_global_cot_artifact(output_dir: Path) -> bool:
+    """Materialize COT independently when a market bundle cannot publish."""
+
+    generated_at = (
+        datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    )
+    global_assets: dict[str, Any] = {}
+    with SessionLocal() as db:
+        result = StaticCotSection().compose_live(
+            db=db,
+            output_dir=Path(output_dir),
+            generated_at=generated_at,
+            fallback_cot_dir=None,
+            global_assets=global_assets,
+        )
+    for warning in result.warnings:
+        print(f"  - warning: {warning}")
+    return result.selected
 
 
 def _write_market_diagnostics(output_dir: Path, market: str, snapshot: Mapping[str, Any]) -> Path:
@@ -1447,6 +1468,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.market,
             )
             if _snapshot_skipped_not_trading_day(selected_market_non_publishable_snapshot):
+                if args.market == STATIC_DEFAULT_MARKET and "cot" in refresh_results:
+                    _export_global_cot_artifact(Path(args.output_dir))
                 print(
                     f"Static site export skipped for market {args.market} because it is not a trading day."
                 )
@@ -1473,6 +1496,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         ),
                     )
                 )
+                if args.market == STATIC_DEFAULT_MARKET and "cot" in refresh_results:
+                    _export_global_cot_artifact(Path(args.output_dir))
                 return STATIC_EXPORT_NO_CURRENT_ARTIFACT_EXIT_CODE
 
         rrg_history_session = (
@@ -1513,6 +1538,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "no current artifact was produced, diagnostics were uploaded, "
                     "and the combine job can use fallback artifacts."
                 )
+                if args.market == STATIC_DEFAULT_MARKET and "cot" in refresh_results:
+                    _export_global_cot_artifact(Path(args.output_dir))
                 return STATIC_EXPORT_NO_CURRENT_ARTIFACT_EXIT_CODE
             raise
 

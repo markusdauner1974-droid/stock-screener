@@ -318,6 +318,32 @@ def test_static_site_keeps_fresh_cot_when_rrg_history_restore_failed() -> None:
     assert "has_cot_artifact=false" not in rrg_failure
 
 
+def test_static_site_keeps_fresh_cot_when_market_export_exits_early() -> None:
+    build_market_job = _build_market_job()
+    export_step = build_market_job.split(
+        "      - name: Export market static data bundle\n", 1
+    )[1].split(
+        "\n      - name: Upload market status",
+        1,
+    )[0]
+    cot_detection = (
+        'if [ "${{ matrix.market }}" = "US" ] '
+        '&& [ -f /tmp/static-data/cot/index.json ]; then'
+    )
+
+    assert export_step.index(cot_detection) < export_step.index(
+        'if [ "$status" -eq 78 ]; then'
+    )
+    skip_branch = export_step.split('if [ "$status" -eq 78 ]; then', 1)[1].split(
+        "exit 0", 1
+    )[0]
+    no_current_branch = export_step.split('if [ "$status" -eq 79 ]; then', 1)[
+        1
+    ].split("exit 0", 1)[0]
+    assert 'has_cot_artifact=$has_cot_artifact' in skip_branch
+    assert 'has_cot_artifact=$has_cot_artifact' in no_current_branch
+
+
 def test_static_site_daily_price_build_requires_current_session_coverage() -> None:
     build_market_job = _build_market_job()
     build_price_step = build_market_job.split(

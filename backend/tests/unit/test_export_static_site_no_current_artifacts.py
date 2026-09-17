@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -61,6 +62,53 @@ def test_main_returns_skip_code_for_market_not_trading_day(monkeypatch, tmp_path
     assert "Static site export skipped for market TW because it is not a trading day." in captured.out
     assert export_calls == []
     assert not (output_dir / "diagnostics" / "tw" / "snapshot-failure.json").exists()
+
+
+def test_us_market_skip_materializes_refreshed_cot_before_return(
+    monkeypatch, tmp_path
+):
+    output_dir = tmp_path / "out"
+    cot_exports: list[Path] = []
+
+    monkeypatch.setattr(export_script, "prepare_runtime", lambda: None)
+    monkeypatch.setattr(
+        export_script,
+        "_run_daily_refresh",
+        lambda **_kwargs: (
+            {
+                "feature_snapshots": {
+                    "US": {
+                        "status": "skipped",
+                        "reason": "not_trading_day",
+                        "market": "US",
+                        "as_of_date": "2026-09-16",
+                    }
+                },
+                "cot": {"status": "published", "run_id": 42},
+            },
+            [],
+        ),
+    )
+    monkeypatch.setattr(
+        export_script,
+        "_export_global_cot_artifact",
+        lambda path: cot_exports.append(path) or True,
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "export_static_site.py",
+            "--output-dir",
+            str(output_dir),
+            "--refresh-daily",
+            "--market",
+            "US",
+        ],
+    )
+
+    assert export_script.main() == export_script.STATIC_EXPORT_SKIPPED_EXIT_CODE
+    assert cot_exports == [output_dir]
 
 
 def test_main_returns_no_current_artifact_code_for_selected_market_exposure_error(
@@ -279,6 +327,7 @@ def test_main_returns_no_current_artifact_code_for_group_rank_backfill_failure(
     capsys,
 ):
     export_calls: list[object] = []
+    cot_exports: list[Path] = []
     output_dir = tmp_path / "out"
 
     monkeypatch.setattr(export_script, "prepare_runtime", lambda: None)
@@ -308,7 +357,8 @@ def test_main_returns_no_current_artifact_code_for_group_rank_backfill_failure(
                             }
                         },
                     }
-                }
+                },
+                "cot": {"status": "published", "run_id": 42},
             },
             [
                 "Static export market US group-rank history backfill not ready "
@@ -325,6 +375,11 @@ def test_main_returns_no_current_artifact_code_for_group_rank_backfill_failure(
             raise AssertionError("market export should use fallback after backfill failure")
 
     monkeypatch.setattr(export_script, "StaticSiteExportService", ExportShouldNotRun)
+    monkeypatch.setattr(
+        export_script,
+        "_export_global_cot_artifact",
+        lambda path: cot_exports.append(path) or True,
+    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -355,6 +410,7 @@ def test_main_returns_no_current_artifact_code_for_group_rank_backfill_failure(
     assert "group-rank history backfill was not ready" in captured.out
     assert "fallback" in captured.out
     assert export_calls == []
+    assert cot_exports == [output_dir]
 
 
 def test_main_returns_no_current_artifact_code_for_market_rs_price_coverage_gap(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from datetime import UTC, datetime
 
 import pytest
 
@@ -103,6 +104,32 @@ def test_selector_uses_newer_valid_report_date_and_rejects_no_candidate(tmp_path
             fallback_cot_dir=tmp_path / "missing-fallback",
             output_cot_dir=tmp_path / "unused" / "cot",
         )
+
+
+def test_selector_recomputes_staleness_when_promoting_an_old_fallback(tmp_path):
+    fallback = tmp_path / "fallback" / "cot"
+    output = tmp_path / "published" / "cot"
+    StaticCotExporter(service()).export(
+        fallback,
+        generated_at="2026-09-09T09:00:00Z",
+    )
+    _rewrite_report_date(fallback, "2026-09-08")
+
+    selected = StaticCotArtifactSelector(
+        now=lambda: datetime(2026, 9, 30, tzinfo=UTC),
+    ).select(
+        current_cot_dir=None,
+        fallback_cot_dir=fallback,
+        output_cot_dir=output,
+    )
+
+    assert selected["catalog"]["publication"]["stale"] is True
+    assert json.loads((output / "index.json").read_text())["catalog"][
+        "publication"
+    ]["stale"] is True
+    assert json.loads((output / "sp-500.json").read_text())["publication"][
+        "stale"
+    ] is True
 
 
 def _rewrite_report_date(cot_dir, report_date):
