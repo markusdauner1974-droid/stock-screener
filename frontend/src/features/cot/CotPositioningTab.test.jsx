@@ -61,4 +61,30 @@ describe('CotPositioningTab', () => {
 
     expect(await screen.findByText(/Unable to load the COT market table/i)).toBeInTheDocument();
   });
+
+  it('refreshes the catalog when a dependent response has a newer publication', async () => {
+    const refreshedCatalog = {
+      ...cotCatalogFixture,
+      publication: { ...cotCatalogFixture.publication, publication_id: 8 },
+    };
+    getCotCatalog
+      .mockResolvedValueOnce(cotCatalogFixture)
+      .mockResolvedValueOnce(refreshedCatalog);
+    getCotHistory
+      .mockRejectedValueOnce(new Error('Invalid COT contract: publication identity mismatch'))
+      .mockImplementation(async (slug, range, expectedPublicationId) => ({
+        ...cotHistoryFixture,
+        publication: {
+          ...cotHistoryFixture.publication,
+          publication_id: expectedPublicationId,
+        },
+        slug,
+        range,
+      }));
+
+    renderTab();
+
+    await waitFor(() => expect(getCotCatalog).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(getCotHistory).toHaveBeenCalledWith('sp-500', '1y', 8));
+  });
 });

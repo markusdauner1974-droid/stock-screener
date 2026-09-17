@@ -62,7 +62,23 @@ def test_operations_snapshot_reports_redacted_health_and_staleness():
         calculation_version="cot-positions-v1",
         schema_version="cot-v1",
     )
-    db.add_all((published, failed))
+    no_change = CotImportRun(
+        origin="scheduled",
+        status="no_change",
+        expected_instrument_count=31,
+        observed_instrument_count=31,
+        diagnostics_json={
+            "prices": {
+                "available_count": 30,
+                "partial_count": 1,
+                "unavailable_count": 0,
+            },
+        },
+        registry_version="cot-curated-v1",
+        calculation_version="cot-positions-v1",
+        schema_version="cot-v1",
+    )
+    db.add_all((published, failed, no_change))
     db.flush()
     db.add(
         CotPublicationPointer(
@@ -84,7 +100,7 @@ def test_operations_snapshot_reports_redacted_health_and_staleness():
     assert result["source_retrieved_at"] == "2026-09-04T21:00:00+00:00"
     assert result["expected_instrument_count"] == 31
     assert result["observed_instrument_count"] == 31
-    assert result["price_counts"] == {"exact_or_proxy": 24, "partial": 6, "unavailable": 1}
+    assert result["price_counts"] == {"exact_or_proxy": 30, "partial": 1, "unavailable": 0}
     assert result["duration_seconds"] == 12.0
     assert result["retry_count"] == 2
     assert result["publication_age_days"] == 11

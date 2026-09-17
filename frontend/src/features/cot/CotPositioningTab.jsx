@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Alert, Box } from '@mui/material';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 
 import { getCotCatalog, getCotHistory, getCotSnapshot } from '../../api/cot';
 import {
@@ -12,6 +12,7 @@ import CotPositioningView from './CotPositioningView';
 import CotSnapshotTable from './CotSnapshotTable';
 
 const CotPositioningTab = () => {
+  const queryClient = useQueryClient();
   const [selectedSlug, setSelectedSlug] = useState('sp-500');
   const [range, setRange] = useState('1y');
   const catalogQuery = useQuery({
@@ -34,6 +35,18 @@ const CotPositioningTab = () => {
     enabled: publicationId !== null,
     staleTime: 60_000,
   });
+  const publicationMismatch = [historyQuery.error, snapshotQuery.error].some(
+    (error) => error instanceof Error && /publication identity mismatch/i.test(error.message),
+  );
+
+  useEffect(() => {
+    if (publicationMismatch) {
+      queryClient.invalidateQueries({
+        queryKey: cotCatalogQueryKey('live'),
+        exact: true,
+      });
+    }
+  }, [publicationMismatch, queryClient]);
 
   return (
     <Box sx={{ height: '100%', overflow: 'auto', pr: 0.5 }}>

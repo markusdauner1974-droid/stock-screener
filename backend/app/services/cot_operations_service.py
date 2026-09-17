@@ -18,6 +18,19 @@ class CotOperationsService:
         current = now or datetime.now(timezone.utc)
         pointer = db.get(CotPublicationPointer, "latest_published")
         published = db.get(CotImportRun, pointer.run_id) if pointer is not None else None
+        latest_hydration = (
+            db.scalar(
+                select(CotImportRun)
+                .where(
+                    CotImportRun.id >= published.id,
+                    CotImportRun.status.in_(("published", "no_change")),
+                )
+                .order_by(CotImportRun.id.desc())
+                .limit(1)
+            )
+            if published is not None
+            else None
+        )
         failed = db.scalar(
             select(CotImportRun)
             .where(CotImportRun.status.like("failed%"))
@@ -27,7 +40,14 @@ class CotOperationsService:
 
         source_metadata = dict(published.source_metadata_json or {}) if published else {}
         diagnostics = dict(published.diagnostics_json or {}) if published else {}
-        prices = dict(diagnostics.get("prices") or {})
+        hydration_diagnostics = (
+            dict(latest_hydration.diagnostics_json or {})
+            if latest_hydration is not None
+            else {}
+        )
+        prices = dict(
+            hydration_diagnostics.get("prices") or diagnostics.get("prices") or {}
+        )
         failed_diagnostics = dict(failed.diagnostics_json or {}) if failed else {}
         report_date = pointer.report_date if pointer is not None else None
         publication_age_days = (
