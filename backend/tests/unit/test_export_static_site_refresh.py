@@ -382,6 +382,15 @@ def test_static_daily_refresh_skips_exposure_when_breadth_history_errors(monkeyp
         "market_breadth_not_ready."
     ) in warnings
 
+    market_only_results, _ = export_static_site._run_daily_refresh(
+        market="US",
+        skip_universe_refresh=True,
+        skip_fundamentals_refresh=True,
+        skip_cot_refresh=True,
+        rs_formula_version=BALANCED_RS_FORMULA_VERSION,
+    )
+    assert "cot" not in market_only_results
+
 
 def test_static_daily_refresh_quarantines_breadth_history_exceptions(monkeypatch):
     monkeypatch.setattr(export_static_site, "STATIC_EXPORT_MARKETS", ("HK",))

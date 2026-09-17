@@ -50,6 +50,14 @@ def _build_market_job() -> str:
     )[0]
 
 
+def _build_cot_job() -> str:
+    content = (ROOT / ".github" / "workflows" / "static-site.yml").read_text()
+    return content.split("  build-cot:\n", 1)[1].split(
+        "\n  build-market:",
+        1,
+    )[0]
+
+
 def _combine_and_build_job() -> str:
     content = (ROOT / ".github" / "workflows" / "static-site.yml").read_text()
     return content.split("  combine-and-build:\n", 1)[1].split(
@@ -71,8 +79,16 @@ def _fallback_download_step() -> str:
 
 def test_static_site_workflow_publishes_and_combines_global_cot_artifact() -> None:
     workflow = (ROOT / ".github" / "workflows" / "static-site.yml").read_text()
+    cot_job = _build_cot_job()
+    market_job = _build_market_job()
 
     assert "static-cot-global" in workflow
+    assert "python -m app.scripts.export_static_cot" in cot_job
+    assert "actions/upload-artifact@v4" in cot_job
+    assert "static-cot-global" in cot_job
+    assert "--skip-cot-refresh" in market_job
+    assert "Upload current global COT artifact" not in market_job
+    assert "needs: [select-markets, build-cot, build-market]" in workflow
     assert "--current-cot-dir /tmp/static-cot-current" in workflow
     assert "--fallback-cot-dir /tmp/static-cot-fallback" in workflow
     assert "--cot-artifacts-dir /tmp/static-cot-current" in workflow
@@ -296,54 +312,6 @@ def test_static_site_rrg_history_publish_skips_rewound_market_exports() -> None:
     )
 
 
-def test_static_site_keeps_fresh_cot_when_rrg_history_restore_failed() -> None:
-    build_market_job = _build_market_job()
-    export_step = build_market_job.split(
-        "      - name: Export market static data bundle\n", 1
-    )[1].split(
-        "\n      - name: Upload market status",
-        1,
-    )[0]
-    rrg_failure = export_step.split(
-        'if [ "$RRG_HISTORY_ENABLED" = "true" ] '
-        '&& [ "$RRG_RESTORE_STATUS" = "failed" ]; then',
-        1,
-    )[1].split("exit 0", 1)[0]
-    cot_detection = (
-        'if [ "${{ matrix.market }}" = "US" ] '
-        '&& [ -f /tmp/static-data/cot/index.json ]; then'
-    )
-
-    assert export_step.index(cot_detection) < export_step.index(rrg_failure)
-    assert "has_cot_artifact=false" not in rrg_failure
-
-
-def test_static_site_keeps_fresh_cot_when_market_export_exits_early() -> None:
-    build_market_job = _build_market_job()
-    export_step = build_market_job.split(
-        "      - name: Export market static data bundle\n", 1
-    )[1].split(
-        "\n      - name: Upload market status",
-        1,
-    )[0]
-    cot_detection = (
-        'if [ "${{ matrix.market }}" = "US" ] '
-        '&& [ -f /tmp/static-data/cot/index.json ]; then'
-    )
-
-    assert export_step.index(cot_detection) < export_step.index(
-        'if [ "$status" -eq 78 ]; then'
-    )
-    skip_branch = export_step.split('if [ "$status" -eq 78 ]; then', 1)[1].split(
-        "exit 0", 1
-    )[0]
-    no_current_branch = export_step.split('if [ "$status" -eq 79 ]; then', 1)[
-        1
-    ].split("exit 0", 1)[0]
-    assert 'has_cot_artifact=$has_cot_artifact' in skip_branch
-    assert 'has_cot_artifact=$has_cot_artifact' in no_current_branch
-
-
 def test_static_site_daily_price_build_requires_current_session_coverage() -> None:
     build_market_job = _build_market_job()
     build_price_step = build_market_job.split(
@@ -383,7 +351,7 @@ def test_static_site_combine_downloads_current_and_per_market_fallback_artifacts
     combine_job = _combine_and_build_job()
     fallback_step = _fallback_download_step()
 
-    assert "needs: [select-markets, build-market]" in combine_job
+    assert "needs: [select-markets, build-cot, build-market]" in combine_job
     assert "needs.select-markets.outputs.markets" in combine_job
     assert "Download per-market fallback artifacts" in combine_job
     assert "Download current market artifacts" in combine_job
