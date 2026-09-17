@@ -242,7 +242,10 @@ class CotQueryService:
             price_symbol=definition.price.yahoo_symbol,
             price_mapping_kind=definition.price.kind.value,
             price_coverage_state=coverage.value,
-            price_history_start=min(closes) if closes else None,
+            price_history_start=next(
+                (week.price_date for week in weeks if week.price_date is not None),
+                None,
+            ),
             tradingview_url=definition.price.tradingview_url,
             weeks=weeks,
         )

@@ -186,6 +186,7 @@ def test_history_reads_pre_range_close_for_first_report_alignment():
     assert history.weeks[0].price_date == first_report
     assert history.weeks[0].price_close == 100.0
     assert history.weeks[0].price_change_pct == 100.0 / 99.0
+    assert history.price_history_start == first_report
 
 
 def test_history_retries_when_the_publication_changes_during_the_row_read():

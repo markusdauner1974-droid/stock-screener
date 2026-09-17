@@ -217,6 +217,7 @@ class SqlCotRepository:
                 CotWeeklyPosition.report_date.desc(),
                 CotWeeklyPosition.participant,
             )
+            .execution_options(populate_existing=True)
         )
         if limit is not None:
             instrument = self._session.scalar(

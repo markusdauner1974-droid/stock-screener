@@ -4,7 +4,7 @@ from dataclasses import replace
 from datetime import date
 
 import pytest
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
@@ -151,6 +151,25 @@ def test_later_publication_updates_canonical_row_and_pointer(repository, session
     assert (
         session.get(CotPublicationPointer, "latest_published").run_id == second_run_id
     )
+
+
+def test_history_repopulates_cached_positions_after_an_external_publish(
+    repository, session
+):
+    run_id = repository.start_run(run_request())
+    repository.publish(run_id, registry=COT_INSTRUMENTS, weeks=derived_weeks())
+    cached = repository.get_history("gold")[0]
+    session.commit()
+    with session.get_bind().begin() as connection:
+        connection.execute(
+            update(CotWeeklyPosition).values(long=155, net=55)
+        )
+
+    refreshed = repository.get_history("gold")[0]
+
+    assert refreshed is cached
+    assert refreshed.long == 155
+    assert refreshed.net == 55
 
 
 def test_registry_slug_rename_reuses_the_existing_cftc_instrument(repository, session):
