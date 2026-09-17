@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from app.domain.cot.calculations import MAX_PRICE_AGE
 from app.domain.cot.models import CotInstrumentDefinition, PriceCoverageState
 
 _COMPLETE_COVERAGE_DAYS = 5 * 365 - 7
@@ -76,6 +77,8 @@ class CotPriceHydrator:
     def hydrate(
         self,
         instruments: Sequence[CotInstrumentDefinition],
+        *,
+        report_date: date,
     ) -> CotPriceHydrationResult:
         items: list[CotPriceHydrationItem] = []
         for definition in instruments:
@@ -114,7 +117,10 @@ class CotPriceHydrator:
                     continue
                 history_start = frame.index.min().date()
                 history_end = frame.index.max().date()
-                if (history_end - history_start).days < _COMPLETE_COVERAGE_DAYS:
+                if (
+                    (history_end - history_start).days < _COMPLETE_COVERAGE_DAYS
+                    or history_end < report_date - MAX_PRICE_AGE
+                ):
                     refreshed_frame = self._price_cache.get_historical_data(
                         symbol,
                         period="5y",
@@ -125,9 +131,14 @@ class CotPriceHydrator:
                         frame = refreshed_frame
                         history_start = frame.index.min().date()
                         history_end = frame.index.max().date()
+                history_is_fresh = history_end >= report_date - MAX_PRICE_AGE
                 coverage = (
                     PriceCoverageState.COMPLETE
-                    if (history_end - history_start).days >= _COMPLETE_COVERAGE_DAYS
+                    if (
+                        (history_end - history_start).days
+                        >= _COMPLETE_COVERAGE_DAYS
+                        and history_is_fresh
+                    )
                     else PriceCoverageState.PARTIAL
                 )
                 items.append(
@@ -138,6 +149,9 @@ class CotPriceHydrator:
                         row_count=len(frame.index),
                         history_start=history_start,
                         history_end=history_end,
+                        error_code=(
+                            None if history_is_fresh else "stale_price_history"
+                        ),
                     )
                 )
             except Exception as exc:

@@ -22,8 +22,10 @@ def _unavailable(code: str) -> HTTPException:
     return HTTPException(status_code=404, detail={"code": code})
 
 
-def _set_cache_control(response: Response) -> None:
-    response.headers["Cache-Control"] = "private, max-age=60"
+def _set_cache_control(response: Response, *, revalidate: bool = False) -> None:
+    response.headers["Cache-Control"] = (
+        "private, no-cache" if revalidate else "private, max-age=60"
+    )
 
 
 @router.get("/instruments", response_model=CotCatalogResponse)
@@ -31,7 +33,7 @@ def get_cot_catalog(
     response: Response,
     db: Annotated[Session, Depends(get_db)],
 ) -> CotCatalogResponse:
-    _set_cache_control(response)
+    _set_cache_control(response, revalidate=True)
     queries = get_cot_queries(db)
     try:
         return CotCatalogResponse.from_view(queries.catalog())

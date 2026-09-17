@@ -106,7 +106,10 @@ class RefreshCotUseCase:
                 and requested_signature == self._repository.publication_signature()
             ):
                 failure_status = "failed_price_hydration"
-                price_result = self._price_hydrator.hydrate(COT_INSTRUMENTS)
+                price_result = self._price_hydrator.hydrate(
+                    COT_INSTRUMENTS,
+                    report_date=report_date,
+                )
                 self._repository.mark_no_change(
                     run_id,
                     {
@@ -125,7 +128,10 @@ class RefreshCotUseCase:
             failure_status = "failed_calculation"
             derived = derive_all_instrument_series(raw_weeks)
             failure_status = "failed_price_hydration"
-            price_result = self._price_hydrator.hydrate(COT_INSTRUMENTS)
+            price_result = self._price_hydrator.hydrate(
+                COT_INSTRUMENTS,
+                report_date=report_date,
+            )
             failure_status = "failed_publish"
             published = self._repository.publish(
                 run_id,

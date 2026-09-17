@@ -45,12 +45,25 @@ def test_cot_routes_are_registered_on_protected_v1_router():
     assert "/cot/snapshot" in paths
 
 
-def test_cot_handlers_set_short_private_browser_cache(monkeypatch):
+def test_cot_catalog_requires_browser_revalidation(monkeypatch):
     from app.api.v1 import cot as module
 
     monkeypatch.setattr(module, "get_cot_queries", lambda _db: service())
     response = Response()
 
     module.get_cot_catalog(response=response, db=object())
+
+    assert response.headers["Cache-Control"] == "private, no-cache"
+
+
+def test_cot_history_keeps_short_private_browser_cache(monkeypatch):
+    from app.api.v1 import cot as module
+
+    monkeypatch.setattr(module, "get_cot_queries", lambda _db: service())
+    response = Response()
+
+    module.get_cot_history(
+        "sp-500", response=response, range_name="1y", db=object()
+    )
 
     assert response.headers["Cache-Control"] == "private, max-age=60"

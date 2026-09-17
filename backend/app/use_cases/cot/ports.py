@@ -149,6 +149,8 @@ class CotPriceHydratorPort(Protocol):
     def hydrate(
         self,
         instruments: Sequence[CotInstrumentDefinition],
+        *,
+        report_date: date,
     ) -> CotPriceHydrationResultPort: ...
 
 

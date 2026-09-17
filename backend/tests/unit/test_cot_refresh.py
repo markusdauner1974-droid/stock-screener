@@ -4,7 +4,6 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
-
 from app.domain.cot.models import (
     COT_CALCULATION_VERSION,
     COT_REGISTRY_VERSION,
@@ -196,9 +195,11 @@ class FakePriceResult:
 class FakePriceHydrator:
     def __init__(self):
         self.calls = 0
+        self.report_dates = []
 
-    def hydrate(self, _instruments):
+    def hydrate(self, _instruments, *, report_date):
         self.calls += 1
+        self.report_dates.append(report_date)
         return FakePriceResult()
 
 
@@ -262,6 +263,7 @@ def test_refresh_no_change_does_not_move_pointer():
     assert second.status == "no_change"
     assert second.price_unavailable_count == 31
     assert price_hydrator.calls == 2
+    assert price_hydrator.report_dates == [date(2026, 9, 8)] * 2
     assert repository.published_run_id == first.run_id
 
 
@@ -322,7 +324,7 @@ def test_refresh_records_price_hydration_failures_by_phase():
     repository = FakeRepository()
 
     class FailingPriceHydrator:
-        def hydrate(self, _instruments):
+        def hydrate(self, _instruments, *, report_date):
             raise RuntimeError("price hydration failed")
 
     use_case = RefreshCotUseCase(
