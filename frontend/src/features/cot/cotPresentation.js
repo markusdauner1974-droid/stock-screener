@@ -14,8 +14,9 @@ export const formatCotPercent = (value, digits = 1) => (
 );
 
 export const priceStateLabel = (kind, coverage) => {
-  if (kind === 'unavailable' || coverage === 'unavailable') return 'Price unavailable';
+  if (kind === 'unavailable') return 'Price unavailable';
   const base = PRICE_KIND_LABELS[kind] || 'Price context';
+  if (coverage === 'unavailable') return `${base} · Price unavailable`;
   return coverage === 'partial' ? `${base} · Partial price history` : base;
 };
 

@@ -4,7 +4,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from types import MappingProxyType
-from typing import Protocol
+from typing import ContextManager, Protocol
 
 from app.domain.cot.models import (
     COT_CALCULATION_VERSION,
@@ -106,6 +106,8 @@ class CotSource(Protocol):
 
 
 class CotWriteRepository(Protocol):
+    def serialized_refresh(self) -> ContextManager[None]: ...
+
     def start_run(self, request: CotRunRequest) -> int: ...
 
     def existing_week_keys(

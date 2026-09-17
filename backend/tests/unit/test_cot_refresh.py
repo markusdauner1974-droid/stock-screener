@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
+
 from app.domain.cot.models import (
     COT_CALCULATION_VERSION,
     COT_REGISTRY_VERSION,
@@ -127,6 +129,10 @@ class FakeRepository:
         self.existing_key_slugs = ()
         self.publish_result = True
 
+    @contextmanager
+    def serialized_refresh(self):
+        yield
+
     def start_run(self, _request):
         run_id = self.next_run_id
         self.next_run_id += 1
@@ -229,6 +235,43 @@ def test_refresh_publishes_complete_valid_source_even_when_prices_fail():
     assert repository.existing_key_slugs == tuple(
         item.slug for item in COT_INSTRUMENTS
     )
+
+
+def test_refresh_serializes_the_complete_fetch_to_publish_operation():
+    class LockingRepository(FakeRepository):
+        def __init__(self):
+            super().__init__()
+            self.lock_depth = 0
+
+        @contextmanager
+        def serialized_refresh(self):
+            self.lock_depth += 1
+            try:
+                yield
+            finally:
+                self.lock_depth -= 1
+
+        def publish(self, *args, **kwargs):
+            assert self.lock_depth == 1
+            return super().publish(*args, **kwargs)
+
+    repository = LockingRepository()
+
+    class LockAssertingSource(FakeSource):
+        def fetch(self, instruments):
+            assert repository.lock_depth == 1
+            return super().fetch(instruments)
+
+    use_case = RefreshCotUseCase(
+        source=LockAssertingSource(),
+        repository=repository,
+        price_hydrator=FakePriceHydrator(),
+    )
+
+    result = use_case.execute(CotRefreshCommand(origin="test"))
+
+    assert result.status == "published"
+    assert repository.lock_depth == 0
 
 
 def test_refresh_rejects_a_truncated_first_backfill():

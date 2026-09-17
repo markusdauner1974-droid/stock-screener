@@ -67,6 +67,10 @@ class RefreshCotUseCase:
         self._price_hydrator = price_hydrator
 
     def execute(self, command: CotRefreshCommand) -> CotRefreshResult:
+        with self._repository.serialized_refresh():
+            return self._execute_serialized(command)
+
+    def _execute_serialized(self, command: CotRefreshCommand) -> CotRefreshResult:
         run_request = command.to_run_request()
         run_id = self._repository.start_run(run_request)
         failure_status = "failed_fetch"

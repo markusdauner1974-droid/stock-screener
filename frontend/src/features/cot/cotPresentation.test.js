@@ -4,6 +4,7 @@ import {
   buildCotChartRows,
   formatCotNumber,
   latestFocalSummary,
+  priceStateLabel,
 } from './cotPresentation';
 import {
   cotCatalogFixture,
@@ -33,5 +34,12 @@ describe('COT presentation helpers', () => {
     expect(summary.focalLabel).toBe('Leveraged Funds');
     expect(summary.net).toBe(153);
     expect(formatCotNumber(null)).toBe('—');
+  });
+
+  it('preserves a mapped price kind when its prices are unavailable', () => {
+    expect(priceStateLabel('etf_proxy', 'unavailable')).toBe(
+      'ETF proxy · Price unavailable',
+    );
+    expect(priceStateLabel('unavailable', 'unavailable')).toBe('Price unavailable');
   });
 });
