@@ -20,21 +20,26 @@ from app.domain.relative_strength import (
 from app.infra.db.models.feature_store import FeatureRunPointer
 from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
 from app.scripts._runtime import prepare_runtime, repo_root
+from app.services.benchmark_cache_service import BenchmarkFallbackPolicy
+from app.services.benchmark_resolution import BenchmarkResolution
 from app.services.breadth_calculator_service import BreadthCalculatorService
 from app.services.bulk_data_fetcher import BulkDataFetcher
-from app.services.ibd_industry_service import IBDIndustryService
 from app.services.group_rank_history_backfill_service import (
     DEFAULT_CALENDAR_DAY_GROUP_RANK_HISTORY_LOOKBACK_DAYS,
     GroupRankHistoryBackfillResult,
     GroupRankHistoryBackfillService,
     GroupRankHistoryBackfillStatus,
 )
-from app.services.benchmark_cache_service import BenchmarkFallbackPolicy
-from app.services.benchmark_resolution import BenchmarkResolution
+from app.services.ibd_industry_service import IBDIndustryService
 from app.services.market_exposure_service import EXPOSURE_BACKFILL_DAYS
-from app.services.static_daily_price_refresh_service import (
-    StaticDailyPriceRefreshService,
-    static_daily_price_refresh_batch_size as _static_daily_price_refresh_batch_size,
+from app.services.market_rs_result_contract import (
+    MARKET_RS_REASON_BENCHMARK_ADJUSTED_ANCHOR_MISSING,
+)
+from app.services.static_breadth_contributor_metadata_contract import (
+    build_static_breadth_contributor_metadata_plan,
+)
+from app.services.static_breadth_contributor_metadata_finalizer import (
+    StaticBreadthContributorMetadataFinalizer,
 )
 from app.services.static_breadth_eligibility import (
     classify_static_breadth_eligibility,
@@ -43,32 +48,29 @@ from app.services.static_breadth_history_coordinator import (
     StaticBreadthHistoryCoordinator,
     StaticBreadthHistoryRequest,
 )
-from app.services.static_breadth_contributor_metadata_contract import (
-    build_static_breadth_contributor_metadata_plan,
+from app.services.static_daily_price_refresh_service import (
+    StaticDailyPriceRefreshService,
 )
-from app.services.static_breadth_contributor_metadata_finalizer import (
-    StaticBreadthContributorMetadataFinalizer,
-)
-from app.services.static_site_export_service import (
-    NoPublishedStaticMarketArtifact,
-    STATIC_SITE_SCHEMA_VERSION,
-    StaticSiteExportService,
-)
-from app.services.static_groups_rrg_export import (
-    StaticGroupsRRGRollingHistoryExportSession,
+from app.services.static_daily_price_refresh_service import (
+    static_daily_price_refresh_batch_size as _static_daily_price_refresh_batch_size,
 )
 from app.services.static_group_snapshot_coordinator import (
     build_static_group_snapshot_coordinator,
 )
-from app.services.static_rrg_history_contract import StaticRRGHistoryBundleError
-from app.services.market_rs_result_contract import (
-    MARKET_RS_REASON_BENCHMARK_ADJUSTED_ANCHOR_MISSING,
+from app.services.static_groups_rrg_export import (
+    StaticGroupsRRGRollingHistoryExportSession,
 )
 from app.services.static_market_publish_policy import (
     OPTIONAL_STATIC_MARKETS,
     StaticMarketRsArtifactState,
     classify_static_market_rs_artifact_result,
     collect_static_no_current_artifact_failures,
+)
+from app.services.static_rrg_history_contract import StaticRRGHistoryBundleError
+from app.services.static_site_export_service import (
+    STATIC_SITE_SCHEMA_VERSION,
+    NoPublishedStaticMarketArtifact,
+    StaticSiteExportService,
 )
 from app.tasks.data_fetch_lock import disable_serialized_data_fetch_lock
 from app.tasks.workload_coordination import disable_serialized_market_workload
@@ -79,7 +81,6 @@ from app.wiring.bootstrap import (
     get_price_cache,
     get_provider_snapshot_service,
 )
-
 
 STATIC_BREADTH_HISTORY_MIN_TRADING_DAYS = 20
 STATIC_BREADTH_HISTORY_LOOKBACK_DAYS = 90
@@ -272,6 +273,33 @@ def _run_static_options_refresh(source_run_id: int) -> dict[str, Any]:
         return {
             "status": "failed",
             "reason_codes": ["options_refresh_failed"],
+            "error": str(exc),
+        }
+
+
+def _run_static_cot_refresh() -> dict[str, Any]:
+    from app.use_cases.cot.refresh import CotRefreshCommand
+    from app.wiring.bootstrap import get_refresh_cot_use_case
+
+    try:
+        with SessionLocal() as db:
+            result = get_refresh_cot_use_case(db).execute(
+                CotRefreshCommand(origin="static_build", force=False)
+            )
+        return {
+            "status": result.status,
+            "run_id": result.run_id,
+            "report_date": (
+                result.report_date.isoformat() if result.report_date else None
+            ),
+            "instrument_count": result.instrument_count,
+            "price_unavailable_count": result.price_unavailable_count,
+            "reason_codes": list(result.reason_codes),
+        }
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "reason_codes": ["cot_refresh_failed"],
             "error": str(exc),
         }
 
@@ -696,6 +724,7 @@ def _run_daily_refresh(
     market: str | None = None,
     skip_universe_refresh: bool = False,
     skip_fundamentals_refresh: bool = False,
+    skip_cot_refresh: bool = False,
     build_mode: Literal["price_delta", "full"] = STATIC_BUILD_MODE_PRICE_DELTA,
     hydrate_published_snapshot: bool = False,
     rs_formula_version: str = BALANCED_RS_FORMULA_VERSION,
@@ -1204,6 +1233,9 @@ def _run_daily_refresh(
                     "'latest_published' was not updated."
                 )
 
+        if STATIC_DEFAULT_MARKET in selected_markets and not skip_cot_refresh:
+            results["cot"] = _run_static_cot_refresh()
+
     return results, warnings
 
 
@@ -1218,6 +1250,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--refresh-daily",
         action="store_true",
         help="Run the synchronous daily refresh/build steps before exporting.",
+    )
+    parser.add_argument(
+        "--skip-cot-refresh",
+        action="store_true",
+        help="Skip COT refresh when it is handled by an independent workflow job.",
     )
     parser.add_argument(
         "--market",
@@ -1239,6 +1276,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--fallback-options-artifacts-dir",
         help="Optional last-good options directory selected independently in combine mode.",
+    )
+    parser.add_argument(
+        "--cot-artifacts-dir",
+        help="Optional current global COT directory selected independently in combine mode.",
+    )
+    parser.add_argument(
+        "--fallback-cot-artifacts-dir",
+        help="Optional last-good global COT directory selected independently in combine mode.",
     )
     parser.add_argument(
         "--build-mode",
@@ -1310,6 +1355,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.options_artifacts_dir or args.fallback_options_artifacts_dir
     ) and not args.combine_artifacts_dir:
         raise SystemExit("options artifact directories require --combine-artifacts-dir")
+    if (
+        args.cot_artifacts_dir or args.fallback_cot_artifacts_dir
+    ) and not args.combine_artifacts_dir:
+        raise SystemExit("COT artifact directories require --combine-artifacts-dir")
     if args.rrg_history_dir and not args.market:
         raise SystemExit("--rrg-history-dir requires --market")
     if args.combine_artifacts_dir and args.rrg_history_dir:
@@ -1348,6 +1397,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             options_combine_kwargs["fallback_options_artifacts_dir"] = Path(
                 args.fallback_options_artifacts_dir
             )
+        if args.cot_artifacts_dir:
+            options_combine_kwargs["cot_artifacts_dir"] = Path(
+                args.cot_artifacts_dir
+            )
+        if args.fallback_cot_artifacts_dir:
+            options_combine_kwargs["fallback_cot_artifacts_dir"] = Path(
+                args.fallback_cot_artifacts_dir
+            )
         result = StaticSiteExportService.combine_market_artifacts(
             Path(args.combine_artifacts_dir),
             Path(args.output_dir),
@@ -1372,6 +1429,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 market=args.market,
                 skip_universe_refresh=args.skip_universe_refresh,
                 skip_fundamentals_refresh=args.skip_fundamentals_refresh,
+                skip_cot_refresh=args.skip_cot_refresh,
                 build_mode=args.build_mode,
                 hydrate_published_snapshot=args.hydrate_published_snapshot,
                 rs_formula_version_by_market=rs_formula_policy,

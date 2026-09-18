@@ -1,0 +1,24 @@
+[
+  {
+    "id": "wheat-2026-09-08",
+    "report_date_as_yyyy_mm_dd": "2026-09-08T00:00:00.000",
+    "cftc_contract_market_code": "001602",
+    "open_interest_all": "316244",
+    "prod_merc_positions_long": "37353",
+    "prod_merc_positions_short": "85943",
+    "swap_positions_long_all": "76373",
+    "swap__positions_short_all": "16895",
+    "swap__positions_spread_all": "14058",
+    "m_money_positions_long_all": "65114",
+    "m_money_positions_short_all": "84004",
+    "m_money_positions_spread": "38692",
+    "other_rept_positions_long": "30693",
+    "other_rept_positions_short": "12528",
+    "other_rept_positions_spread": "25980",
+    "tot_rept_positions_long_all": "288263",
+    "tot_rept_positions_short": "278100",
+    "nonrept_positions_long_all": "27981",
+    "nonrept_positions_short_all": "38144",
+    "futonly_or_combined": "FutOnly"
+  }
+]

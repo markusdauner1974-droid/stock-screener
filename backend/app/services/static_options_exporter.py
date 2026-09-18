@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import base64
-import json
 from pathlib import Path
 from typing import Any, Protocol
 
-from app.infra.serialization import json_safe
 from app.schemas.options_analytics import (
     OptionsCommandCenterResponse,
     OptionsSymbolDetailResponse,
 )
 from app.services.atomic_directory_publisher import AtomicDirectoryPublisher
+from app.services.static_artifact_io import write_static_json
 from app.services.static_options_contract import (
     STATIC_OPTIONS_SCHEMA_VERSION,
     validate_static_options_artifact,
@@ -40,15 +39,6 @@ class StaticOptionsUnavailable(RuntimeError):
 def url_safe_symbol_key(symbol: str) -> str:
     canonical = symbol.strip().upper().encode("utf-8")
     return base64.urlsafe_b64encode(canonical).decode("ascii").rstrip("=")
-
-
-def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(json_safe(payload), allow_nan=False, indent=2, sort_keys=True)
-        + "\n",
-        encoding="utf-8",
-    )
 
 
 class StaticOptionsExporter:
@@ -83,12 +73,12 @@ class StaticOptionsExporter:
                 relative_path = f"options/symbols/{key}.json"
                 symbol_map[item.symbol] = {"key": key, "path": relative_path}
                 detail = OptionsSymbolDetailResponse.from_result(result, stale=stale)
-                _write_json(
+                write_static_json(
                     stage / "symbols" / f"{key}.json", detail.model_dump(mode="json")
                 )
 
             command_payload = command.model_dump(mode="json")
-            _write_json(stage / "command-center.json", command_payload)
+            write_static_json(stage / "command-center.json", command_payload)
             manifest = {
                 "schema_version": STATIC_OPTIONS_SCHEMA_VERSION,
                 "data_schema_version": command.schema_version,
@@ -107,7 +97,7 @@ class StaticOptionsExporter:
                 "command_center_path": "options/command-center.json",
                 "symbols": symbol_map,
             }
-            _write_json(stage / "manifest.json", manifest)
+            write_static_json(stage / "manifest.json", manifest)
             return manifest
 
         return self._publisher.publish(

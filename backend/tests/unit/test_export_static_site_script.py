@@ -2914,6 +2914,57 @@ def test_main_passes_independent_options_roots_to_combine(monkeypatch, tmp_path)
     assert captured["fallback_options_artifacts_dir"] == fallback_options_dir
 
 
+def test_main_passes_independent_cot_roots_to_combine(monkeypatch, tmp_path):
+    output_dir = tmp_path / "output"
+    artifacts_dir = tmp_path / "markets"
+    cot_dir = tmp_path / "cot-current"
+    fallback_cot_dir = tmp_path / "cot-fallback"
+    captured = {}
+
+    def combine(*_args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            output_dir=output_dir,
+            generated_at="2026-09-16T09:00:00Z",
+            as_of_date="2026-09-15",
+            warnings=(),
+            manifest={},
+        )
+
+    monkeypatch.setattr(
+        export_script.StaticSiteExportService,
+        "combine_market_artifacts",
+        combine,
+    )
+
+    assert export_script.main(
+        [
+            "--output-dir",
+            str(output_dir),
+            "--combine-artifacts-dir",
+            str(artifacts_dir),
+            "--cot-artifacts-dir",
+            str(cot_dir),
+            "--fallback-cot-artifacts-dir",
+            str(fallback_cot_dir),
+        ]
+    ) == 0
+    assert captured["cot_artifacts_dir"] == cot_dir
+    assert captured["fallback_cot_artifacts_dir"] == fallback_cot_dir
+
+
+def test_cot_artifact_roots_require_combine_mode(tmp_path):
+    with pytest.raises(SystemExit, match="COT artifact directories require"):
+        export_script.main(
+            [
+                "--output-dir",
+                str(tmp_path / "output"),
+                "--cot-artifacts-dir",
+                str(tmp_path / "cot"),
+            ]
+        )
+
+
 def test_static_options_refresh_runs_in_process_and_reports_failure(monkeypatch):
     from app.interfaces.tasks import options_analytics_tasks
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -55,6 +55,7 @@ def build_static_site_manifest(
     warnings: list[str],
     supported_markets: tuple[str, ...],
     default_market: str,
+    global_assets: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not market_entries:
         raise RuntimeError(
@@ -70,6 +71,8 @@ def build_static_site_manifest(
         else next(iter(ordered_entries))
     )
     default_entry = ordered_entries[selected_default]
+    root_assets = dict(default_entry["assets"])
+    root_assets.update(dict(global_assets or {}))
     return {
         "schema_version": STATIC_SITE_SCHEMA_VERSION,
         "generated_at": generated_at,
@@ -78,7 +81,7 @@ def build_static_site_manifest(
         "supported_markets": ordered_markets,
         "features": dict(default_entry["features"]),
         "pages": dict(default_entry["pages"]),
-        "assets": dict(default_entry["assets"]),
+        "assets": root_assets,
         "markets": ordered_entries,
         "warnings": list(warnings),
     }

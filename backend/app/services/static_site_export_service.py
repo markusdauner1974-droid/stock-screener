@@ -51,6 +51,7 @@ from app.services.static_chart_bundle_exporter import (
     StaticChartBundleConfig,
     StaticChartBundleExporter,
 )
+from app.services.static_cot_section import StaticCotSection
 from app.services.static_group_section_builder import StaticGroupSectionBuilder
 from app.services.static_group_matrix import export_group_matrix
 from app.services.static_groups_rrg_export import (
@@ -149,6 +150,7 @@ class StaticSiteExportService:
         breadth_engine_input_factory: StaticBreadthEngineInputFactory | None = None,
         breadth_contributor_exporter: StaticBreadthContributorExporter | None = None,
         options_section: StaticOptionsSection | None = None,
+        cot_section: StaticCotSection | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._rrg_payload_source = (
@@ -202,6 +204,7 @@ class StaticSiteExportService:
         self._options_section = options_section or StaticOptionsSection(
             json_writer=self._write_json,
         )
+        self._cot_section = cot_section or StaticCotSection()
 
     def export(
         self,
@@ -213,12 +216,14 @@ class StaticSiteExportService:
         rs_formula_version_overrides: Mapping[str, str] | None = None,
         feature_run_ids_by_market: Mapping[str, int] | None = None,
         options_fallback_dir: Path | None = None,
+        cot_fallback_dir: Path | None = None,
     ) -> StaticSiteExportResult:
         output_dir = Path(output_dir)
         generated_at = (
             datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         )
         warnings: list[str] = []
+        global_assets: dict[str, Any] = {}
 
         if clean and output_dir.exists():
             shutil.rmtree(output_dir)
@@ -297,10 +302,20 @@ class StaticSiteExportService:
                         warnings=warnings,
                     )
 
+            cot_result = self._cot_section.compose_live(
+                db=db,
+                output_dir=output_dir,
+                generated_at=generated_at,
+                fallback_cot_dir=cot_fallback_dir,
+                global_assets=global_assets,
+            )
+            warnings.extend(cot_result.warnings)
+
         manifest = self._build_manifest(
             market_entries=market_entries,
             generated_at=generated_at,
             warnings=warnings,
+            global_assets=global_assets,
         )
         if write_manifest:
             self._write_json(output_dir / "manifest.json", manifest)
@@ -327,6 +342,8 @@ class StaticSiteExportService:
         optional_markets: Iterable[str] = (),
         options_artifacts_dir: Path | None = None,
         fallback_options_artifacts_dir: Path | None = None,
+        cot_artifacts_dir: Path | None = None,
+        fallback_cot_artifacts_dir: Path | None = None,
     ) -> StaticSiteExportResult:
         combined = StaticArtifactCombiner(
             schema_version=STATIC_SITE_SCHEMA_VERSION,
@@ -366,6 +383,19 @@ class StaticSiteExportService:
             market_metadata_path=(Path(output_dir) / cls._market_metadata_path("US")),
         )
         warnings.extend(options_result.warnings)
+        cot_result = StaticCotSection(
+            enabled=(
+                cot_artifacts_dir is not None
+                or fallback_cot_artifacts_dir is not None
+            )
+        ).compose_combined(
+            output_dir=Path(output_dir),
+            current_cot_dir=cot_artifacts_dir,
+            fallback_cot_dir=fallback_cot_artifacts_dir,
+            global_assets=manifest.setdefault("assets", {}),
+        )
+        warnings.extend(cot_result.warnings)
+        cls._write_json(Path(output_dir) / "manifest.json", manifest)
         cls.assert_live_only_isolation(Path(output_dir))
         return StaticSiteExportResult(
             output_dir=combined.output_dir,
@@ -447,7 +477,7 @@ class StaticSiteExportService:
             warnings=warnings,
             generated_at=generated_at,
             expected_as_of_date=latest_run.as_of_date,
-            build=lambda: self._build_groups_rrg_payload(
+            build=lambda: self._rrg_payload_source.build(
                 db=db,
                 generated_at=generated_at,
                 expected_as_of_date=latest_run.as_of_date,
@@ -681,6 +711,7 @@ class StaticSiteExportService:
         market_entries: dict[str, dict[str, Any]],
         generated_at: str,
         warnings: list[str],
+        global_assets: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         return build_static_site_manifest(
             market_entries=market_entries,
@@ -688,44 +719,8 @@ class StaticSiteExportService:
             warnings=warnings,
             supported_markets=STATIC_SUPPORTED_MARKETS,
             default_market=STATIC_DEFAULT_MARKET,
+            global_assets=global_assets,
         )
-
-    def _build_groups_rrg_payload(
-        self,
-        *,
-        db: Session,
-        generated_at: str,
-        expected_as_of_date: date,
-        market: str,
-        formula_version: str,
-    ) -> dict[str, Any]:
-        """Pre-compute the Relative Rotation Graph payload for the static bundle.
-
-        There is no live API in static mode, so RRG coordinates are baked here
-        using the SAME pure math as the live endpoint (``RRGService`` ->
-        ``compute_group_rrg``), emitting the same ``{date, market, scope,
-        groups[]}`` shape the shared ``RRGChart`` consumes. Both scopes
-        (groups + sectors) are stored so the static page's toggle works offline.
-
-        RRG tails want ~30 weekly points (~7 months) of
-        ``avg_rs_rating`` history — when the exported DB is shallower, the math
-        flags ``is_provisional`` / omits thin groups rather than fabricating.
-        If a lightweight export database lacks the RRG source tables entirely,
-        this optional section is reported unavailable without aborting export.
-        """
-        try:
-            return self._rrg_payload_source.build(
-                db=db,
-                generated_at=generated_at,
-                expected_as_of_date=expected_as_of_date,
-                market=market,
-                formula_version=formula_version,
-            )
-        except StaticGroupsRRGUnavailableError as exc:
-            raise StaticSiteSectionUnavailableError(
-                section=exc.section,
-                reason=exc.reason,
-            ) from exc
 
     def _build_optional_section_payload(
         self,
@@ -738,7 +733,10 @@ class StaticSiteExportService:
     ) -> dict[str, Any]:
         try:
             return build()
-        except StaticSiteSectionUnavailableError as exc:
+        except (
+            StaticGroupsRRGUnavailableError,
+            StaticSiteSectionUnavailableError,
+        ) as exc:
             warnings.append(
                 f"Static {section} data unavailable for {expected_as_of_date.isoformat()}: {exc.reason}"
             )
@@ -964,10 +962,6 @@ class StaticSiteExportService:
         return self._scan_bundle_exporter.serialize_scan_row(row)
 
     @staticmethod
-    def _annotate_percentile_ranks(rows: list[dict[str, Any]]) -> None:
-        StaticScanBundleExporter.annotate_percentile_ranks(rows)
-
-    @staticmethod
     def resolve_static_default_filters(
         market: str | None,
     ) -> dict[str, int | None]:
@@ -983,12 +977,6 @@ class StaticSiteExportService:
             rows,
             default_filters=default_filters,
         )
-
-    @staticmethod
-    def _sort_static_scan_rows(
-        rows: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        return StaticScanBundleExporter.sort_static_scan_rows(rows)
 
     @staticmethod
     def _write_json(path: Path, payload: dict[str, Any]) -> None:

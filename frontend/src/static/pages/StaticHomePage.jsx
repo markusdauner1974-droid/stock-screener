@@ -36,6 +36,7 @@ import MarketHealthExposure from '../../components/MarketScan/MarketHealthExposu
 import { buildFiltersFromPreset } from '../hooks/usePresetScreens';
 import { formatSnapshotFreshnessLabel } from '../../utils/snapshotFreshness';
 import { buildCorrectionSurvivorSummary } from '../../features/opportunityState/correctionSurvivorSummary';
+import StaticCotSection from '../components/StaticCotSection';
 
 const EMPTY_RESULTS = [];
 const DEFAULT_TOP_RESULTS = 20;
@@ -313,6 +314,8 @@ function StaticHomePage() {
       </Grid>
 
       <MarketHealthExposure exposure={home?.market_health_exposure} />
+
+      <StaticCotSection manifest={manifestQuery.data} />
 
       {opportunityStateEnabled ? (
         <CorrectionSurvivorsPanel

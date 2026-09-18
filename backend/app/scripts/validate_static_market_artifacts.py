@@ -1,13 +1,18 @@
 """Validate static-site market artifacts before publishing."""
+
 from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
 
 from app.domain.markets import market_registry
+from app.services.static_global_artifacts import (
+    GLOBAL_STATIC_ARTIFACTS,
+    validate_optional_global_artifact,
+)
 from app.services.static_market_artifact_contract import (
     STATIC_MARKET_METADATA_FILENAME,
     StaticMarketArtifactContractError,
@@ -15,10 +20,6 @@ from app.services.static_market_artifact_contract import (
     read_static_market_manifest,
 )
 from app.services.static_market_publish_policy import OPTIONAL_STATIC_MARKETS
-from app.services.static_options_contract import (
-    StaticOptionsArtifactError,
-    validate_static_options_artifact,
-)
 
 
 class StaticMarketArtifactValidationError(RuntimeError):
@@ -55,10 +56,12 @@ class MarketArtifactStatus:
         payload: object,
         *,
         source: Path | None = None,
-    ) -> "MarketArtifactStatus":
+    ) -> MarketArtifactStatus:
         label = str(source) if source is not None else "status payload"
         if not isinstance(payload, dict):
-            raise StaticMarketArtifactValidationError(f"{label}: status payload must be an object.")
+            raise StaticMarketArtifactValidationError(
+                f"{label}: status payload must be an object."
+            )
 
         market = str(payload.get("market", "")).strip().upper()
         if not market:
@@ -72,7 +75,9 @@ class MarketArtifactStatus:
 
         status = payload.get("status")
         if not isinstance(status, str):
-            raise StaticMarketArtifactValidationError(f"{label}: status must be a string.")
+            raise StaticMarketArtifactValidationError(
+                f"{label}: status must be a string."
+            )
         normalized_status = status.strip().lower()
         if normalized_status not in _VALID_STATUS_VALUES:
             valid = ", ".join(sorted(_VALID_STATUS_VALUES))
@@ -82,9 +87,14 @@ class MarketArtifactStatus:
 
         reason = payload.get("reason")
         if reason is not None and not isinstance(reason, str):
-            raise StaticMarketArtifactValidationError(f"{label}: reason must be a string or null.")
+            raise StaticMarketArtifactValidationError(
+                f"{label}: reason must be a string or null."
+            )
         normalized_reason = reason.strip().lower() if isinstance(reason, str) else None
-        if normalized_reason is not None and normalized_reason not in _VALID_REASON_VALUES:
+        if (
+            normalized_reason is not None
+            and normalized_reason not in _VALID_REASON_VALUES
+        ):
             valid = ", ".join(sorted(_VALID_REASON_VALUES))
             raise StaticMarketArtifactValidationError(
                 f"{label}: reason must be one of: {valid}; or null."
@@ -138,7 +148,9 @@ def parse_selected_markets(raw: str | None) -> set[str]:
         return set()
     payload = json.loads(raw)
     if not isinstance(payload, list):
-        raise StaticMarketArtifactValidationError("SELECTED_MARKETS is not a JSON array.")
+        raise StaticMarketArtifactValidationError(
+            "SELECTED_MARKETS is not a JSON array."
+        )
     return {str(market).strip().upper() for market in payload if str(market).strip()}
 
 
@@ -159,9 +171,7 @@ def collect_markets(base: Path) -> set[str]:
         except (OSError, json.JSONDecodeError, TypeError):
             continue
         except StaticMarketArtifactContractError as exc:
-            raise StaticMarketArtifactValidationError(
-                str(exc)
-            ) from exc
+            raise StaticMarketArtifactValidationError(str(exc)) from exc
         market = str(payload.get("market", "")).strip().upper()
         if market:
             markets.add(market)
@@ -279,16 +289,22 @@ def validate_optional_options_artifacts(
     current_dir: Path | None,
     fallback_dir: Path | None,
 ) -> dict | None:
-    for source in (current_dir, fallback_dir):
-        if source is None or not source.exists():
-            continue
-        candidates = [source, *(path.parent for path in source.rglob("manifest.json"))]
-        for candidate in candidates:
-            try:
-                return validate_static_options_artifact(candidate)
-            except StaticOptionsArtifactError:
-                continue
-    return None
+    return validate_optional_global_artifact(
+        GLOBAL_STATIC_ARTIFACTS["options"],
+        current_dir,
+        fallback_dir,
+    )
+
+
+def validate_optional_cot_artifacts(
+    current_dir: Path | None,
+    fallback_dir: Path | None,
+) -> dict | None:
+    return validate_optional_global_artifact(
+        GLOBAL_STATIC_ARTIFACTS["cot"],
+        current_dir,
+        fallback_dir,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -298,6 +314,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--selected-markets", default="[]")
     parser.add_argument("--current-options-dir", type=Path)
     parser.add_argument("--fallback-options-dir", type=Path)
+    parser.add_argument("--current-cot-dir", type=Path)
+    parser.add_argument("--fallback-cot-dir", type=Path)
     args = parser.parse_args(argv)
 
     try:
@@ -310,6 +328,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         options_manifest = validate_optional_options_artifacts(
             args.current_options_dir,
             args.fallback_options_dir,
+        )
+        cot_index = validate_optional_cot_artifacts(
+            args.current_cot_dir,
+            args.fallback_cot_dir,
         )
     except (json.JSONDecodeError, StaticMarketArtifactValidationError) as exc:
         print(f"::error::{exc}", flush=True)
@@ -344,6 +366,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             "Compatible static options artifact present for run "
             f"{options_manifest['published_run_id']}."
+        )
+    if cot_index is None:
+        print("::warning::No compatible static COT artifact is available.")
+    else:
+        print(
+            "Compatible static COT artifact present for report date "
+            f"{cot_index['report_date']}."
         )
     return 0
 

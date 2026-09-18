@@ -42,6 +42,8 @@ get_refresh_options_analytics_use_case = (
     _use_case_factories.get_refresh_options_analytics_use_case
 )
 get_options_analytics_queries = _use_case_factories.get_options_analytics_queries
+get_refresh_cot_use_case = _use_case_factories.get_refresh_cot_use_case
+get_cot_queries = _use_case_factories.get_cot_queries
 get_refresh_social_signals_use_case = (
     _use_case_factories.get_refresh_social_signals_use_case
 )

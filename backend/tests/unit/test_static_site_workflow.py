@@ -72,6 +72,14 @@ def _build_market_job() -> str:
     )[0]
 
 
+def _build_cot_job() -> str:
+    content = (ROOT / ".github" / "workflows" / "static-site.yml").read_text()
+    return content.split("  build-cot:\n", 1)[1].split(
+        "\n  build-market:",
+        1,
+    )[0]
+
+
 def _combine_and_build_job() -> str:
     content = (ROOT / ".github" / "workflows" / "static-site.yml").read_text()
     return content.split("  combine-and-build:\n", 1)[1].split(
@@ -89,6 +97,24 @@ def _fallback_download_step() -> str:
             1,
         )[0]
     )
+
+
+def test_static_site_workflow_publishes_and_combines_global_cot_artifact() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "static-site.yml").read_text()
+    cot_job = _build_cot_job()
+    market_job = _build_market_job()
+
+    assert "static-cot-global" in workflow
+    assert "python -m app.scripts.export_static_cot" in cot_job
+    assert "actions/upload-artifact@v4" in cot_job
+    assert "static-cot-global" in cot_job
+    assert "--skip-cot-refresh" in market_job
+    assert "Upload current global COT artifact" not in market_job
+    assert "needs: [select-markets, build-cot, build-market]" in workflow
+    assert "--current-cot-dir /tmp/static-cot-current" in workflow
+    assert "--fallback-cot-dir /tmp/static-cot-fallback" in workflow
+    assert "--cot-artifacts-dir /tmp/static-cot-current" in workflow
+    assert "--fallback-cot-artifacts-dir /tmp/static-cot-fallback" in workflow
 
 
 def test_fake_gh_launcher_handles_python_path_with_spaces(
@@ -347,7 +373,7 @@ def test_static_site_combine_downloads_current_and_per_market_fallback_artifacts
     combine_job = _combine_and_build_job()
     fallback_step = _fallback_download_step()
 
-    assert "needs: [select-markets, build-market]" in combine_job
+    assert "needs: [select-markets, build-cot, build-market]" in combine_job
     assert "needs.select-markets.outputs.markets" in combine_job
     assert "Download per-market fallback artifacts" in combine_job
     assert "Download current market artifacts" in combine_job
@@ -531,6 +557,45 @@ def test_options_fallback_skips_runs_that_cannot_beat_the_incumbent(
     )
 
     assert downloaded_runs == [333]
+
+
+def test_options_fallback_keeps_a_newer_existing_fallback(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runs = [{"id": 333, "created_at": "2026-09-05T00:00:00Z"}]
+    fallback_options_dir = tmp_path / "selected-options"
+
+    def fake_gh_json(args):
+        if "actions/workflows/static-site.yml/runs" in args[-1]:
+            return {"workflow_runs": runs}
+        return {"artifacts": [{"name": "static-options-US", "expired": False}]}
+
+    downloaded_runs = []
+    monkeypatch.setattr(fallback_script, "gh_json", fake_gh_json)
+    monkeypatch.setattr(
+        fallback_script,
+        "global_artifact_as_of_date",
+        lambda _spec, base: (
+            date(2026, 9, 6) if base == fallback_options_dir else None
+        ),
+    )
+    monkeypatch.setattr(
+        fallback_script,
+        "_download_candidate",
+        lambda **kwargs: downloaded_runs.append(kwargs["run_id"]),
+    )
+
+    fallback_script.download_fallback_artifacts(
+        repo="xang1234/stock-screener",
+        current_run_id=999,
+        branch_name="main",
+        current_dir=tmp_path / "current",
+        fallback_dir=tmp_path / "fallback",
+        fallback_options_dir=fallback_options_dir,
+    )
+
+    assert downloaded_runs == []
 
 
 def test_static_site_fallback_downloader_keeps_newest_candidate_for_current_market(

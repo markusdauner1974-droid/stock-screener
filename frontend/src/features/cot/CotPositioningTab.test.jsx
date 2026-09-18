@@ -1,0 +1,90 @@
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+import CotPositioningTab from './CotPositioningTab';
+import { getCotCatalog, getCotHistory, getCotSnapshot } from '../../api/cot';
+import {
+  cotCatalogFixture,
+  cotHistoryFixture,
+  cotSnapshotFixture,
+} from './__fixtures__/cotResponses';
+
+vi.mock('../../api/cot', () => ({
+  getCotCatalog: vi.fn(),
+  getCotHistory: vi.fn(),
+  getCotSnapshot: vi.fn(),
+}));
+
+const renderTab = () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(<QueryClientProvider client={client}><CotPositioningTab /></QueryClientProvider>);
+};
+
+describe('CotPositioningTab', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getCotCatalog.mockResolvedValue(cotCatalogFixture);
+    getCotHistory.mockImplementation(async (slug, range) => ({
+      ...cotHistoryFixture,
+      slug,
+      display_name: slug === 'sp-500' ? 'S&P 500' : 'Nasdaq-100',
+      range,
+    }));
+    getCotSnapshot.mockResolvedValue(cotSnapshotFixture);
+  });
+
+  it('loads defaults and refetches for instrument and range controls', async () => {
+    renderTab();
+    expect(await screen.findByRole('heading', { name: /COT Positioning/i })).toBeInTheDocument();
+    await waitFor(() => expect(getCotHistory).toHaveBeenCalledWith('sp-500', '1y', 7));
+    expect(getCotSnapshot).toHaveBeenCalledWith(7);
+
+    fireEvent.change(screen.getByLabelText('COT instrument'), { target: { value: 'nasdaq-100' } });
+    await waitFor(() => expect(getCotHistory).toHaveBeenCalledWith('nasdaq-100', '1y', 7));
+    await screen.findByLabelText('COT instrument');
+    fireEvent.click(screen.getByRole('button', { name: '3Y' }));
+    await waitFor(() => expect(getCotHistory).toHaveBeenCalledWith('nasdaq-100', '3y', 7));
+  });
+
+  it('keeps the snapshot table visible when history fails', async () => {
+    getCotHistory.mockRejectedValue(new Error('history unavailable'));
+    renderTab();
+    expect(await screen.findByRole('table', { name: 'COT positioning snapshot' })).toBeInTheDocument();
+    expect(await screen.findByText(/Unable to load COT positioning/i)).toBeInTheDocument();
+  });
+
+  it('shows a table error when the snapshot request fails', async () => {
+    getCotSnapshot.mockRejectedValue(new Error('snapshot unavailable'));
+
+    renderTab();
+
+    expect(await screen.findByText(/Unable to load the COT market table/i)).toBeInTheDocument();
+  });
+
+  it('refreshes the catalog when a dependent response has a newer publication', async () => {
+    const refreshedCatalog = {
+      ...cotCatalogFixture,
+      publication: { ...cotCatalogFixture.publication, publication_id: 8 },
+    };
+    getCotCatalog
+      .mockResolvedValueOnce(cotCatalogFixture)
+      .mockResolvedValueOnce(refreshedCatalog);
+    getCotHistory
+      .mockRejectedValueOnce(new Error('Invalid COT contract: publication identity mismatch'))
+      .mockImplementation(async (slug, range, expectedPublicationId) => ({
+        ...cotHistoryFixture,
+        publication: {
+          ...cotHistoryFixture.publication,
+          publication_id: expectedPublicationId,
+        },
+        slug,
+        range,
+      }));
+
+    renderTab();
+
+    await waitFor(() => expect(getCotCatalog).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(getCotHistory).toHaveBeenCalledWith('sp-500', '1y', 8));
+  });
+});

@@ -57,3 +57,26 @@ class OperationsCancelJobResponse(BaseModel):
     status: str
     cancel_strategy: str
     message: str
+
+
+class CotOperationsPriceCounts(BaseModel):
+    exact_or_proxy: int = Field(ge=0)
+    partial: int = Field(ge=0)
+    unavailable: int = Field(ge=0)
+
+
+class CotOperationsResponse(BaseModel):
+    generated_at: str
+    latest_successful_run_id: int | None = None
+    latest_failed_run_id: int | None = None
+    latest_failed_status: str | None = None
+    source_report_date: str | None = None
+    source_retrieved_at: str | None = None
+    expected_instrument_count: int = Field(ge=0)
+    observed_instrument_count: int = Field(ge=0)
+    validation_reason_codes: list[str] = Field(default_factory=list)
+    price_counts: CotOperationsPriceCounts
+    duration_seconds: float | None = Field(default=None, ge=0)
+    retry_count: int = Field(ge=0)
+    publication_age_days: int | None = None
+    stale: bool
