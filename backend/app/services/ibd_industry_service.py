@@ -41,6 +41,48 @@ def _market_has_curated_taxonomy(market: str) -> bool:
         return False
 
 
+def _classifier_group_memberships(db: Session, market: str) -> dict[str, list[str]]:
+    rows = (
+        db.query(
+            IBDIndustryGroup.industry_group,
+            IBDIndustryGroup.symbol,
+        )
+        .filter(IBDIndustryGroup.market == market)
+        .order_by(
+            IBDIndustryGroup.industry_group,
+            IBDIndustryGroup.symbol,
+        )
+        .all()
+    )
+    memberships: dict[str, list[str]] = {}
+    for industry_group, symbol in rows:
+        memberships.setdefault(industry_group, []).append(symbol)
+    return memberships
+
+
+def _merge_classifier_gap_memberships(
+    db: Session,
+    *,
+    market: str,
+    taxonomy_memberships: dict[str, list[str]],
+) -> dict[str, list[str]]:
+    memberships = {
+        group: list(dict.fromkeys(symbols))
+        for group, symbols in taxonomy_memberships.items()
+    }
+    taxonomy_symbols = {
+        symbol
+        for symbols in memberships.values()
+        for symbol in symbols
+    }
+    for group, symbols in _classifier_group_memberships(db, market).items():
+        for symbol in symbols:
+            if symbol in taxonomy_symbols:
+                continue
+            memberships.setdefault(group, []).append(symbol)
+    return memberships
+
+
 class IBDIndustryService:
     """Manage IBD Industry Group data"""
 
@@ -242,30 +284,25 @@ class IBDIndustryService:
     def get_group_symbols(db: Session, industry_group: str, *, market: str | None = None) -> list:
         """Get all symbols in an industry group.
 
-        Markets with a committed taxonomy (HK/JP/TW/IN) delegate to
-        ``MarketTaxonomyService``. US and taxonomy-less markets (CA/DE/SG/MY,
-        populated by the hybrid classifier) read the ``ibd_industry_groups``
-        table — always filtered by ``market`` so a group's membership never
-        leaks symbols across markets.
+        Markets with a committed taxonomy use it as the authoritative first
+        layer, then fill missing symbols from the classifier-populated
+        ``ibd_industry_groups`` table. Taxonomy-less markets read the
+        classifier table directly. All DB reads are filtered by ``market`` so
+        a group's membership never leaks symbols across markets.
         """
         normalized = (market or "US").upper()
-        if normalized != "US" and _market_has_curated_taxonomy(normalized):
-            try:
-                return _market_taxonomy_service().symbols_for_group(normalized, industry_group)
-            except Exception as e:
-                logger.error(
-                    "Error getting symbols for group %s in market %s: %s",
-                    industry_group, normalized, e,
-                )
-                return []
         try:
-            records = db.query(IBDIndustryGroup.symbol).filter(
-                IBDIndustryGroup.industry_group == industry_group,
-                IBDIndustryGroup.market == normalized,
-            ).all()
-            return [r.symbol for r in records]
+            return IBDIndustryService.get_group_memberships(
+                db,
+                market=normalized,
+            ).get(industry_group, [])
         except Exception as e:
-            logger.error(f"Error getting symbols for group {industry_group}: {e}")
+            logger.error(
+                "Error getting symbols for group %s in market %s: %s",
+                industry_group,
+                normalized,
+                e,
+            )
             return []
 
     @staticmethod
@@ -278,8 +315,13 @@ class IBDIndustryService:
         normalized = (market or "US").upper()
         if normalized != "US" and _market_has_curated_taxonomy(normalized):
             try:
-                return _market_taxonomy_service().group_symbols_for_market(
+                taxonomy_memberships = _market_taxonomy_service().group_symbols_for_market(
                     normalized
+                )
+                return _merge_classifier_gap_memberships(
+                    db,
+                    market=normalized,
+                    taxonomy_memberships=taxonomy_memberships,
                 )
             except Exception as exc:
                 logger.error(
@@ -289,50 +331,25 @@ class IBDIndustryService:
                     exc_info=True,
                 )
                 raise
-        rows = (
-            db.query(
-                IBDIndustryGroup.industry_group,
-                IBDIndustryGroup.symbol,
-            )
-            .filter(IBDIndustryGroup.market == normalized)
-            .order_by(
-                IBDIndustryGroup.industry_group,
-                IBDIndustryGroup.symbol,
-            )
-            .all()
-        )
-        memberships: dict[str, list[str]] = {}
-        for industry_group, symbol in rows:
-            memberships.setdefault(industry_group, []).append(symbol)
-        return memberships
+        return _classifier_group_memberships(db, normalized)
 
     @staticmethod
     def get_all_groups(db: Session, *, market: str | None = None) -> list:
         """Get list of all unique industry groups for a market.
 
-        Markets with a committed taxonomy (HK/JP/TW/IN) delegate to
-        ``MarketTaxonomyService``. US and taxonomy-less markets (CA/DE/SG/MY)
-        read the classifier-populated ``ibd_industry_groups`` table, scoped to
-        ``market``.
+        Markets with a committed taxonomy use taxonomy groups first, then add
+        classifier-only groups for symbols absent from that taxonomy. US and
+        taxonomy-less markets read the classifier-populated
+        ``ibd_industry_groups`` table, scoped to ``market``.
         """
         normalized = (market or "US").upper()
-        if normalized != "US" and _market_has_curated_taxonomy(normalized):
-            try:
-                return _market_taxonomy_service().groups_for_market(normalized)
-            except Exception as e:
-                logger.error(
-                    "Error getting groups for market %s: %s",
-                    normalized, e, exc_info=True,
-                )
-                raise
         try:
-            records = (
-                db.query(IBDIndustryGroup.industry_group)
-                .filter(IBDIndustryGroup.market == normalized)
-                .distinct()
-                .all()
+            return sorted(
+                IBDIndustryService.get_group_memberships(
+                    db,
+                    market=normalized,
+                )
             )
-            return [r.industry_group for r in records]
         except Exception as e:
             logger.error(f"Error getting all industry groups: {e}", exc_info=True)
             raise

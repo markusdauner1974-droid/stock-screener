@@ -55,56 +55,50 @@ class FeatureRunGroupEnrichmentService:
                 if isinstance(raw_total_rows, (int, float))
                 else 0
             )
-            if not (
+            group_rankings_supported = (
                 get_market_catalog()
                 .get(identity.market)
                 .capabilities.group_rankings
-            ):
-                return {
-                    "run_id": feature_run_id,
-                    "ranking_date": ranking_date.isoformat(),
-                    "total_rows": total_rows,
-                    "updated_rows": 0,
-                    "missing_industry_rows": 0,
-                    "missing_rank_rows": 0,
-                    "rs_formula_version": identity.formula_version,
-                    "identity_source": resolution.identity_source,
-                    "status": "skipped",
-                    "reason": "group_rankings_not_supported",
-                }
-            snapshot_rows = self._snapshot_reader.load_publication(
-                db,
-                publication=resolution.publication,
-                include_top_symbol_names=False,
             )
-            if not snapshot_rows:
-                raise GroupSnapshotUnavailable(identity)
-            ranks_by_group = {
-                str(row["industry_group"]): int(row["rank"])
-                for row in snapshot_rows
-            }
+            ranks_by_group: dict[str, int] = {}
+            if group_rankings_supported:
+                snapshot_rows = self._snapshot_reader.load_publication(
+                    db,
+                    publication=resolution.publication,
+                    include_top_symbol_names=False,
+                )
+                if not snapshot_rows:
+                    raise GroupSnapshotUnavailable(identity)
+                ranks_by_group = {
+                    str(row["industry_group"]): int(row["rank"])
+                    for row in snapshot_rows
+                }
 
             industries_by_symbol: dict[str, str | None] = {}
             market_themes_by_symbol: dict[str, list[str]] = {}
             sector_by_symbol: dict[str, str | None] = {}
             industry_by_symbol: dict[str, str | None] = {}
+            classifier_industries_by_symbol = {
+                symbol: industry_group
+                for symbol, industry_group in (
+                    db.query(
+                        StockFeatureDaily.symbol,
+                        IBDIndustryGroup.industry_group,
+                    )
+                    .join(
+                        IBDIndustryGroup,
+                        IBDIndustryGroup.symbol == StockFeatureDaily.symbol,
+                    )
+                    .filter(
+                        StockFeatureDaily.run_id == feature_run_id,
+                        IBDIndustryGroup.market == identity.market,
+                    )
+                    .all()
+                )
+            }
 
             if identity.market == "US":
-                industries_by_symbol = {
-                    symbol: industry_group
-                    for symbol, industry_group in (
-                        db.query(
-                            StockFeatureDaily.symbol,
-                            IBDIndustryGroup.industry_group,
-                        )
-                        .join(
-                            IBDIndustryGroup,
-                            IBDIndustryGroup.symbol == StockFeatureDaily.symbol,
-                        )
-                        .filter(StockFeatureDaily.run_id == feature_run_id)
-                        .all()
-                    )
-                }
+                industries_by_symbol = classifier_industries_by_symbol
             else:
                 for batch in self._iter_feature_rows(db, feature_run_id):
                     for row in batch:
@@ -112,8 +106,10 @@ class FeatureRunGroupEnrichmentService:
                             row.symbol,
                             market=identity.market,
                         )
+                        taxonomy_group = entry.industry_group if entry else None
                         industries_by_symbol[row.symbol] = (
-                            entry.industry_group if entry else None
+                            taxonomy_group
+                            or classifier_industries_by_symbol.get(row.symbol)
                         )
                         sector_by_symbol[row.symbol] = entry.sector if entry else None
                         industry_by_symbol[row.symbol] = (
@@ -157,7 +153,7 @@ class FeatureRunGroupEnrichmentService:
                     )
                     if industry_group is None:
                         missing_industry_rows += 1
-                    elif group_rank is None:
+                    elif group_rankings_supported and group_rank is None:
                         missing_rank_rows += 1
 
                     if (
@@ -184,7 +180,7 @@ class FeatureRunGroupEnrichmentService:
                 db.expunge_all()
 
             db.commit()
-            return {
+            result = {
                 "run_id": feature_run_id,
                 "ranking_date": ranking_date.isoformat(),
                 "total_rows": total_rows,
@@ -194,6 +190,10 @@ class FeatureRunGroupEnrichmentService:
                 "rs_formula_version": identity.formula_version,
                 "identity_source": resolution.identity_source,
             }
+            if not group_rankings_supported:
+                result["status"] = "skipped"
+                result["reason"] = "group_rankings_not_supported"
+            return result
         except Exception:
             db.rollback()
             raise

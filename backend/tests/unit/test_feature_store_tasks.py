@@ -1462,6 +1462,7 @@ def test_enrich_feature_run_with_ibd_metadata_uses_market_taxonomy_for_non_us_ru
         tables=[
             FeatureRun.__table__,
             StockFeatureDaily.__table__,
+            IBDIndustryGroup.__table__,
             IBDGroupRank.__table__,
         ],
     )

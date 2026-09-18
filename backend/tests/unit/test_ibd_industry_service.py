@@ -127,11 +127,12 @@ def test_taxonomyless_market_falls_back_to_db(monkeypatch):
     assert symbols == ["D05.SG", "O39.SG"]
 
 
-def test_curated_market_still_delegates_to_taxonomy(monkeypatch):
-    # Markets with a committed taxonomy keep using MarketTaxonomyService, never
-    # the DB — even if classifier rows happen to exist for them.
+def test_curated_market_uses_taxonomy_then_classifier_gap_fill(monkeypatch):
+    # Markets with a committed taxonomy keep taxonomy memberships authoritative,
+    # but classifier rows fill symbols missing from that taxonomy.
     session = _make_session()
-    _add(session, "0700.HK", "DB-Only-Group", "HK", source="embedding")
+    _add(session, "0700.HK", "Classifier-Override", "HK", source="embedding")
+    _add(session, "9999.HK", "Classifier-Gap", "HK", source="llm")
 
     class _FakeTaxonomy:
         def groups_for_market(self, m):
@@ -140,8 +141,22 @@ def test_curated_market_still_delegates_to_taxonomy(monkeypatch):
         def symbols_for_group(self, m, g):
             return ["CURATED.HK"]
 
+        def group_symbols_for_market(self, m):
+            return {"Curated-Group": ["0700.HK"]}
+
     monkeypatch.setattr(ibd_module, "_market_taxonomy_service", lambda: _FakeTaxonomy())
 
-    assert IBDIndustryService.get_all_groups(session, market="HK") == ["Curated-Group"]
+    assert IBDIndustryService.get_all_groups(session, market="HK") == [
+        "Classifier-Gap",
+        "Curated-Group",
+    ]
     assert IBDIndustryService.get_group_symbols(
-        session, "Curated-Group", market="HK") == ["CURATED.HK"]
+        session, "Curated-Group", market="HK") == ["0700.HK"]
+    assert IBDIndustryService.get_group_symbols(
+        session, "Classifier-Gap", market="HK") == ["9999.HK"]
+    assert IBDIndustryService.get_group_symbols(
+        session, "Classifier-Override", market="HK") == []
+    assert IBDIndustryService.get_group_memberships(session, market="HK") == {
+        "Curated-Group": ["0700.HK"],
+        "Classifier-Gap": ["9999.HK"],
+    }
