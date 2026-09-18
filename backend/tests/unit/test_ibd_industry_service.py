@@ -12,6 +12,7 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.models.industry import IBDIndustryGroup
 from app.services.ibd_industry_service import IBDIndustryService
+from app.services.market_taxonomy_service import MarketTaxonomyEntry
 
 
 def _make_session():
@@ -139,10 +140,21 @@ def test_curated_market_uses_taxonomy_then_classifier_gap_fill(monkeypatch):
             return ["Curated-Group"]
 
         def symbols_for_group(self, m, g):
-            return ["CURATED.HK"]
+            if g == "Curated-Group":
+                return ["0700.HK"]
+            return []
 
         def group_symbols_for_market(self, m):
             return {"Curated-Group": ["0700.HK"]}
+
+        def get(self, symbol, *, market, exchange=None):
+            if symbol == "0700.HK":
+                return MarketTaxonomyEntry(
+                    market=market,
+                    symbol=symbol,
+                    industry_group="Curated-Group",
+                )
+            return None
 
     monkeypatch.setattr(ibd_module, "_market_taxonomy_service", lambda: _FakeTaxonomy())
 
@@ -160,3 +172,44 @@ def test_curated_market_uses_taxonomy_then_classifier_gap_fill(monkeypatch):
         "Curated-Group": ["0700.HK"],
         "Classifier-Gap": ["9999.HK"],
     }
+
+
+def test_curated_single_group_lookup_uses_targeted_classifier_gap_fill(monkeypatch):
+    session = _make_session()
+    _add(session, "0700.HK", "Classifier-Override", "HK", source="embedding")
+    _add(session, "9999.HK", "Classifier-Gap", "HK", source="llm")
+    _add(session, "8888.HK", "Other-Gap", "HK", source="llm")
+
+    taxonomy_get_symbols = []
+
+    class _FakeTaxonomy:
+        def groups_for_market(self, m):
+            return ["Curated-Group"]
+
+        def symbols_for_group(self, m, g):
+            if g == "Curated-Group":
+                return ["0700.HK"]
+            return []
+
+        def group_symbols_for_market(self, m):
+            raise AssertionError("single-group lookup must not bulk-load taxonomy")
+
+        def get(self, symbol, *, market, exchange=None):
+            taxonomy_get_symbols.append(symbol)
+            if symbol == "0700.HK":
+                return MarketTaxonomyEntry(
+                    market=market,
+                    symbol=symbol,
+                    industry_group="Curated-Group",
+                )
+            return None
+
+    monkeypatch.setattr(ibd_module, "_market_taxonomy_service", lambda: _FakeTaxonomy())
+
+    assert IBDIndustryService.get_group_symbols(
+        session, "Curated-Group", market="HK") == ["0700.HK"]
+    assert IBDIndustryService.get_group_symbols(
+        session, "Classifier-Gap", market="HK") == ["9999.HK"]
+    assert IBDIndustryService.get_group_symbols(
+        session, "Classifier-Override", market="HK") == []
+    assert "8888.HK" not in taxonomy_get_symbols

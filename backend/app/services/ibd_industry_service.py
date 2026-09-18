@@ -60,6 +60,24 @@ def _classifier_group_memberships(db: Session, market: str) -> dict[str, list[st
     return memberships
 
 
+def _classifier_symbols_for_group(
+    db: Session,
+    *,
+    market: str,
+    industry_group: str,
+) -> list[str]:
+    rows = (
+        db.query(IBDIndustryGroup.symbol)
+        .filter(
+            IBDIndustryGroup.market == market,
+            IBDIndustryGroup.industry_group == industry_group,
+        )
+        .order_by(IBDIndustryGroup.symbol)
+        .all()
+    )
+    return list(dict.fromkeys(row.symbol for row in rows))
+
+
 def _merge_classifier_gap_memberships(
     db: Session,
     *,
@@ -81,6 +99,27 @@ def _merge_classifier_gap_memberships(
                 continue
             memberships.setdefault(group, []).append(symbol)
     return memberships
+
+
+def _merge_classifier_gap_symbols(
+    db: Session,
+    *,
+    market: str,
+    industry_group: str,
+    taxonomy_symbols: list[str],
+    taxonomy_service,
+) -> list[str]:
+    symbols = list(dict.fromkeys(taxonomy_symbols))
+    for symbol in _classifier_symbols_for_group(
+        db,
+        market=market,
+        industry_group=industry_group,
+    ):
+        entry = taxonomy_service.get(symbol, market=market)
+        if entry is not None and entry.industry_group:
+            continue
+        symbols.append(symbol)
+    return list(dict.fromkeys(symbols))
 
 
 class IBDIndustryService:
@@ -292,10 +331,24 @@ class IBDIndustryService:
         """
         normalized = (market or "US").upper()
         try:
-            return IBDIndustryService.get_group_memberships(
+            if normalized != "US" and _market_has_curated_taxonomy(normalized):
+                taxonomy_service = _market_taxonomy_service()
+                taxonomy_symbols = taxonomy_service.symbols_for_group(
+                    normalized,
+                    industry_group,
+                )
+                return _merge_classifier_gap_symbols(
+                    db,
+                    market=normalized,
+                    industry_group=industry_group,
+                    taxonomy_symbols=taxonomy_symbols,
+                    taxonomy_service=taxonomy_service,
+                )
+            return _classifier_symbols_for_group(
                 db,
                 market=normalized,
-            ).get(industry_group, [])
+                industry_group=industry_group,
+            )
         except Exception as e:
             logger.error(
                 "Error getting symbols for group %s in market %s: %s",
