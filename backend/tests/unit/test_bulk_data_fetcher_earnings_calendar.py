@@ -28,6 +28,7 @@ def _ticker_with_calendar(earnings_dates) -> SimpleNamespace:
 
 class TestExtractFundamentalsCalendarEvidence:
     def test_future_earnings_rows_produce_observation_and_next_date(self):
+        before = datetime.now(UTC).date()
         future = datetime.now(UTC) + pd.Timedelta(days=9)
         ticker = _ticker_with_calendar(
             pd.DataFrame({"Earnings Date": [future], "EPS Estimate": [1.25]}).set_index(
@@ -36,18 +37,21 @@ class TestExtractFundamentalsCalendarEvidence:
         )
 
         result = BulkDataFetcher()._extract_fundamentals(ticker, {})
+        after = datetime.now(UTC).date()
 
         assert result["next_earnings_date"] == future.date()
-        assert result["event_calendar_as_of_date"] == datetime.now(UTC).date()
+        assert result["event_calendar_as_of_date"] in {before, after}
 
     def test_successful_empty_calendar_stays_observed_without_next_date(self):
         """Success with no upcoming earnings keeps availability via the stamp."""
+        before = datetime.now(UTC).date()
         ticker = _ticker_with_calendar(pd.DataFrame())
 
         result = BulkDataFetcher()._extract_fundamentals(ticker, {})
+        after = datetime.now(UTC).date()
 
         assert "event_calendar_as_of_date" in result
-        assert result["event_calendar_as_of_date"] == datetime.now(UTC).date()
+        assert result["event_calendar_as_of_date"] in {before, after}
         # A null next date is dropped by the None-filter, which the persisted
         # gate treats identically to an explicit None: still available.
         assert "next_earnings_date" not in result

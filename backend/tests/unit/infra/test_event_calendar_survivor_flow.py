@@ -8,7 +8,7 @@ observations never persisted by producers) cannot silently return.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pandas as pd
@@ -192,10 +192,11 @@ class TestPersistedEvidenceToSurvivorClassification:
             stamp_event_calendar_observation,
         )
 
+        expected_next_date = datetime.now(UTC).date() + timedelta(days=9)
         frame = pd.DataFrame(
             {
                 "Earnings Date": [
-                    pd.Timestamp(date.today() + timedelta(days=9))
+                    pd.Timestamp(expected_next_date)
                 ],
                 "EPS Estimate": [1.25],
             }
@@ -210,6 +211,7 @@ class TestPersistedEvidenceToSurvivorClassification:
         stock_data = layer.prepare_data_bulk(["AAPL"], REQUIREMENTS)["AAPL"]
 
         assert stock_data.event_calendar_available is True
-        assert stock_data.next_earnings_date == (
-            date.today() + timedelta(days=9)
-        )
+        # The persisted gate must accept exactly what the producer stamped;
+        # derive the expectation from the stamp, not a second clock read.
+        assert stock_data.next_earnings_date == stamped["next_earnings_date"]
+        assert stock_data.next_earnings_date == expected_next_date

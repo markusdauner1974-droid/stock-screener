@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
+from collections.abc import Mapping
 from finvizfinance.constants import NUMBER_COL
 from finvizfinance.util import number_covert, progress_bar, web_scrap
 from sqlalchemy.orm import Session
@@ -43,7 +44,7 @@ from .market_calendar_service import MarketCalendarService
 from .security_master_service import security_master_resolver
 from .technical_calculator_service import TechnicalCalculatorService
 from .yahoo_earnings_calendar import (
-    is_event_calendar_observation_fresh,
+    is_event_calendar_observation_due_for_refresh,
     normalize_yahoo_earnings_dates,
     stamp_event_calendar_observation,
 )
@@ -446,18 +447,49 @@ class ProviderSnapshotService:
     def _needs_yahoo_hydration(self, payload: Dict[str, Any]) -> bool:
         if any(not self._has_value(payload.get(key)) for key in self.YAHOO_ONLY_REQUIRED_KEYS):
             return True
-        return not self._calendar_observation_is_fresh(payload)
+        return not self._calendar_observation_is_current(payload)
 
-    def _calendar_observation_is_fresh(self, payload: Dict[str, Any]) -> bool:
+    def _calendar_observation_is_current(self, payload: Dict[str, Any]) -> bool:
         """Completeness is keyed on observation age, not the date value.
 
         ``next_earnings_date`` may legitimately be null after a successful
-        lookup, so only a fresh ``event_calendar_as_of_date`` counts as
-        complete calendar evidence.
+        lookup, so only a current ``event_calendar_as_of_date`` counts as
+        complete calendar evidence. Producers refresh strictly before the
+        consumer TTL (weekly cadence), so an observation that still
+        satisfies the consumer gate can still require re-observation.
         """
-        return is_event_calendar_observation_fresh(
+        return not is_event_calendar_observation_due_for_refresh(
             payload.get("event_calendar_as_of_date"),
         )
+
+    @staticmethod
+    def _newest_calendar_observation(
+        *payloads: Optional[Dict[str, Any]],
+    ) -> Optional[Dict[str, Any]]:
+        """Return the payload carrying the newest calendar observation.
+
+        Calendar evidence is age-owned: ``_merge_fundamentals`` prefers
+        non-null primary values, so a stale snapshot observation would
+        otherwise hide a fresh cached one. Snapshot payloads carry the
+        observation as an ISO string; cache and Yahoo payloads may carry
+        date objects — compare via ``pd.Timestamp``.
+        """
+        newest: Optional[tuple[pd.Timestamp, Dict[str, Any]]] = None
+        for payload in payloads:
+            if not isinstance(payload, Mapping):
+                continue
+            raw_observed_at = payload.get("event_calendar_as_of_date")
+            if raw_observed_at is None:
+                continue
+            try:
+                observed_at = pd.Timestamp(raw_observed_at)
+            except (TypeError, ValueError):
+                continue
+            if pd.isna(observed_at):
+                continue
+            if newest is None or observed_at > newest[0]:
+                newest = (observed_at, payload)
+        return newest[1] if newest is not None else None
 
     def build_market_snapshot_row(
         self,
@@ -1437,6 +1469,27 @@ class ProviderSnapshotService:
                     existing_data.get(row.symbol) or {},
                 )
                 yahoo_payload: Dict[str, Any] = {}
+                # Calendar evidence is age-owned: _merge_fundamentals prefers
+                # non-null primary values, so pick the newest observation
+                # across the snapshot-merged payload, the persisted cache
+                # directly (its fresh observation may already have been
+                # hidden by the merge), and (after the lookup below) the
+                # fresh Yahoo payload. A stale snapshot must not hide a
+                # fresher cached one, and a failed Yahoo lookup must not
+                # clobber fresher cached evidence.
+                calendar_source = self._newest_calendar_observation(
+                    merged_payload,
+                    existing_data.get(row.symbol),
+                    yahoo_payload,
+                )
+                if calendar_source is not None:
+                    merged_payload.update(
+                        {
+                            key: calendar_source[key]
+                            for key in self.EVENT_CALENDAR_KEYS
+                            if key in calendar_source
+                        }
+                    )
                 if allow_yahoo_hydration and self._needs_yahoo_hydration(merged_payload):
                     yahoo_payload = self._fetch_yahoo_only_fields(row.symbol)
                     if yahoo_payload:
@@ -1445,17 +1498,16 @@ class ProviderSnapshotService:
                             yahoo_payload,
                         )
                         yahoo_hydrated += 1
-                    # _merge_fundamentals prefers non-null primary values, so
-                    # a stale persisted observation would silently win over a
-                    # fresh Yahoo observation. Calendar evidence is age-owned:
-                    # reconcile it from the freshest producer payload before
-                    # the completeness check.
-                    if yahoo_payload.get("event_calendar_as_of_date") is not None:
+                    calendar_source = self._newest_calendar_observation(
+                        yahoo_payload,
+                        merged_payload,
+                    )
+                    if calendar_source is not None:
                         merged_payload.update(
                             {
-                                key: yahoo_payload[key]
+                                key: calendar_source[key]
                                 for key in self.EVENT_CALENDAR_KEYS
-                                if key in yahoo_payload
+                                if key in calendar_source
                             }
                         )
                     if self._needs_yahoo_hydration(merged_payload):

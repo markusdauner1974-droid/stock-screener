@@ -34,6 +34,12 @@ logger = logging.getLogger(__name__)
 # (age is measured against each snapshot's price as_of_date).
 EVENT_CALENDAR_MAX_AGE_DAYS = 14
 EVENT_CALENDAR_FUTURE_TOLERANCE_DAYS = 3
+# Producer-side refresh threshold, strictly shorter than the consumer TTL
+# above. Producers run weekly: an observation is only "fresh enough" to
+# skip re-hydration while younger than one cadence week, so the next
+# weekly run always refreshes before the consumer TTL can reject it.
+# (With a 7-day cadence and 14-day TTL, max observation age stays ≤ 14.)
+EVENT_CALENDAR_PRODUCER_REFRESH_AFTER_DAYS = 7
 
 
 def normalize_yahoo_earnings_dates(
@@ -52,16 +58,32 @@ def normalize_yahoo_earnings_dates(
         # NOTE: ``DataFrame.empty`` is True whenever any axis is empty —
         # an all-index frame (no columns) reports empty even with rows.
         # Test row count explicitly so such frames are still normalized.
-        if earnings_dates is None or len(earnings_dates) == 0:
+        row_count = 0 if earnings_dates is None else len(earnings_dates)
+        if earnings_dates is None or row_count == 0:
             return [], True
 
         normalized = earnings_dates.reset_index()
+        # Only date-carrying columns are eligible. A missing/NA cell in a
+        # recognized column must NOT fall back to the positional "index"
+        # column — that would parse row numbers as epoch dates (1970). The
+        # positional "index" fallback applies only when the frame carries
+        # its dates in the index itself (unnamed DatetimeIndex).
+        date_column = None
+        for column_name in ("Earnings Date", "Date"):
+            if column_name in normalized.columns:
+                date_column = column_name
+                break
+        if date_column is None and isinstance(
+            getattr(earnings_dates, "index", None), pd.DatetimeIndex
+        ):
+            date_column = "index"
+
         result: list[date] = []
         for row in normalized.head(limit).to_dict("records"):
-            raw_value = (
-                row.get("Earnings Date") or row.get("index") or row.get("Date")
-            )
-            if raw_value is None:
+            if date_column is None:
+                continue
+            raw_value = row.get(date_column)
+            if raw_value is None or pd.isna(raw_value):
                 continue
             try:
                 timestamp = pd.Timestamp(raw_value)
@@ -75,6 +97,18 @@ def normalize_yahoo_earnings_dates(
             if pd.isna(timestamp):
                 continue
             result.append(timestamp.date())
+        if not result and row_count > 0:
+            # A nonempty response that yields no parseable dates is malformed
+            # provider data, not a known no-upcoming-earnings result. Stay
+            # fail-closed so the producer retries instead of stamping a
+            # fresh observation over garbage input.
+            logger.warning(
+                "Calendar response for %s yielded no parseable earnings dates "
+                "from %d rows; treating as provider failure",
+                symbol,
+                row_count,
+            )
+            return [], False
         return sorted(set(result)), True
     except Exception as exc:
         logger.error("Error fetching earnings dates for %s: %s", symbol, exc)
@@ -120,6 +154,38 @@ def is_event_calendar_observation_fresh(
     completeness check share this rule so both sides age evidence out on
     the same schedule.
     """
+    return _observation_age_in_window(
+        observed_at,
+        reference_date,
+        max_age_days=EVENT_CALENDAR_MAX_AGE_DAYS,
+    )
+
+
+def is_event_calendar_observation_due_for_refresh(
+    observed_at: Any,
+    *,
+    reference_date: date | None = None,
+) -> bool:
+    """Return whether a producer must re-observe this calendar.
+
+    Producer completeness uses a threshold strictly shorter than the
+    consumer TTL: an observation older than one weekly cadence must be
+    refreshed on the next scheduled run so consumers never see evidence
+    that has already aged out of ``EVENT_CALENDAR_MAX_AGE_DAYS``.
+    """
+    return not _observation_age_in_window(
+        observed_at,
+        reference_date,
+        max_age_days=EVENT_CALENDAR_PRODUCER_REFRESH_AFTER_DAYS,
+    )
+
+
+def _observation_age_in_window(
+    observed_at: Any,
+    reference_date: date | None,
+    *,
+    max_age_days: int,
+) -> bool:
     if observed_at is None:
         return False
     try:
@@ -133,13 +199,15 @@ def is_event_calendar_observation_fresh(
     return (
         -EVENT_CALENDAR_FUTURE_TOLERANCE_DAYS
         <= age_days
-        <= EVENT_CALENDAR_MAX_AGE_DAYS
+        <= max_age_days
     )
 
 
 __all__ = [
     "EVENT_CALENDAR_FUTURE_TOLERANCE_DAYS",
     "EVENT_CALENDAR_MAX_AGE_DAYS",
+    "EVENT_CALENDAR_PRODUCER_REFRESH_AFTER_DAYS",
+    "is_event_calendar_observation_due_for_refresh",
     "is_event_calendar_observation_fresh",
     "normalize_yahoo_earnings_dates",
     "stamp_event_calendar_observation",
