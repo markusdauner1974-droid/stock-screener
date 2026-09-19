@@ -23,6 +23,10 @@ from ..config import settings
 from ..domain.markets.cn_symbols import cn_price_symbol_for_native_provider
 from ..domain.providers.price_symbol_support import yahoo_price_no_data_error_for_symbol
 from .growth_cadence_service import compute_cadence_aware_growth
+from .yahoo_earnings_calendar import (
+    normalize_yahoo_earnings_dates,
+    stamp_event_calendar_observation,
+)
 from .price_fetch_failures import (
     PriceFetchFailureKind,
     classify_price_fetch_error,
@@ -408,6 +412,10 @@ class BulkDataFetcher:
             'data_source_timestamp': datetime.utcnow().isoformat(),
         }
 
+        # Persisted event-calendar evidence for the fail-closed survivor
+        # gate: observation timestamp + first known-future earnings date.
+        fundamentals.update(self._extract_earnings_calendar(ticker))
+
         # Remove None values to save space
         return {k: v for k, v in fundamentals.items() if v is not None}
 
@@ -416,6 +424,26 @@ class BulkDataFetcher:
         if value is None:
             return None
         return round(value * 100, 2)
+
+    def _extract_earnings_calendar(self, ticker: Any, *, symbol: str | None = None) -> Dict[str, Any]:
+        """Extract persisted event-calendar evidence for one ticker.
+
+        Uses the shared Yahoo calendar normalizer so a successful lookup
+        with no upcoming earnings stays available (fresh observation) while
+        a provider failure stamps nothing and remains retryable.
+        """
+        if ticker is None:
+            return {}
+        try:
+            calendar_dates, calendar_available = normalize_yahoo_earnings_dates(
+                ticker.earnings_dates,
+                symbol=symbol,
+                limit=4,
+            )
+        except Exception as e:
+            logger.debug("Error extracting earnings calendar: %s", e)
+            return {}
+        return stamp_event_calendar_observation(calendar_dates, calendar_available)
 
     def _extract_quarterly_growth(
         self,

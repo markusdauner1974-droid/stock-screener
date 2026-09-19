@@ -27,6 +27,10 @@ from ..services.security_master_service import (
     security_master_resolver,
 )
 from ..services.stock_event_context_service import StockEventContextService
+from ..services.yahoo_earnings_calendar import (
+    EVENT_CALENDAR_FUTURE_TOLERANCE_DAYS,
+    EVENT_CALENDAR_MAX_AGE_DAYS,
+)
 from ..wiring.bootstrap import get_rate_limiter, get_yfinance_service
 from .base_screener import DataRequirements, StockData
 from .criteria.relative_strength import RelativeStrengthCalculator
@@ -35,8 +39,6 @@ logger = logging.getLogger(__name__)
 
 _TRANSIENT_TYPES = (ConnectionError, TimeoutError, RateLimitTimeoutError)
 _RS_PERCENTILE_PERIODS = (21, 63, 252)
-_EVENT_CALENDAR_MAX_AGE_DAYS = 7
-_EVENT_CALENDAR_FUTURE_TOLERANCE_DAYS = 3
 
 
 class DataPreparationLayer:
@@ -141,8 +143,8 @@ class DataPreparationLayer:
         observed_at = observed_timestamp.date()
         age_days = (as_of_date - observed_at).days
         if (
-            age_days < -_EVENT_CALENDAR_FUTURE_TOLERANCE_DAYS
-            or age_days > _EVENT_CALENDAR_MAX_AGE_DAYS
+            age_days < -EVENT_CALENDAR_FUTURE_TOLERANCE_DAYS
+            or age_days > EVENT_CALENDAR_MAX_AGE_DAYS
         ):
             return None, False
 

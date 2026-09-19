@@ -616,6 +616,8 @@ def test_hydrate_published_snapshot_fetches_yahoo_only_fields_for_missing_scan_d
         "eps_years_available": 5,
         "market_cap": 1_000,
         "shares_outstanding": 50_000_000,
+        "event_calendar_as_of_date": date.today(),
+        "next_earnings_date": None,
         "yahoo_profile_refreshed_at": "2026-03-19T00:00:00",
         "yahoo_statements_refreshed_at": "2026-03-19T00:00:00",
     }
