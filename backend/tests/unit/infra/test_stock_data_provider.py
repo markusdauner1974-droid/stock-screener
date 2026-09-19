@@ -17,6 +17,7 @@ from app.scanners.base_screener import DataRequirements, StockData
 from app.scanners.data_preparation import DataPreparationLayer
 from app.services.benchmark_cache_service import BenchmarkDataBundle
 from app.services.rate_limiter import RateLimitTimeoutError
+from app.services.yahoo_earnings_calendar import EVENT_CALENDAR_MAX_AGE_DAYS
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -575,7 +576,9 @@ class TestBulkDataPreparation:
         mock_price_cache.get_many.return_value = {"AAPL": price_data}
         mock_fundamentals_cache.get_many.return_value = {
             "AAPL": {
-                "event_calendar_as_of_date": as_of_date - pd.Timedelta(days=8),
+                "event_calendar_as_of_date": (
+                    as_of_date - pd.Timedelta(days=EVENT_CALENDAR_MAX_AGE_DAYS + 1)
+                ),
                 "next_earnings_date": as_of_date + pd.Timedelta(days=3),
             }
         }
@@ -587,6 +590,52 @@ class TestBulkDataPreparation:
         assert result.event_calendar_available is False
         assert "event_calendar" in result.fetch_errors
         mock_event_context.get_next_earnings_summary_with_status.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "age_days,available",
+        [
+            pytest.param(7, True, id="old-weekly-cadence-boundary-stays-available"),
+            pytest.param(
+                EVENT_CALENDAR_MAX_AGE_DAYS,
+                True,
+                id="widened-window-upper-bound-stays-available",
+            ),
+            pytest.param(
+                EVENT_CALENDAR_MAX_AGE_DAYS + 1,
+                False,
+                id="one-day-past-widened-window-goes-stale",
+            ),
+        ],
+    )
+    def test_persisted_calendar_freshness_cadence_boundaries(
+        self,
+        data_layer,
+        mock_price_cache,
+        mock_fundamentals_cache,
+        mock_event_context,
+        age_days,
+        available,
+    ):
+        """Weekly producers must never strand daily snapshots with stale evidence.
+
+        The window is widened beyond one cadence week so evidence ages out
+        only when a producer run was genuinely missed.
+        """
+        price_data = _make_price_df()
+        as_of_date = price_data.index[-1].date()
+        mock_price_cache.get_many.return_value = {"AAPL": price_data}
+        mock_fundamentals_cache.get_many.return_value = {
+            "AAPL": {
+                "event_calendar_as_of_date": as_of_date - pd.Timedelta(days=age_days),
+                "next_earnings_date": as_of_date + pd.Timedelta(days=3),
+            }
+        }
+
+        result = data_layer.prepare_data_bulk(
+            ["AAPL"], DataRequirements(needs_event_calendar=True)
+        )["AAPL"]
+
+        assert result.event_calendar_available is available
 
     def test_bulk_accepts_weekend_calendar_refresh_for_last_trading_day(
         self,

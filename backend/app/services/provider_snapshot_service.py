@@ -42,6 +42,11 @@ from .github_release_sync_service import GitHubReleaseSyncService
 from .market_calendar_service import MarketCalendarService
 from .security_master_service import security_master_resolver
 from .technical_calculator_service import TechnicalCalculatorService
+from .yahoo_earnings_calendar import (
+    is_event_calendar_observation_fresh,
+    normalize_yahoo_earnings_dates,
+    stamp_event_calendar_observation,
+)
 from .weekly_reference_github_sync import (
     WEEKLY_REFERENCE_LEGACY_MANIFEST_NAME,
     WEEKLY_REFERENCE_MANIFEST_SCHEMA_VERSION,
@@ -127,6 +132,16 @@ class ProviderSnapshotService:
         # hydration entirely and the Yahoo fallback would never run.
         "market_cap",
         "shares_outstanding",
+    )
+    # Calendar keys owned by the shared observation rule, not by value:
+    # a fresh ``event_calendar_as_of_date`` satisfies completeness even when
+    # ``next_earnings_date`` is null (a successful lookup with no upcoming
+    # earnings), while a stale or absent observation keeps the symbol
+    # eligible for Yahoo hydration. Age window must stay in lockstep with
+    # the persisted-evidence gate in DataPreparationLayer.
+    EVENT_CALENDAR_KEYS = (
+        "event_calendar_as_of_date",
+        "next_earnings_date",
     )
     WEEKLY_REFERENCE_BUNDLE_SCHEMA_VERSION = WEEKLY_REFERENCE_BUNDLE_SCHEMA_VERSION
     WEEKLY_REFERENCE_MANIFEST_SCHEMA_VERSION = WEEKLY_REFERENCE_MANIFEST_SCHEMA_VERSION
@@ -429,7 +444,20 @@ class ProviderSnapshotService:
         return value not in (None, "")
 
     def _needs_yahoo_hydration(self, payload: Dict[str, Any]) -> bool:
-        return any(not self._has_value(payload.get(key)) for key in self.YAHOO_ONLY_REQUIRED_KEYS)
+        if any(not self._has_value(payload.get(key)) for key in self.YAHOO_ONLY_REQUIRED_KEYS):
+            return True
+        return not self._calendar_observation_is_fresh(payload)
+
+    def _calendar_observation_is_fresh(self, payload: Dict[str, Any]) -> bool:
+        """Completeness is keyed on observation age, not the date value.
+
+        ``next_earnings_date`` may legitimately be null after a successful
+        lookup, so only a fresh ``event_calendar_as_of_date`` counts as
+        complete calendar evidence.
+        """
+        return is_event_calendar_observation_fresh(
+            payload.get("event_calendar_as_of_date"),
+        )
 
     def build_market_snapshot_row(
         self,
@@ -1179,6 +1207,23 @@ class ProviderSnapshotService:
         except Exception as exc:
             logger.warning("Failed Yahoo profile hydration for %s: %s", symbol, exc)
 
+        try:
+            calendar_dates, calendar_available = normalize_yahoo_earnings_dates(
+                ticker.earnings_dates,
+                symbol=symbol,
+                limit=4,
+            )
+            yahoo_payload.update(
+                stamp_event_calendar_observation(
+                    calendar_dates,
+                    calendar_available,
+                )
+            )
+            if "event_calendar_as_of_date" in yahoo_payload:
+                yahoo_payload["event_calendar_refreshed_at"] = now_iso
+        except Exception as exc:
+            logger.warning("Failed Yahoo calendar hydration for %s: %s", symbol, exc)
+
         return yahoo_payload
 
     def create_snapshot_run(
@@ -1391,6 +1436,7 @@ class ProviderSnapshotService:
                     snapshot_payload,
                     existing_data.get(row.symbol) or {},
                 )
+                yahoo_payload: Dict[str, Any] = {}
                 if allow_yahoo_hydration and self._needs_yahoo_hydration(merged_payload):
                     yahoo_payload = self._fetch_yahoo_only_fields(row.symbol)
                     if yahoo_payload:
@@ -1399,6 +1445,19 @@ class ProviderSnapshotService:
                             yahoo_payload,
                         )
                         yahoo_hydrated += 1
+                    # _merge_fundamentals prefers non-null primary values, so
+                    # a stale persisted observation would silently win over a
+                    # fresh Yahoo observation. Calendar evidence is age-owned:
+                    # reconcile it from the freshest producer payload before
+                    # the completeness check.
+                    if yahoo_payload.get("event_calendar_as_of_date") is not None:
+                        merged_payload.update(
+                            {
+                                key: yahoo_payload[key]
+                                for key in self.EVENT_CALENDAR_KEYS
+                                if key in yahoo_payload
+                            }
+                        )
                     if self._needs_yahoo_hydration(merged_payload):
                         missing_yahoo += 1
                 elif self._needs_yahoo_hydration(merged_payload):

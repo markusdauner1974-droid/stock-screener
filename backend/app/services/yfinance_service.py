@@ -14,6 +14,10 @@ import logging
 from threading import RLock
 
 from .growth_cadence_service import compute_cadence_aware_growth
+from .yahoo_earnings_calendar import (
+    normalize_yahoo_earnings_dates,
+    stamp_event_calendar_observation,
+)
 
 if TYPE_CHECKING:
     from app.services.eps_rating_service import EPSRatingService
@@ -250,14 +254,12 @@ class YFinanceService:
                 "first_trade_date_ms": info.get("firstTradeDateMilliseconds"),
             }
             if calendar_available:
-                result["event_calendar_as_of_date"] = calendar_as_of_date
-                result["next_earnings_date"] = next(
-                    (
-                        value
-                        for value in calendar_dates
-                        if value >= calendar_as_of_date
-                    ),
-                    None,
+                result.update(
+                    stamp_event_calendar_observation(
+                        calendar_dates,
+                        True,
+                        observed_at=calendar_as_of_date,
+                    )
                 )
 
             # Calculate EPS Rating components from income statements
@@ -354,21 +356,11 @@ class YFinanceService:
     ) -> tuple[List[date], bool]:
         """Normalize one ticker calendar lookup without another rate-limit wait."""
         try:
-            earnings_dates = ticker.earnings_dates
-            if earnings_dates is None or earnings_dates.empty:
-                return [], True
-
-            normalized = earnings_dates.reset_index()
-            result: List[date] = []
-            for row in normalized.head(limit).to_dict("records"):
-                raw_value = row.get("Earnings Date") or row.get("index") or row.get("Date")
-                if raw_value is None:
-                    continue
-                timestamp = pd.Timestamp(raw_value)
-                if pd.isna(timestamp):
-                    continue
-                result.append(timestamp.date())
-            return sorted({value for value in result}), True
+            return normalize_yahoo_earnings_dates(
+                ticker.earnings_dates,
+                symbol=symbol,
+                limit=limit,
+            )
         except Exception as exc:
             logger.error("Error fetching earnings dates for %s: %s", symbol, exc)
             return [], False
