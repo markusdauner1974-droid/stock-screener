@@ -126,6 +126,89 @@ def test_validation_rejects_reportable_reconciliation_failure():
     assert "reported_long_reconciliation_failed" in result.reason_codes
 
 
+def test_validation_tolerates_official_tff_reconciliation_differences():
+    week = make_valid_week(date(2026, 9, 15), slug="sp-500")
+    tolerated = replace(
+        week,
+        positions=tuple(
+            replace(
+                position,
+                long=position.long + 3,
+                short=position.short + 2,
+            )
+            if position.participant is Participant.DEALER_INTERMEDIARY
+            else replace(position, short=position.short - 1)
+            if position.participant is Participant.NONREPORTABLES
+            else position
+            for position in week.positions
+        ),
+    )
+
+    result = validate_cot_snapshot(
+        (tolerated,),
+        (definition_for(tolerated),),
+        ((tolerated.instrument_slug, tolerated.report_date),),
+        expected_counts(tolerated),
+    )
+
+    assert result.valid is True
+    assert result.reason_codes == ()
+    assert result.warning_codes == (
+        "reported_long_reconciliation_tolerated",
+        "reported_short_reconciliation_tolerated",
+        "nonreportable_short_reconciliation_tolerated",
+    )
+
+
+def test_validation_rejects_tff_reconciliation_difference_above_tolerance():
+    week = make_valid_week(date(2026, 9, 15), slug="sp-500")
+    broken = replace_position(
+        week,
+        Participant.LEVERAGED_FUNDS,
+        long_delta=4,
+    )
+
+    result = validate_cot_snapshot(
+        (broken,),
+        (definition_for(broken),),
+        ((broken.instrument_slug, broken.report_date),),
+        expected_counts(broken),
+    )
+
+    assert result.valid is False
+    assert "reported_long_reconciliation_failed" in result.reason_codes
+
+
+def test_validation_rejects_negative_nonreportable_balance_within_tolerance():
+    week = make_valid_week(date(2026, 9, 15), slug="sp-500")
+    broken = replace(
+        week,
+        reported_long_total=week.open_interest + 1,
+        positions=tuple(
+            replace(
+                position,
+                long=position.long
+                + (week.open_interest + 1 - week.reported_long_total),
+            )
+            if position.participant is Participant.DEALER_INTERMEDIARY
+            else replace(position, long=0)
+            if position.participant is Participant.NONREPORTABLES
+            else position
+            for position in week.positions
+        ),
+    )
+
+    result = validate_cot_snapshot(
+        (broken,),
+        (definition_for(broken),),
+        ((broken.instrument_slug, broken.report_date),),
+        expected_counts(broken),
+    )
+
+    assert result.valid is False
+    assert "nonreportable_long_reconciliation_failed" in result.reason_codes
+
+
 def test_validation_rejects_source_history_truncation():
     snapshot = (
         make_valid_week(date(2026, 9, 1)),
