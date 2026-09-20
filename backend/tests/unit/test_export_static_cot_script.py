@@ -1,21 +1,16 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import date
 from types import SimpleNamespace
 
+import pytest
 from app.scripts import export_static_cot
 
 
 def test_refreshes_and_exports_cot_in_one_independent_command(monkeypatch, tmp_path):
     calls: list[object] = []
     db = object()
-
-    class SessionContext:
-        def __enter__(self):
-            return db
-
-        def __exit__(self, *_args):
-            return False
 
     class RefreshUseCase:
         def execute(self, command):
@@ -35,7 +30,7 @@ def test_refreshes_and_exports_cot_in_one_independent_command(monkeypatch, tmp_p
             return {"publication_id": 42, "report_date": "2026-09-15"}
 
     monkeypatch.setattr(export_static_cot, "prepare_runtime", lambda: calls.append("prepare"))
-    monkeypatch.setattr(export_static_cot, "SessionLocal", SessionContext)
+    monkeypatch.setattr(export_static_cot, "SessionLocal", lambda: nullcontext(db))
     monkeypatch.setattr(
         export_static_cot,
         "get_refresh_cot_use_case",
@@ -56,3 +51,42 @@ def test_refreshes_and_exports_cot_in_one_independent_command(monkeypatch, tmp_p
     assert calls[2] == ("queries", "queries")
     assert calls[3][0:2] == ("export", output_dir)
     assert calls[3][2].endswith("Z")
+
+
+def test_failed_quality_refresh_reports_reasons_without_exporting(
+    monkeypatch, tmp_path
+):
+    db = object()
+
+    class RefreshUseCase:
+        def execute(self, _command):
+            return SimpleNamespace(
+                status="failed_quality",
+                run_id=42,
+                reason_codes=(
+                    "reported_long_reconciliation_failed",
+                    "reported_short_reconciliation_failed",
+                ),
+            )
+
+    monkeypatch.setattr(export_static_cot, "prepare_runtime", lambda: None)
+    monkeypatch.setattr(export_static_cot, "SessionLocal", lambda: nullcontext(db))
+    monkeypatch.setattr(
+        export_static_cot,
+        "get_refresh_cot_use_case",
+        lambda session: RefreshUseCase() if session is db else None,
+    )
+    monkeypatch.setattr(
+        export_static_cot,
+        "StaticCotExporter",
+        lambda _queries: pytest.fail("export must not run after a failed refresh"),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "failed_quality.*reported_long_reconciliation_failed.*"
+            "reported_short_reconciliation_failed"
+        ),
+    ):
+        export_static_cot.main(["--output-dir", str(tmp_path / "cot")])

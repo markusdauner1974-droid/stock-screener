@@ -16,12 +16,15 @@ from app.domain.cot.models import (
 from app.domain.cot.registry import dataset_for_family, participants_for
 
 MINIMUM_INITIAL_HISTORY_WEEKS = 156
+_TFF_REPORTED_TOTAL_TOLERANCE = 3
+_TFF_NONREPORTABLE_TOLERANCE = 1
 
 
 @dataclass(frozen=True)
 class CotValidationResult:
     valid: bool
     reason_codes: tuple[str, ...]
+    warning_codes: tuple[str, ...]
     instrument_count: int
     week_count: int
     latest_report_dates: Mapping[str, date]
@@ -37,6 +40,7 @@ class CotValidationResult:
         return {
             "valid": self.valid,
             "reason_codes": list(self.reason_codes),
+            "warning_codes": list(self.warning_codes),
             "instrument_count": self.instrument_count,
             "week_count": self.week_count,
             "latest_report_dates": {
@@ -57,10 +61,26 @@ def validate_cot_snapshot(
     definitions_by_slug = {definition.slug: definition for definition in definitions}
     persisted_keys = set(existing_keys)
     reasons: list[str] = []
+    warnings: list[str] = []
 
     def reject(reason: str) -> None:
         if reason not in reasons:
             reasons.append(reason)
+
+    def reconcile(
+        actual: int,
+        expected: int,
+        *,
+        tolerance: int,
+        code: str,
+    ) -> None:
+        if actual == expected:
+            return
+        tolerated = abs(actual - expected) <= tolerance
+        target = warnings if tolerated else reasons
+        result = f"{code}_{'tolerated' if tolerated else 'failed'}"
+        if result not in target:
+            target.append(result)
 
     if len(definitions_by_slug) != len(definitions):
         reject("duplicate_registry_instrument")
@@ -109,10 +129,19 @@ def validate_cot_snapshot(
         computed_reported_short = sum(
             position.short + position.spreading for position in reportable_positions
         )
-        if computed_reported_long != week.reported_long_total:
-            reject("reported_long_reconciliation_failed")
-        if computed_reported_short != week.reported_short_total:
-            reject("reported_short_reconciliation_failed")
+        is_tff = definition.report_family is ReportFamily.TFF_FUTURES_ONLY
+        reconcile(
+            computed_reported_long,
+            week.reported_long_total,
+            tolerance=_TFF_REPORTED_TOTAL_TOLERANCE if is_tff else 0,
+            code="reported_long_reconciliation",
+        )
+        reconcile(
+            computed_reported_short,
+            week.reported_short_total,
+            tolerance=_TFF_REPORTED_TOTAL_TOLERANCE if is_tff else 0,
+            code="reported_short_reconciliation",
+        )
 
         nonreportable = next(
             position
@@ -121,16 +150,24 @@ def validate_cot_snapshot(
         )
         expected_nonreportable_long = week.open_interest - week.reported_long_total
         expected_nonreportable_short = week.open_interest - week.reported_short_total
-        if (
-            expected_nonreportable_long < 0
-            or nonreportable.long != expected_nonreportable_long
-        ):
+        if expected_nonreportable_long < 0:
             reject("nonreportable_long_reconciliation_failed")
-        if (
-            expected_nonreportable_short < 0
-            or nonreportable.short != expected_nonreportable_short
-        ):
+        else:
+            reconcile(
+                nonreportable.long,
+                expected_nonreportable_long,
+                tolerance=_TFF_NONREPORTABLE_TOLERANCE if is_tff else 0,
+                code="nonreportable_long_reconciliation",
+            )
+        if expected_nonreportable_short < 0:
             reject("nonreportable_short_reconciliation_failed")
+        else:
+            reconcile(
+                nonreportable.short,
+                expected_nonreportable_short,
+                tolerance=_TFF_NONREPORTABLE_TOLERANCE if is_tff else 0,
+                code="nonreportable_short_reconciliation",
+            )
 
     if not persisted_keys.issubset(observed_keys):
         reject("source_history_truncated")
@@ -194,6 +231,7 @@ def validate_cot_snapshot(
     return CotValidationResult(
         valid=not reasons,
         reason_codes=tuple(reasons),
+        warning_codes=tuple(warnings),
         instrument_count=len(weeks_by_slug),
         week_count=len(snapshot),
         latest_report_dates=latest_report_dates,

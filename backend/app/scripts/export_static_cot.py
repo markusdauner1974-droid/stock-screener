@@ -27,6 +27,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         refresh = get_refresh_cot_use_case(db).execute(
             CotRefreshCommand(origin="static_build", force=False)
         )
+        if refresh.status == "failed_quality":
+            reasons = ", ".join(refresh.reason_codes) or "unknown"
+            raise RuntimeError(
+                "COT refresh failed: "
+                f"status={refresh.status}, run_id={refresh.run_id}, "
+                f"reason_codes={reasons}"
+            )
         index = StaticCotExporter(get_cot_queries(db)).export(
             args.output_dir,
             generated_at=generated_at,
