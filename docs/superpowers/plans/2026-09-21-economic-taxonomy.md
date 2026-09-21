@@ -12,7 +12,7 @@
 
 **ADR:** `docs/adr/0005-economic-taxonomy-snapshots-and-interpretations.md`
 
-**Status:** Aligned with the approved second contract revision and ready for implementation. Production cutover remains gated by Task 19.
+**Status:** Aligned with the approved design and round-three implementation-contract amendments; ready for implementation. Production cutover remains gated by Task 19.
 
 ## Global Constraints
 
@@ -21,20 +21,24 @@
 - `taxonomy_authority.processing_taxonomy_version_id` is not a reader pointer. Readers use only `serving_generation_id`.
 - A serving generation binds one sealed taxonomy, interpretation set, complete generation-input manifest, metrics revision, UI/API snapshot bundle, and reader-capability manifest.
 - Source-family, source-lineage, evidence-packet, processing-request, classification-attempt, and lens-eligibility identities are separate.
-- Evidence revision precedence uses a lineage-local monotonic ordinal, never job completion time.
-- Extraction and claim-review artifacts are reusable; each classification attempt records its actual input taxonomy and nullable output taxonomy.
+- Evidence revision ordinal is deterministic admission/audit order, not proof of source freshness. Effective precedence requires authoritative provider revision metadata, an explicit supersession/equivalence relation, or review; unresolved late captures cannot displace the accepted packet.
+- Successful extraction and claim-review results are reusable, but provider attempts are append-only. Retryable or uncertain failures never become permanent reusable-result cache hits; each permitted retry has a new attempt and budget record.
 - Successful empty classification is authoritative when selected; failed, partial, review-only, or superseded attempts never replace the last accepted attempt.
 - Similarity retrieves candidates but never authorizes equivalence.
 - Proposed-candidate relationship outcomes are directional: proposed `Copper` relative to existing `Copper Miners` is `broader`.
 - Migration disposition is one-per-legacy-identity, but destinations and claim allocations are zero-to-many.
 - Existing `SocialThemeAssociation` rows and their decisions are preserved. Global Social membership is a separate projection.
+- A global Social association has one stable identity per `(economic_theme_id, security_id)` and append-only numbered revisions; generations pin revisions, not a mutable pair row.
 - Every content, Social, development, structural, compatibility, and migration writer acquires the shared taxonomy fence and rechecks authority before commit.
 - The coordinator captures a committed cutoff under a short exclusive fence, prepares outside the lock, and publishes if the parent generation, semantic invalidation revision, and frozen manifest remain valid. Ordinary work committed after the cutoff waits for the next generation and does not invalidate the prepared one.
 - The final publisher performs no provider call, replay, outbox drain, or worker wait while holding the exclusive fence.
 - Logical outbox event identity excludes authority epoch and includes a monotonic per-lineage projection revision. Payloads replace one lineage's complete target contribution, targets reject older revisions, and mirror-origin events never recurse.
+- A staged compatibility event becomes durably deliverable from the successful publication event committed with its generation; post-commit queue notification is only an optimization, and abandoned-generation events are never eligible.
 - Evidence-channel eligibility does not itself create a technical, fundamental, or narrative metric observation.
 - `fundamental_attention` is an unsigned attention view; directional fundamental scoring is explicitly deferred.
 - Provisional-to-established requires the evidence thresholds plus cross-security breadth: two accepted securities or an authenticated reviewed breadth assertion.
+- `reactivated` behaves like `established` for the 90-day inactivity transition and may become dormant again while retaining reactivation history.
+- Observation-only classification against existing identities leaves `output_taxonomy_version_id` null and does not advance the processing head.
 - Semantic writes use an authenticated `AdminPrincipal`; automatic routine publication uses only `system:economic-taxonomy-refresh`.
 - After economic cutover, routine changes are automatically coalesced and published at most once per five-minute window; review-required structural changes remain held.
 - `security_id` means `stock_universe.id`; ADR-0003 remains unchanged for StockUniverse history.
@@ -50,6 +54,10 @@
 6. One post through legacy and Social with a later lens-only change: it retains one family and ordinary lineage, avoids a second extraction/provider charge, and counts as one deduplicated source family. Tasks 5 and 12 own this test.
 7. A prepared generation must still publish during continuous ordinary writes, while a stale parent or declared semantic invalidator must abort it. Tasks 3, 16, and 17 own this test.
 8. G1 must remain byte-for-byte reproducible after eligibility, Social decision, development, override, or mapping changes; only G2 may expose those revisions. Tasks 2, 3, 8, 12-14, and 16 own this test.
+9. A corrected-empty packet followed by first admission of an older or less-complete capture through another route must remain empty unless source precedence is proven; ambiguous precedence is held for review. Tasks 0, 5, 8, and 12 own this test.
+10. One transient provider failure followed by success must preserve two truthful provider attempts and one reusable successful artifact; an uncertain timeout must remain distinct from a known pre-dispatch failure. Tasks 0, 5-7, and 12 own this test.
+11. A crash after committing G2 publication but before notification must not strand G2 compatibility events or block G3; ordinary workers derive eligibility from publication history, while abandoned events remain invisible. Tasks 11, 16, and 17 own this test.
+12. Two Social membership revisions for the same theme/security must coexist, stay generation-pinned, and leave legacy rows unchanged. Tasks 0, 2, and 12 own this test.
 
 ## Delivery Slices
 
@@ -96,12 +104,12 @@
 ### Migrations
 
 - `backend/alembic/versions/20260921_0046_economic_taxonomy_core.py` — identity and sealed semantic snapshots.
-- `backend/alembic/versions/20260921_0047_economic_taxonomy_interpretations.py` — lineages, evidence packets, requests, extraction/review artifacts, attempts/events, assignments, selections/overrides, observations, signals, and embeddings.
+- `backend/alembic/versions/20260921_0047_economic_taxonomy_interpretations.py` — lineages, evidence packets and precedence references, requests, extraction/review artifacts, attempts/events, assignments, selections/overrides, observations, signals, and embeddings.
 - `backend/alembic/versions/20260921_0048_economic_taxonomy_publication.py` — authority, dirty/semantic revisions, complete manifests, sealed artifacts, generation events, and reader capabilities.
 - `backend/alembic/versions/20260921_0049_economic_taxonomy_work.py` — leased processing requests, candidates, proposals/decisions, and provider attempts.
 - `backend/alembic/versions/20260921_0050_economic_taxonomy_mappings.py` — dispositions, destinations, allocations, redirects, and operations.
-- `backend/alembic/versions/20260921_0051_economic_taxonomy_outbox.py` — ordered outbox, delivery attempts, and projection checkpoints.
-- `backend/alembic/versions/20260921_0052_economic_taxonomy_social.py` — global Social projection and legacy bridge.
+- `backend/alembic/versions/20260921_0051_economic_taxonomy_outbox.py` — staged ordered outbox, publication-history eligibility, delivery attempts, and projection checkpoints.
+- `backend/alembic/versions/20260921_0052_economic_taxonomy_social.py` — stable global Social association identity, numbered association/decision revisions, and legacy bridge.
 - `backend/alembic/versions/20260921_0053_economic_taxonomy_developments.py` — narrative development provenance and economic links.
 - `backend/alembic/versions/20260921_0054_economic_taxonomy_reader_snapshots.py` — generation-scoped API/UI snapshot pointers.
 
@@ -122,8 +130,8 @@
 ### Task 0: Freeze the cross-component contracts and counterexamples
 
 **Files:**
-- Verify/modify: `docs/superpowers/specs/2026-09-20-economic-taxonomy-design.md`
-- Verify/modify: `docs/adr/0005-economic-taxonomy-snapshots-and-interpretations.md`
+- Verify: `docs/superpowers/specs/2026-09-20-economic-taxonomy-design.md`
+- Verify: `docs/adr/0005-economic-taxonomy-snapshots-and-interpretations.md`
 - Create: `backend/app/domain/economic_taxonomy/__init__.py`
 - Create: `backend/app/domain/economic_taxonomy/contracts.py`
 - Create: `backend/app/domain/economic_taxonomy/policy.py`
@@ -132,7 +140,7 @@
 
 **Interfaces:**
 - Consumes: the approved design and existing authority names from the legacy Theme/Social domains.
-- Produces: `SourceLineageKey`, `ProcessingRequestKey`, `ExtractionArtifactKey`, `ClaimReviewArtifactKey`, `ClassificationAttemptKey`, `GenerationInputSelection`, `ProjectionKey`, `AdminPrincipal`, `MigrationDispositionResult`, `SocialDecisionResult`, `choose_interpretation()`, `relationship_from_proposed()`, `reconcile_social_decisions()`, `validate_split_allocations()`, and all shared enums.
+- Produces: `SourceLineageKey`, `ProcessingRequestKey`, `ProviderAttemptKey`, `ExtractionArtifactKey`, `ClaimReviewArtifactKey`, `ClassificationAttemptKey`, `EvidencePrecedenceDecision`, `SocialAssociationRevisionRef`, `GenerationInputSelection`, `ProjectionKey`, `AdminPrincipal`, `MigrationDispositionResult`, `SocialDecisionResult`, `choose_interpretation()`, `decide_evidence_precedence()`, `projection_is_deliverable()`, `relationship_from_proposed()`, `reconcile_social_decisions()`, `validate_split_allocations()`, and all shared enums.
 
 - [ ] **Step 1: Write failing pure contract tests for every blocking counterexample**
 
@@ -144,9 +152,9 @@ def test_h10_and_h11_are_distinct_attempts_but_reuse_review_artifact():
     assert h10.key != h11.key
     assert h10.review_artifact_id == h11.review_artifact_id
 
-def test_later_evidence_ordinal_wins_even_if_it_finishes_first():
-    correction = completed_attempt(ordinal=5, assignments=())
-    delayed_old = completed_attempt(ordinal=4, assignments=("ai-memory",))
+def test_later_effective_source_revision_wins_when_older_attempt_finishes_late():
+    correction = completed_attempt(provider_revision_order=5, ordinal=5, assignments=())
+    delayed_old = completed_attempt(provider_revision_order=4, ordinal=4, assignments=("ai-memory",))
     assert choose_interpretation(
         previous=None, candidates=(correction, delayed_old)
     ) == correction
@@ -167,14 +175,51 @@ def test_route_ids_do_not_change_ordinary_lineage():
         provider_post="42", route="social"
     )
 
+def test_late_archive_cannot_supersede_corrected_empty_without_source_precedence():
+    decision = decide_evidence_precedence(
+        accepted=packet(provider_revision="5", assignments=()),
+        candidate=packet(provider_revision=None, captured_from="late_archive", assignments=("memory",)),
+    )
+    assert decision == EvidencePrecedenceDecision.HOLD_REVIEW
+
+def test_less_complete_recapture_does_not_withdraw_prior_attachment_evidence():
+    decision = decide_evidence_precedence(
+        accepted=packet(provider_revision="5", attachment_hashes=("a1",)),
+        candidate=packet(provider_revision=None, attachment_hashes=()),
+    )
+    assert decision == EvidencePrecedenceDecision.HOLD_REVIEW
+
+def test_retryable_failure_is_attempt_history_not_reusable_artifact():
+    first = provider_attempt(
+        logical_request="request:p5:v1", operation="extract", number=1,
+        outcome="retryable_failure",
+    )
+    second = provider_attempt(
+        logical_request="request:p5:v1", operation="extract", number=2,
+        outcome="success",
+    )
+    assert first.key != second.key
+    assert first.result_artifact_id is None
+    assert second.result_artifact_id == "artifact-1"
+
+def test_social_pair_identity_allows_numbered_revision_history():
+    accepted = SocialAssociationRevisionRef(association_id="a1", revision_number=1)
+    rejected = SocialAssociationRevisionRef(association_id="a1", revision_number=2)
+    assert accepted != rejected
+
+def test_projection_delivery_is_derived_from_publication_history():
+    assert projection_is_deliverable(generation_event="published") is True
+    assert projection_is_deliverable(generation_event="abandoned") is False
+
 def test_generation_selection_pins_auxiliary_revisions():
     selection = GenerationInputSelection(
         lineage="post:42", selected_attempt_id="attempt-3", eligibility_revision=4,
-        interpretation_override_revision_id=None, social_decision_revision=5, development_revision=6,
-        mapping_revision=7, metrics_policy_revision=8,
-        compatibility_projection_revision=9,
+        evidence_precedence_revision=5, interpretation_override_revision_id=None,
+        social_decision_revision=6, development_revision=7,
+        mapping_revision=8, metrics_policy_revision=9,
+        compatibility_projection_revision=10,
     )
-    assert selection.social_decision_revision == 5
+    assert selection.evidence_precedence_revision == 5
 
 def test_split_requires_all_claims_to_be_allocated():
     result = validate_split_allocations(
@@ -236,26 +281,41 @@ class DevelopmentSupport(StrEnum):
     PRESENT = "present"
     ABSENT = "absent"
     UNRESOLVED = "unresolved"
+
+class EvidencePrecedenceDecision(StrEnum):
+    ADVANCE = "advance"
+    REUSE_EQUIVALENT = "reuse_equivalent"
+    IGNORE_SUPERSEDED = "ignore_superseded"
+    HOLD_REVIEW = "hold_review"
+
+class ProviderAttemptOutcome(StrEnum):
+    SUCCESS = "success"
+    RETRYABLE_FAILURE = "retryable_failure"
+    UNCERTAIN = "uncertain"
+    TERMINAL_FAILURE = "terminal_failure"
 ```
 
-Add attempt events `started|completed|failed|superseded_before_acceptance`, serving-generation events `prepared|published|superseded|abandoned`, and failure codes `invalid_schema`, `unsupported_composition`, `unknown_dimension`, `requires_naming_review`, `ambiguous_identity`, `stale_processing_head`, `stale_authority_epoch`, `stale_projection_revision`, `authorization_required`, `budget_exhausted`, `conflict_review_required`, `compatibility_pending`, `reader_not_ready`, `manifest_changed`, `publication_validation_failed`, `rollback_recovery_required`, `provider_retryable`, and `provider_terminal`.
+Add attempt events `started|completed|failed|superseded_before_acceptance`, serving-generation events `prepared|published|superseded|abandoned`, and failure codes `invalid_schema`, `unsupported_composition`, `unknown_dimension`, `requires_naming_review`, `ambiguous_identity`, `stale_processing_head`, `stale_authority_epoch`, `stale_projection_revision`, `authorization_required`, `budget_exhausted`, `conflict_review_required`, `compatibility_pending`, `reader_not_ready`, `manifest_changed`, `publication_validation_failed`, `rollback_recovery_required`, `provider_retryable`, `provider_outcome_uncertain`, and `provider_terminal`.
 
 Define keys exactly as follows:
 
 - ordinary `SourceLineageKey` derives from the canonical source family; a scope suffix requires an explicit non-overlapping admission-policy key;
 - `ProcessingRequestKey` uses lineage, evidence packet, and desired policy bundle, but not a taxonomy head;
+- `ProviderAttemptKey` uses stable logical request, operation kind, and monotonically assigned attempt number; each actual dispatch gets a distinct key;
 - `ExtractionArtifactKey` is `(evidence_packet_id, extraction_policy_version)`;
 - `ClaimReviewArtifactKey` is `(extraction_artifact_id, claim_review_policy_version, facet_catalog_semantic_hash)`;
 - `ClassificationAttemptKey` adds actual input taxonomy plus resolver, naming, and derivation policy versions;
 - `ProjectionKey` is `(source_lineage, projection_revision, projection_kind, projection_version, target)` and excludes authority epoch.
 
+Define `EvidencePrecedenceDecision` as `advance|reuse_equivalent|ignore_superseded|hold_review`. The admission ordinal orders stored packets but cannot return `advance` on its own. Define `SocialAssociationRevisionRef` as stable association ID plus revision number. Define projection deliverability from append-only successful publication history, never from an optional notification/release flag.
+
 - [ ] **Step 4: Implement the pure selection, direction, mapping, and decision rules**
 
-`choose_interpretation()` accepts only completed candidates, orders evidence by lineage-local ordinal, and permits an authenticated immutable override; completed-empty is valid. `validate_split_allocations()` requires every current claim to have exactly one destination or reviewed exclusion. `reconcile_social_decisions()` returns conflict for mixed administrator accept/reject decisions. `relationship_from_proposed()` returns `broader` for proposed Copper against Copper Miners.
+`decide_evidence_precedence()` uses authoritative provider revision identity/order when supplied, explicit correction/supersession links, and known-equivalent packet identity. It never invents provider ordering; a late archive, partial recapture, or conflicting packet without adequate precedence metadata returns `hold_review`. `choose_interpretation()` considers only completed attempts whose packets are effective under that decision, then uses lineage ordinal for deterministic ordering within established precedence and permits an authenticated immutable override; completed-empty is valid. `validate_split_allocations()` requires every current claim to have exactly one destination or reviewed exclusion. `reconcile_social_decisions()` returns conflict for mixed administrator accept/reject decisions. `relationship_from_proposed()` returns `broader` for proposed Copper against Copper Miners.
 
 - [ ] **Step 5: Freeze the schema/state-machine decisions before migration code**
 
-Document in `contracts.py` and the ADR: immutable payload versus append-only event tables; the full `GenerationInputManifest` entry schema; bounded-cutoff and semantic-invalidation rules; complete-lineage projection replacement; proposal/override revision streams; retrieval embeddings as non-authoritative derived cache; authenticated administrator/service principals; and the exact V1 lifecycle, attention, percentile, and technical-weighting rules. Verify the approved design and ADR agree; amend them in this task if implementation-level naming exposes a conflict, and do not create a second taxonomy ADR.
+Document in `contracts.py`: immutable payload versus append-only event tables; stable Social association identity versus numbered revisions; effective evidence precedence versus admission order; reusable terminal results versus retryable/uncertain provider attempts; publication-history-derived compatibility eligibility; the full `GenerationInputManifest` entry schema; bounded-cutoff and semantic-invalidation rules; complete-lineage projection replacement; proposal/override revision streams; retrieval embeddings as non-authoritative derived cache; authenticated administrator/service principals; dimension-definition inclusion in the facet-catalog hash; and the exact V1 lifecycle, attention, percentile, and technical-weighting rules. Verify the approved design and existing ADR remain consistent with those contracts; these amendments do not change either architecture document and must not create a duplicate ADR.
 
 - [ ] **Step 6: Run the contract tests and fixture-schema check**
 
@@ -266,7 +326,7 @@ Expected: PASS with all named counterexamples collected.
 - [ ] **Step 7: Commit the contract kernel**
 
 ```bash
-git add docs/superpowers/specs/2026-09-20-economic-taxonomy-design.md docs/adr/0005-economic-taxonomy-snapshots-and-interpretations.md backend/app/domain/economic_taxonomy backend/tests/unit/test_economic_taxonomy_contracts.py backend/tests/fixtures/economic_taxonomy/contract_cases.json
+git add backend/app/domain/economic_taxonomy backend/tests/unit/test_economic_taxonomy_contracts.py backend/tests/fixtures/economic_taxonomy/contract_cases.json
 git commit -m "test: freeze economic taxonomy contracts"
 ```
 
@@ -282,7 +342,7 @@ git commit -m "test: freeze economic taxonomy contracts"
 
 **Interfaces:**
 - Consumes: Task 0 enums.
-- Produces: `TaxonomyVersion`, `EconomicTheme`, version-owned semantic rows, `EconomicTaxonomyRepository.clone_draft()`, `seal_draft()`, `load_snapshot()`, `semantic_hash()`, and `artifact_integrity_hash()`.
+- Produces: `TaxonomyVersion`, `EconomicTheme`, version-owned semantic rows, `EconomicTaxonomyRepository.clone_draft()`, `seal_draft()`, `load_snapshot()`, `semantic_hash()`, `facet_catalog_semantic_hash()`, and `artifact_integrity_hash()`.
 
 - [ ] **Step 1: Write failing snapshot, graph, and hash tests**
 
@@ -300,6 +360,13 @@ def test_specialization_cycle_is_rejected(repo, draft_with_a_to_b):
     repo.add_specialization(draft_with_a_to_b.id, narrower="b", broader="a")
     with pytest.raises(GraphInvariantViolation, match="specialization_cycle"):
         repo.seal_draft(draft_with_a_to_b.id)
+
+def test_dimension_definition_alone_changes_catalog_and_snapshot_hash(repo, dimension_draft):
+    before_catalog = repo.facet_catalog_semantic_hash(dimension_draft.id)
+    before_snapshot = repo.semantic_hash(dimension_draft.id)
+    repo.update_dimension(dimension_draft.id, "industry", definition="Revised semantic boundary")
+    assert repo.facet_catalog_semantic_hash(dimension_draft.id) != before_catalog
+    assert repo.semantic_hash(dimension_draft.id) != before_snapshot
 ```
 
 - [ ] **Step 2: Run the tests and confirm missing models**
@@ -321,7 +388,10 @@ SEMANTIC_HASH_FIELDS = {
         "lifecycle", "lifecycle_policy_version",
     ),
     "alias": ("theme_semantic_key", "normalized_alias"),
-    "dimension": ("key", "value_type", "cardinality", "scope", "normalization_policy"),
+    "dimension": (
+        "key", "definition", "value_type", "cardinality", "scope",
+        "normalization_policy", "inclusion_semantics", "exclusion_semantics",
+    ),
     "facet": ("theme_semantic_key", "dimension_key", "normalized_value"),
     "relationship": (
         "source_semantic_key", "target_semantic_key", "kind", "direction", "discriminator",
@@ -331,7 +401,7 @@ SEMANTIC_HASH_FIELDS = {
 }
 ```
 
-Sort normalized payloads and exclude database IDs, version IDs, timestamps, actors, and comments. The separate artifact-integrity hash covers the complete immutable serialization, including stable logical row IDs and provenance, but excludes mutable operational state. Seal while holding a version-scoped lock; validate no cycle and no active `distinct` contradiction with equivalence, redirects, or specialization. Task 9 extends the mapping portion once those rows exist.
+Sort normalized payloads and exclude database IDs, version IDs, timestamps, actors, and comments. `facet_catalog_semantic_hash()` covers each dimension's key, semantic definition, value type, cardinality, scope, normalization policy, and separately stored inclusion/exclusion semantics; changing any one field changes the hash. The separate artifact-integrity hash covers the complete immutable serialization, including stable logical row IDs and provenance, but excludes mutable operational state. Seal while holding a version-scoped lock; validate no cycle and no active `distinct` contradiction with equivalence, redirects, or specialization. Task 9 extends the mapping portion once those rows exist.
 
 - [ ] **Step 5: Run SQLite and PostgreSQL sealing races**
 
@@ -359,7 +429,7 @@ git commit -m "feat: add sealed economic taxonomy snapshots"
 
 **Interfaces:**
 - Consumes: Task 0 contracts and Task 1 theme/version IDs.
-- Produces: `SourceFamily`, `SourceLineage`, `EvidencePacket`, `LensEligibilityRevision`, `ProcessingRequest`, `ExtractionArtifact`, `ClaimReviewArtifact`, `ClassificationAttempt`, `ClassificationAttemptEvent`, `ClaimAssignment`, `InterpretationOverrideRevision`, sealable `InterpretationSet`, `InterpretationSelection`, `ThemeObservation`, `ThemeConstituentExposure`, `ThemeSignalObservation`, `EconomicThemeEmbedding`, sealable `MetricsRevision`, and `ThemeMetric`.
+- Produces: `SourceFamily`, `SourceLineage`, `EvidencePacket`, immutable evidence supersession/equivalence references, `LensEligibilityRevision`, `ProcessingRequest`, `ExtractionArtifact`, `ClaimReviewArtifact`, `ClassificationAttempt`, `ClassificationAttemptEvent`, `ClaimAssignment`, `InterpretationOverrideRevision`, `SocialAssociationRevisionRef`, sealable `InterpretationSet`, `InterpretationSelection`, `ThemeObservation`, `ThemeConstituentExposure`, `ThemeSignalObservation`, `EconomicThemeEmbedding`, sealable `MetricsRevision`, and `ThemeMetric`.
 
 - [ ] **Step 1: Write failing uniqueness and immutability tests**
 
@@ -382,6 +452,12 @@ def test_evidence_ordinal_is_monotonic_inside_lineage(db, lineage):
 def test_observation_identity_comes_from_assignment(db, assignment):
     db.add(ThemeObservation(claim_assignment_id=assignment.id, observation_kind="primary"))
     db.flush()
+
+def test_generation_input_uses_social_association_revision_not_pair_only():
+    first = SocialAssociationRevisionRef(association_id="association-1", revision_number=1)
+    second = SocialAssociationRevisionRef(association_id="association-1", revision_number=2)
+    assert first.association_id == second.association_id
+    assert first != second
 ```
 
 - [ ] **Step 2: Run tests and confirm models are absent**
@@ -392,7 +468,7 @@ Expected: FAIL on import.
 
 - [ ] **Step 3: Implement immutable source, request, artifact, and attempt tables**
 
-`SourceLineage` is route-independent and belongs to a canonical family. `EvidencePacket` stores lineage-local `evidence_revision_ordinal`, packet hash, original/translated text references, admitted attachment/text hashes, grounding snapshot, preparation version, source metadata, and observed/available times. Assign the ordinal while locking the lineage; never derive precedence from completion timestamps.
+`SourceLineage` is route-independent and belongs to a canonical family. `EvidencePacket` stores lineage-local `evidence_revision_ordinal`, full provenance-sensitive packet hash, route-independent `evidence_content_fingerprint`, authoritative provider revision identity/order when supplied, capture provenance and capture time, explicit corrected/supersedes references, original/translated text references, admitted attachment/text hashes, grounding snapshot, preparation version, source metadata, and observed/available times. Assign the ordinal while locking the lineage. The ordinal is immutable admission order only; it does not itself assert that a late capture is a fresher source revision. Supersession, equivalence, and review-hold records are append-only.
 
 `ProcessingRequest` is stable across stale-head retries and unique by lineage, packet, and desired policy bundle. `ExtractionArtifact` and `ClaimReviewArtifact` use the exact Task 0 keys, including explicit claim-review policy and facet-catalog semantic hash. `ClassificationAttempt` adds the actual input taxonomy and resolver/naming/derivation policies, records nullable output taxonomy, and has append-only status events. Completed attempt payloads and `ClaimAssignment` rows are immutable; a completed attempt may have zero assignments.
 
@@ -400,13 +476,13 @@ Expected: FAIL on import.
 
 `InterpretationSelection` is unique by `(interpretation_set_id, source_lineage_id)` and references a completed attempt plus the pinned evidence ordinal and optional immutable override revision. Observation, constituent, and signal uniqueness includes immutable assignment identity; no rule overwrites a prior policy's row. Interpretation sets and metrics revisions build unsealed, then permit one audited `unsealed -> sealed` transition that writes `sealed_at`, semantic/content hash, and artifact-integrity hash; triggers reject payload mutation after sealing.
 
-Persist append-only eligibility, constituent-decision, proposal-decision, Social projection/decision, development-selection, and interpretation-override revision identities even when later migrations add their payload columns. Add `EconomicThemeEmbedding` keyed by theme UUID, taxonomy semantic hash, source text hash, embedding model, and model version; it is a derived cache excluded from semantic authority and snapshot hash.
+Persist append-only eligibility, constituent-decision, proposal-decision, development-selection, and interpretation-override revision identities even when later migrations add their payload columns. Define Social generation references as `(association_id, revision_number)` and decision revision ID—not as theme/security pair alone—so Task 12 can materialize multiple immutable revisions for one stable pair. Add `EconomicThemeEmbedding` keyed by theme UUID, taxonomy semantic hash, source text hash, embedding model, and model version; it is a derived cache excluded from semantic authority and snapshot hash.
 
 - [ ] **Step 5: Run migration and model tests**
 
 Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_interpretation_models.py tests/integration/test_economic_taxonomy_interpretation_migration.py tests/unit/test_main_migrations.py -q`
 
-Expected: PASS and Alembic head `20260921_0047`; H10/H11 attempts coexist, old payloads reject mutation, and evidence ordinal allocation is concurrency-safe.
+Expected: PASS and Alembic head `20260921_0047`; H10/H11 attempts coexist, old payloads reject mutation, evidence ordinal allocation is concurrency-safe, and Social selections carry stable association ID plus immutable revision number.
 
 - [ ] **Step 6: Commit interpretation persistence**
 
@@ -467,7 +543,7 @@ Expected: FAIL on import.
 
 Authority contains mode, processing version/revision, serving generation, epoch, write-fence state, semantic-invalidation revision, cutover catch-up cursor, and rollback state. A serving generation is immutable payload only: sealed taxonomy, interpretation set, metrics revision, generation-input manifest, reader snapshot bundle, capability manifest, semantic hash, and artifact-integrity hash. Status lives in append-only `ServingGenerationEvent(prepared|published|superseded|abandoned)`; the authority pointer alone identifies the active generation.
 
-`GenerationInputManifest` stores sorted typed selections for lineage/evidence packet, accepted attempt/override, lens eligibility, constituent decisions, Social association/decision projection, development observation/selection, mapping/redirect snapshot, metrics policy, and compatibility projection/checkpoint. Its cutoff is a committed revision tuple set, not a maximum allocated ID. Create sealable `ReaderSnapshotBundle` identity here; Task 14 fills its generation-scoped payload. Add manifest foreign keys to interpretation sets, metrics revisions, and snapshot bundles; all must reference the same sealed manifest before preparation.
+`GenerationInputManifest` stores sorted typed selections for lineage/evidence packet, evidence precedence/supersession revision, accepted attempt/override, lens eligibility, constituent decisions, Social association/decision projection, development observation/selection, mapping/redirect snapshot, metrics policy, and compatibility projection/checkpoint. Its cutoff is a committed revision tuple set, not a maximum allocated ID. Create sealable `ReaderSnapshotBundle` identity here; Task 14 fills its generation-scoped payload. Add manifest foreign keys to interpretation sets, metrics revisions, and snapshot bundles; all must reference the same sealed manifest before preparation.
 
 - [ ] **Step 4: Implement the lock-order helper**
 
@@ -574,7 +650,7 @@ git commit -m "feat: govern economic taxonomy facets and names"
 
 **Interfaces:**
 - Consumes: source content, attachments, translation, grounding, provenance routes, Task 3 fence.
-- Produces: `admit_content()`, `admit_social_work()`, `revise_lens_eligibility()`, `enqueue_request()`, `claim_next()`, `retry()`, and `complete()`.
+- Produces: `admit_content()`, `admit_social_work()`, `decide_evidence_precedence()`, `revise_lens_eligibility()`, `enqueue_request()`, `claim_next()`, `begin_provider_attempt()`, `retry()`, and `complete()`.
 
 - [ ] **Step 1: Write failing source-family, packet, and eligibility tests**
 
@@ -584,6 +660,8 @@ def test_same_provider_post_from_legacy_and_social_shares_family(admission, post
     social = admission.admit_social_work(post.as_saved_work())
     assert legacy.source_family_id == social.source_family_id
     assert legacy.source_lineage_id == social.source_lineage_id
+    assert social.precedence_state == "equivalent"
+    assert social.effective_packet_id == legacy.effective_packet_id
 
 def test_adding_lens_does_not_create_packet_or_work(admission, admitted):
     revised = admission.revise_lens_eligibility(admitted.packet_id, add="fundamental")
@@ -594,6 +672,28 @@ def test_delayed_packet_keeps_admission_order(admission, lineage):
     old = admission.admit(lineage, payload="old")
     correction = admission.admit(lineage, payload="corrected")
     assert old.evidence_revision_ordinal < correction.evidence_revision_ordinal
+
+def test_first_admitted_late_archive_does_not_restore_corrected_empty(admission, corrected_empty):
+    late = admission.admit_social_work(
+        archived_capture(corrected_empty.source, provider_revision=None, old_payload="Memory demand")
+    )
+    assert late.evidence_revision_ordinal > corrected_empty.evidence_revision_ordinal
+    assert late.precedence_state == "hold_review"
+    assert admission.effective_packet(corrected_empty.lineage_id).id == corrected_empty.id
+
+def test_less_complete_recapture_does_not_withdraw_attachment_evidence(admission, packet_with_attachment):
+    recapture = admission.admit_content(
+        partial_capture(packet_with_attachment.source, attachments=())
+    )
+    assert recapture.precedence_state == "hold_review"
+    assert admission.effective_packet(packet_with_attachment.lineage_id).id == packet_with_attachment.id
+
+def test_retryable_provider_work_gets_new_attempt_identity(work_repo, request):
+    first = work_repo.begin_provider_attempt(request.id, operation="extract")
+    work_repo.fail_attempt(first.id, outcome="retryable_failure")
+    second = work_repo.begin_provider_attempt(request.id, operation="extract")
+    assert second.logical_request_id == first.logical_request_id
+    assert second.attempt_number == first.attempt_number + 1
 ```
 
 - [ ] **Step 2: Run tests and confirm services are absent**
@@ -604,11 +704,13 @@ Expected: FAIL on import.
 
 - [ ] **Step 3: Implement family resolution and packet hashing**
 
-Packet hashes include selected original/translated text, translation version, admitted attachments and extracted-text hashes, grounding snapshot, preparation version, and source metadata. They exclude lens eligibility. Canonical provider post ID wins over route-specific database IDs for family and ordinary-lineage keys. A scope suffix is accepted only with a governed admission-policy key proving a non-overlapping evidence scope. Assign a monotonic packet ordinal while locking the lineage. The same lineage may contain multiple packets when admitted text, translation, attachments, grounding, or preparation changes; every old packet remains reproducible.
+The full packet hash includes selected original/translated text, translation version, admitted attachments and extracted-text hashes, grounding snapshot, preparation version, source metadata, authoritative provider revision identity/order when available, capture provenance, and explicit correction/supersession references. A separate route-independent evidence-content fingerprint covers the admitted evidence bytes/attachment/grounding/preparation inputs but excludes route and capture metadata; it identifies equivalent evidence received through legacy and Social without discarding either route's provenance. Both exclude lens eligibility. Canonical provider post ID wins over route-specific database IDs for family and ordinary-lineage keys. A scope suffix is accepted only with a governed admission-policy key proving a non-overlapping evidence scope. Assign a monotonic packet ordinal while locking the lineage, but use Task 0's precedence policy to mark the packet `effective`, `equivalent`, `superseded`, or `hold_review`.
+
+Reuse a known-equivalent packet instead of creating another effective revision. Advance only when provider metadata or an explicit correction establishes precedence. Never invent provider-specific ordering. A first-time late archive, a partial recapture missing previously admitted attachments/context, or any unresolved conflict remains reproducible but held for review and cannot displace the effective packet.
 
 - [ ] **Step 4: Implement work identity and leases**
 
-Work identity is the stable `ProcessingRequestKey` from Task 0, not an assumed taxonomy-head attempt key. Persist durable candidate and dimension/naming proposal rows beside work. Claim with `FOR UPDATE SKIP LOCKED`, UUID lease token, five-minute expiry, observed processing-head revision, and observed authority epoch. Completion occurs inside `producer_write()`. A stale head records/supersedes the exact old-head attempt and schedules resolution against the new head; a stale authority rejects the commit. Neither case mutates an existing attempt or assignment.
+Work identity is the stable `ProcessingRequestKey` from Task 0, not an assumed taxonomy-head attempt key. Persist durable candidate and dimension/naming proposal rows beside work. Persist each provider call as a separate append-only `ProviderAttempt(logical_request_id, operation_kind, attempt_number)`; the unique key permits several attempts for one request but makes retry of the same dispatch idempotent. Claim with `FOR UPDATE SKIP LOCKED`, UUID lease token, five-minute expiry, observed processing-head revision, and observed authority epoch. Completion occurs inside `producer_write()`. A stale head records/supersedes the exact old-head attempt and schedules resolution against the new head; a stale authority rejects the commit. Neither case mutates an existing provider attempt, classification attempt, or assignment.
 
 - [ ] **Step 5: Run reproducibility and concurrency tests**
 
@@ -616,7 +718,7 @@ Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_source_admission.
 
 Run: `cd backend && STOCKSCANNER_TEST_ALLOW_POSTGRES=1 DATABASE_URL=postgresql://ci:ci@localhost:5432/ci ./venv/bin/pytest tests/integration/test_economic_taxonomy_work_postgres.py -q`
 
-Expected: one claimant per request, route aliases share one ordinary lineage, old packets retain frozen translation/grounding, ordinals are monotonic, and lens-only changes do not enqueue extraction.
+Expected: one claimant per request, route aliases share one ordinary lineage, old packets retain frozen translation/grounding, ordinals are monotonic but do not override unresolved freshness, late/partial captures stay held, provider retry attempt numbers are concurrency-safe, and lens-only changes do not enqueue extraction.
 
 - [ ] **Step 6: Commit admission and work**
 
@@ -634,23 +736,52 @@ git commit -m "feat: admit frozen taxonomy evidence"
 - Test: `backend/tests/unit/test_economic_exposure_claim_review.py`
 
 **Interfaces:**
-- Consumes: frozen `EvidencePacket`, approved facet-catalog semantic hash, explicit extraction/claim-review policies, optional provider reservation.
-- Produces: `get_or_create_extraction_artifact(packet, policy) -> ExtractionArtifact` and `get_or_create_claim_review_artifact(extraction, policy, facet_hash) -> ClaimReviewArtifact`.
+- Consumes: frozen effective `EvidencePacket`, Task 5 provider-attempt repository, approved facet-catalog semantic hash, explicit extraction/claim-review policies, optional provider reservation.
+- Produces: `extract(request: ProcessingRequest) -> ExtractionArtifact`, which reuses `get_extraction_artifact(packet, policy)` when present, and `review(extraction: ExtractionArtifact, policy, facet_hash) -> ClaimReviewArtifact`.
 
 - [ ] **Step 1: Write failing composition, empty, unknown-dimension, and support-state tests**
 
 ```python
 def test_ai_and_memory_cooccurrence_without_link_is_not_ai_memory(extractor):
-    result = extractor.extract(packet("AI spending rose. Memory pricing rose independently."))
+    result = extractor.extract(request_for(packet("AI spending rose. Memory pricing rose independently.")))
     assert "AI Memory" not in result.accepted_names
 
 def test_unknown_dimension_is_review_required_not_parse_failure(extractor):
-    result = extractor.extract(packet_with_dimension("deployment_model", "edge"))
+    result = extractor.extract(request_for(packet_with_dimension("deployment_model", "edge")))
     assert result.status == "review_required"
     assert result.candidates[0].raw_facets["deployment_model"] == "edge"
 
 def test_successful_empty_is_distinct_from_failure(extractor):
-    assert extractor.extract(packet("No investable exposure.")).status == "successful_empty"
+    assert extractor.extract(request_for(packet("No investable exposure."))).status == "successful_empty"
+
+def test_retryable_failure_then_success_preserves_attempts_and_reuses_success(
+    extractor, provider, budget, request
+):
+    provider.side_effects = [
+        RetryableProviderError(provider_request_id="r1", actual_cost=ZERO),
+        accepted_payload("Memory"),
+    ]
+    with pytest.raises(RetryableProviderFailure):
+        extractor.extract(request)
+    succeeded = extractor.extract(request)
+    repeated = extractor.extract(request)
+    assert [attempt.outcome for attempt in request.provider_attempts] == ["retryable_failure", "success"]
+    assert succeeded.artifact_id == repeated.artifact_id
+    assert provider.call_count == 2
+    assert budget.reservation_count == 2
+
+def test_uncertain_timeout_is_not_released_like_known_pre_dispatch_failure(extractor):
+    uncertain = extractor.record_timeout(provider_dispatch_confirmed=True)
+    pre_dispatch = extractor.record_failure(provider_dispatch_confirmed=False)
+    assert uncertain.attempt.state == "uncertain"
+    assert uncertain.retry_allowed is False
+    assert pre_dispatch.attempt.state == "released"
+    assert pre_dispatch.retry_allowed is True
+
+def test_dimension_definition_change_invalidates_claim_review_artifact(reviewer, extraction):
+    first = reviewer.review(extraction, facet_hash="catalog-definition-v1")
+    second = reviewer.review(extraction, facet_hash="catalog-definition-v2")
+    assert first.id != second.id
 ```
 
 - [ ] **Step 2: Run tests and confirm services are absent**
@@ -661,17 +792,19 @@ Expected: FAIL on import.
 
 - [ ] **Step 3: Implement schema-constrained extraction as a reusable immutable artifact**
 
-Key raw extraction by `(evidence_packet_id, extraction_policy_version)` and return `accepted_candidates|successful_empty|review_required|failed`. Preserve raw candidates for unknown dimensions and naming review. Separate exposure support from development support and require quoted evidence spans for compound relationships. Identical retries return the same artifact and provider-attempt record.
+Key reusable raw extraction artifacts by `(evidence_packet_id, extraction_policy_version)` and create them only for `accepted_candidates|successful_empty|review_required` terminal result payloads. Preserve raw candidates for unknown dimensions and naming review. Separate exposure support from development support and require quoted evidence spans for compound relationships. After an artifact exists, identical requests return it without another provider call.
+
+A provider failure is not an extraction artifact. Known pre-dispatch failure releases its reservation and leaves retryable work. A dispatched transient failure remains an immutable failed attempt; retry creates a new Task 5 provider-attempt identity and budget reservation under the same logical request. An ambiguous timeout remains `uncertain` until provider/budget policy resolves whether another call is permitted; request idempotency does not claim exactly-once billing. A later success creates/selects the reusable artifact without overwriting prior attempt history.
 
 - [ ] **Step 4: Implement claim review as a separately reusable artifact outside persistence locks**
 
-Key review by extraction artifact, explicit claim-review policy version, and facet-catalog semantic hash. Reject technical setups as themes, enforce narrowest supported specificity, validate security grounding, and retain provider response hashes. Provider quota/timeout is retryable; schema/composition failure is durable review or terminal according to Task 0 codes. A taxonomy-head-only change must not repeat either provider artifact.
+Key review by extraction artifact, explicit claim-review policy version, and the facet-catalog semantic hash from Task 1. A dimension-definition-only change therefore creates a distinct review artifact even when extraction is reusable. Reject technical setups as themes, enforce narrowest supported specificity, validate security grounding, and retain provider response hashes. Deterministic held/review-required results remain held until an explicitly eligible input, policy, facet-catalog, or reviewed decision changes. Provider quota/timeout follows the attempt policy above; schema/composition failure is durable review or terminal according to Task 0 codes. A taxonomy-head-only change must not repeat either provider result artifact.
 
 - [ ] **Step 5: Run tests and commit**
 
 Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_exposure_extraction.py tests/unit/test_economic_exposure_claim_review.py -q`
 
-Expected: PASS.
+Expected: PASS; transient failure then success records two truthful attempts and one successful artifact, a repeated success performs no provider call, uncertain timeout differs from pre-dispatch failure, and a definition-only catalog change invalidates claim-review reuse.
 
 ```bash
 git add backend/app/services/economic_exposure_extraction.py backend/app/services/economic_exposure_claim_review.py backend/tests/unit/test_economic_exposure_extraction.py backend/tests/unit/test_economic_exposure_claim_review.py
@@ -713,6 +846,21 @@ def test_stale_h10_attempt_is_retained_and_h11_reuses_artifacts(processor, reque
     assert result.attempts == (("H10", "superseded_before_acceptance"), ("H11", "completed"))
     assert len({attempt.extraction_artifact_id for attempt in result.rows}) == 1
     assert len({attempt.claim_review_artifact_id for attempt in result.rows}) == 1
+
+def test_retryable_or_uncertain_provider_attempt_cannot_be_classified(processor, request):
+    request.extraction_artifact = None
+    request.provider_attempt_state = "uncertain"
+    with pytest.raises(ProviderResultUnavailable):
+        processor.process(request.id, request.lease_token)
+
+def test_concurrent_observations_of_existing_identity_do_not_advance_head(
+    processor, established_theme, concurrent_requests
+):
+    head = processor.processing_head()
+    results = processor.process_concurrently(concurrent_requests.for_theme(established_theme.id))
+    assert processor.processing_head() == head
+    assert all(result.output_taxonomy_version_id is None for result in results)
+    assert len({result.assignment_id for result in results}) == len(results)
 ```
 
 - [ ] **Step 2: Run tests and confirm services are absent**
@@ -727,7 +875,9 @@ Retrieval returns at most 20 candidates from aliases, normalized facets, lexical
 
 - [ ] **Step 4: Implement one exact attempt and processing-head transaction per request/head pair**
 
-Perform provider calls before the write transaction and reuse Task 6 artifacts. Construct the attempt key from the reviewed artifact and the actual resolver input taxonomy. Under `producer_write()`, lock authority/request, verify processing revision, clone one draft, apply every eligible provisional identity/edge from the attempt, and attribute automated provisional creation only to `system:economic-taxonomy-refresh`. Seal once, persist the completed attempt, nullable output taxonomy, events, and all assignments, append one dirty source revision, update processing head/revision, and complete the request. An empty attempt advances no taxonomy snapshot. No live compatibility event becomes deliverable until a generation selects the attempt.
+Require a selected successful/review-eligible Task 6 artifact; retryable, failed, or uncertain provider-attempt rows alone cannot produce a classification attempt. Construct the attempt key from the reviewed artifact and the actual resolver input taxonomy, then compute the semantic patch before cloning.
+
+Under `producer_write()`, lock authority/request and verify the processing revision. If the patch adds or changes a supported identity, alias, facet, relationship, lifecycle value, mapping, or other semantic content, clone one draft, apply every eligible change, attribute automated provisional creation only to `system:economic-taxonomy-refresh`, seal once, set `output_taxonomy_version_id`, and advance the processing head/revision. If the result is successful-empty or non-empty but only assigns observations to existing identities with no semantic delta, persist the completed attempt and assignments with null `output_taxonomy_version_id` and leave the head unchanged. Actual supported alias/facet changes legitimately create a version. Append one dirty source revision and complete the request in either case. No live compatibility event becomes deliverable until a generation selects the attempt.
 
 - [ ] **Step 5: Implement stale-head re-resolution**
 
@@ -739,7 +889,7 @@ Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_theme_candidate_r
 
 Run: `cd backend && STOCKSCANNER_TEST_ALLOW_POSTGRES=1 DATABASE_URL=postgresql://ci:ci@localhost:5432/ci ./venv/bin/pytest tests/integration/test_economic_processing_publication_postgres.py -q`
 
-Expected: several themes from one source create one sealed processing version; H10/H11 history is truthful; retry creates no duplicate identity, attempt, assignment, provider artifact, or logical mirror intent.
+Expected: several semantic changes from one source create one sealed processing version; H10/H11 history is truthful; failed/uncertain provider attempts cannot classify; retry creates no duplicate identity, attempt, assignment, provider artifact, or logical mirror intent; concurrent observation-only requests accumulate assignments while the processing taxonomy head remains constant.
 
 - [ ] **Step 7: Commit processing-head orchestration**
 
@@ -757,7 +907,7 @@ git commit -m "feat: resolve themes into the processing taxonomy"
 - Test: `backend/tests/unit/test_economic_theme_observations.py`
 
 **Interfaces:**
-- Consumes: `GenerationInputManifest`, completed attempts, evidence ordinals, assignments, pinned eligibility/decision/development/mapping revisions, and authenticated override revisions.
+- Consumes: `GenerationInputManifest`, completed attempts, effective-evidence precedence records and admission ordinals, assignments, pinned eligibility/decision/development/mapping revisions, and authenticated override revisions.
 - Produces: `build_interpretation_set()`, `materialize_assignment_facts()`, and generation-scoped observation/constituent/signal queries.
 
 - [ ] **Step 1: Write failing correction and historical-read tests**
@@ -773,9 +923,9 @@ def test_failed_attempt_cannot_replace_selected_attempt(builder, accepted, faile
     with pytest.raises(InvalidInterpretation, match="attempt_not_completed"):
         builder.build(manifest_selecting(failed))
 
-def test_delayed_ordinal_four_cannot_replace_selected_ordinal_five(builder):
-    current = completed_attempt(ordinal=5, assignments=())
-    delayed = completed_attempt(ordinal=4, assignments=("memory",))
+def test_delayed_effective_revision_four_cannot_replace_revision_five(builder):
+    current = completed_attempt(provider_revision_order=5, ordinal=5, assignments=())
+    delayed = completed_attempt(provider_revision_order=4, ordinal=4, assignments=("memory",))
     assert builder.choose_default((current, delayed)) == current
 
 def test_old_generation_pins_old_auxiliary_revisions(builder, generation_one):
@@ -786,6 +936,19 @@ def test_route_alias_correction_to_empty_retracts_one_shared_lineage(builder, ro
     corrected = builder.build(manifest_selecting(routed_post.social_empty_attempt))
     assert builder.current_observations(corrected.id, route="legacy") == []
     assert builder.current_observations(corrected.id, route="social") == []
+
+def test_late_archived_payload_cannot_replace_corrected_empty(builder, corrected_empty, late_archive):
+    assert late_archive.ordinal > corrected_empty.ordinal
+    assert late_archive.precedence_state == "hold_review"
+    selected = builder.choose_default((corrected_empty.attempt, late_archive.attempt))
+    assert selected == corrected_empty.attempt
+
+def test_partial_recapture_does_not_withdraw_attachment_backed_interpretation(
+    builder, attachment_packet, partial_recapture
+):
+    selected = builder.choose_default((attachment_packet.attempt, partial_recapture.attempt))
+    assert partial_recapture.precedence_state == "hold_review"
+    assert selected == attachment_packet.attempt
 ```
 
 - [ ] **Step 2: Run tests and confirm services are absent**
@@ -796,7 +959,7 @@ Expected: FAIL on import.
 
 - [ ] **Step 3: Implement immutable selection and fact materialization**
 
-Select zero or one completed attempt per admitted source lineage from the manifest. The default policy chooses the highest admissible evidence revision ordinal and eligible completed policy attempt; a generation-pinned authenticated override may choose another completed attempt. Failed, partial, review-only, and superseded attempts are ineligible. Seal the set after validating that every selection and auxiliary revision appears in the same manifest. Materialize primary observations, one-hop derived observations sharing root/source family, constituent exposures, and structured signals from assignments. Current queries always join the requested serving generation, never a free-standing interpretation-set ID or mutable latest decision.
+Select zero or one completed attempt per admitted source lineage from the manifest. First restrict candidates to the effective evidence chain established by authoritative provider revision metadata, explicit supersession/equivalence, or reviewed precedence. Packets in `hold_review` never displace the last accepted attempt merely because they have a higher admission ordinal. Within an established precedence chain, choose the highest effective ordinal and eligible completed policy attempt; a generation-pinned authenticated override may choose another completed attempt. Failed, partial, review-only, held, and superseded attempts are ineligible. Seal the set after validating that every selection, precedence record, and auxiliary revision appears in the same manifest. Materialize primary observations, one-hop derived observations sharing root/source family, constituent exposures, and structured signals from assignments. Current queries always join the requested serving generation, never a free-standing interpretation-set ID or mutable latest decision.
 
 - [ ] **Step 4: Pin source-family deduplication and signal persistence**
 
@@ -806,7 +969,7 @@ One source family counts once per theme/channel/UTC day even when admitted throu
 
 Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_interpretations.py tests/unit/test_economic_theme_observations.py -q`
 
-Expected: PASS for old/new reproducibility including pinned auxiliary revisions, successful empty correction, failed reprocessing, delayed older completion, authenticated overrides, and source-family deduplication.
+Expected: PASS for old/new reproducibility including pinned auxiliary revisions, successful empty correction, failed reprocessing, delayed older completion, late archives and partial recaptures held from supersession, authenticated overrides, and source-family deduplication.
 
 ```bash
 git add backend/app/services/economic_taxonomy_interpretations.py backend/app/services/economic_theme_observation_service.py backend/tests/unit/test_economic_taxonomy_interpretations.py backend/tests/unit/test_economic_theme_observations.py
@@ -902,6 +1065,16 @@ def test_fundamental_attention_is_unsigned(metrics):
 
 def test_one_theme_cohort_gets_percentile_100(metrics):
     assert metrics.rank([available_theme()])[0].percentile == 100
+
+def test_reactivated_theme_can_become_dormant_again(lifecycle):
+    established = lifecycle.evaluate(provisional_theme_with_breadth(), as_of=DAY_30)
+    dormant = lifecycle.evaluate(established, as_of=DAY_121)
+    reactivated = lifecycle.evaluate(dormant_with_two_new_families(), as_of=DAY_130)
+    dormant_again = lifecycle.evaluate(reactivated, as_of=DAY_221)
+    assert [established.state, dormant.state, reactivated.state, dormant_again.state] == [
+        "established", "dormant", "reactivated", "dormant",
+    ]
+    assert dormant_again.reactivated_at == reactivated.reactivated_at
 ```
 
 - [ ] **Step 2: Run tests and confirm services are absent**
@@ -918,13 +1091,13 @@ Rank non-empty cohorts with `100 * (average_rank - 1) / (n - 1)`, average ranks 
 
 - [ ] **Step 4: Implement lifecycle as processing proposals**
 
-Apply the exact policy-versioned thresholds: provisional to established needs three direct primary roots, two source families, and two dates in 30 days plus either two accepted constituent securities or an authenticated reviewed multi-security breadth assertion; established to dormant needs no direct primary root for 90 days; dormant to reactivated needs two direct roots from two families in 14 days; retirement is reviewed only. Under `producer_write()`, create a sealed processing snapshot through Task 9 operation machinery and append a lifecycle dirty-revision row; do not update serving pointers. Treat the 90-day and two-family choices as deliberate V1 policy, not placeholders.
+Apply the exact policy-versioned thresholds: provisional to established needs three direct primary roots, two source families, and two dates in 30 days plus either two accepted constituent securities or an authenticated reviewed multi-security breadth assertion; established to dormant needs no direct primary root for 90 days; dormant to reactivated needs two direct roots from two families in 14 days; retirement is reviewed only. Treat `reactivated` as established for inactivity evaluation: after 90 days without a direct primary root it returns to `dormant`, while append-only lifecycle events preserve the reactivation timestamp/history. It does not need a synthetic `reactivated -> established` transition. Under `producer_write()`, create a sealed processing snapshot through Task 9 operation machinery and append a lifecycle dirty-revision row; do not update serving pointers. Treat the 90-day and two-family choices as deliberate V1 policy, not placeholders.
 
 - [ ] **Step 5: Run tests and commit**
 
 Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_theme_lifecycle.py tests/unit/test_economic_theme_metrics.py -q`
 
-Expected: PASS with deterministic as-of results and policy/version provenance.
+Expected: PASS with deterministic as-of results, policy/version provenance, and an established → dormant → reactivated → dormant cycle.
 
 ```bash
 git add backend/app/services/economic_theme_lifecycle_service.py backend/app/services/economic_theme_metrics_service.py backend/tests/unit/test_economic_theme_lifecycle.py backend/tests/unit/test_economic_theme_metrics.py
@@ -945,14 +1118,14 @@ git commit -m "feat: calculate economic taxonomy lifecycle and metrics"
 
 **Interfaces:**
 - Consumes: Task 3 fence, selected generation inputs, projection key, legacy discovery writes.
-- Produces: `stage_projection()`, `release_generation_projections()`, `claim_deliveries()`, `apply_delivery()`, and per-lineage `ProjectionCheckpoint`.
+- Produces: `stage_projection()`, `claim_deliveries_from_published_generations()`, optional `notify_delivery_workers()`, `apply_delivery()`, and per-lineage `ProjectionCheckpoint`.
 
 - [ ] **Step 1: Write failing epoch-retry, ordering, recursion, and writer-race tests**
 
 ```python
 def test_retry_after_epoch_change_reuses_logical_event(outbox):
-    first = outbox.emit(source="post:1", revision=2, epoch=10)
-    retry = outbox.emit(source="post:1", revision=2, epoch=11)
+    first = outbox.stage_projection(source_lineage="post:1", projection_revision=2, epoch=10)
+    retry = outbox.stage_projection(source_lineage="post:1", projection_revision=2, epoch=11)
     assert retry.id == first.id
 
 def test_older_delivery_cannot_restore_state(target):
@@ -965,6 +1138,17 @@ def test_empty_replacement_retracts_only_its_lineage(target):
     target.apply(lineage="b", revision=1, payload={"themes": ["memory"]})
     target.apply(lineage="a", revision=2, payload={"themes": []})
     assert target.supporting_lineages("memory") == {"b"}
+
+def test_delivery_eligibility_comes_from_publication_history(outbox):
+    published = outbox.stage_projection(generation="g2", source_lineage="a", projection_revision=2)
+    abandoned = outbox.stage_projection(
+        generation="g-abandoned", source_lineage="b", projection_revision=1
+    )
+    append_generation_event("g2", "published")
+    append_generation_event("g2", "superseded")
+    append_generation_event("g-abandoned", "abandoned")
+    assert outbox.claimable_ids() == {published.id}
+    assert abandoned.id not in outbox.claimable_ids()
 ```
 
 - [ ] **Step 2: Run tests and confirm outbox service is absent**
@@ -979,7 +1163,9 @@ Unique logical key is `(source_lineage, projection_revision, projection_kind, pr
 
 - [ ] **Step 4: Stage candidate-generation payloads and gate live delivery**
 
-Shadow mode writes comparison payloads only to shadow projection storage. Generation preparation stages complete candidate payloads durably; unselected attempts never change the live legacy representation. Candidate events become deliverable only after that generation is accepted. A mode-changing cutover requires acknowledgement through the prior accepted generation plus staged candidate payloads. Routine economic publication may deliver the new generation asynchronously and marks rollback temporarily unavailable until required acknowledgements arrive.
+Shadow mode writes comparison payloads only to shadow projection storage. Generation preparation stages complete candidate payloads durably and binds each event to its generation; unselected attempts never change the live legacy representation. `claim_deliveries_from_published_generations()` derives eligibility by joining staged events to that generation's append-only successful `published` event, not a mutable `released` flag or only the current authority pointer. A later `superseded` event does not hide undelivered work; projection checkpoints make obsolete deliveries safe no-ops. Events whose generation has only `prepared` or `abandoned` history are never claimable. Post-commit queue notification is a wake-up optimization only, so worker polling recovers a publisher crash.
+
+A mode-changing cutover requires acknowledgement through the prior accepted generation plus staged candidate payloads. Routine economic publication may deliver the new generation asynchronously and marks rollback temporarily unavailable until required acknowledgements arrive. Publication never waits for delivery.
 
 - [ ] **Step 5: Route legacy producers through the shared fence**
 
@@ -989,7 +1175,7 @@ Provider work remains outside transactions. Every legacy theme mutation starts w
 
 Run: `cd backend && STOCKSCANNER_TEST_ALLOW_POSTGRES=1 DATABASE_URL=postgresql://ci:ci@localhost:5432/ci ./venv/bin/pytest tests/integration/test_economic_taxonomy_outbox_postgres.py -q`
 
-Expected: out-of-order delivery is harmless, corrected-to-empty or same-byte reclassification replaces only that lineage, unselected results never affect live legacy, recursive emission is absent, and an old-mode writer cannot commit after epoch switch.
+Expected: out-of-order delivery is harmless, corrected-to-empty or same-byte reclassification replaces only that lineage, unselected/abandoned results never affect live legacy, published events remain discoverable after supersession without a release flag, recursive emission is absent, and an old-mode writer cannot commit after epoch switch.
 
 - [ ] **Step 7: Commit fenced compatibility delivery**
 
@@ -1012,7 +1198,7 @@ git commit -m "feat: fence and order taxonomy compatibility writes"
 
 **Interfaces:**
 - Consumes: existing Social work/association/decision rows, Task 5 admission, Task 11 outbox, Social budget reservation API.
-- Produces: append-only `EconomicSocialAssociationRevision`, `EconomicSocialDecisionRevision`, `EconomicSocialAssociationSource`, live-admission/reconciliation service, generation-pinnable projection revisions, and pending legacy mirror state.
+- Produces: stable `EconomicSocialAssociation`, append-only `EconomicSocialAssociationRevision`, `EconomicSocialDecisionRevision`, `EconomicSocialAssociationSource`, live-admission/reconciliation service, generation-pinnable projection revisions, and pending legacy mirror state.
 
 - [ ] **Step 1: Write failing consolidation, conflict, admission, and budget tests**
 
@@ -1036,6 +1222,52 @@ def test_lens_only_change_reuses_existing_artifacts_and_budget(adapter, saved_wo
     second = adapter.add_eligibility(first.packet_id, "fundamental")
     assert second.extraction_artifact_id == first.extraction_artifact_id
     assert budget.additional_reservations == 0
+
+def test_same_pair_keeps_accepted_and_rejected_revisions_for_historical_generations(
+    adapter, legacy_rows
+):
+    before = snapshot_legacy_rows(legacy_rows)
+    association = adapter.get_or_create_association(theme_id="memory", security_id=42)
+    accepted = adapter.revise(association.id, state="accepted", idempotency_key="decision-1")
+    g1 = generation_selecting(association.id, accepted.revision_number)
+    rejected = adapter.revise(association.id, state="rejected", idempotency_key="decision-2")
+    retry = adapter.revise(association.id, state="rejected", idempotency_key="decision-2")
+    g2 = generation_selecting(association.id, rejected.revision_number)
+    assert [accepted.revision_number, rejected.revision_number] == [1, 2]
+    assert retry.id == rejected.id
+    assert adapter.membership(g1).state == "accepted"
+    assert adapter.membership(g2).state == "rejected"
+    assert adapter.membership(g2).live is False
+    assert snapshot_legacy_rows(legacy_rows) == before
+
+def test_late_social_archive_cannot_restore_corrected_empty(adapter, corrected_empty_post):
+    late = adapter.process(archived_saved_work(corrected_empty_post, provider_revision=None))
+    assert late.precedence_state == "hold_review"
+    assert adapter.current_assignments(corrected_empty_post.lineage_id) == ()
+
+def test_social_retry_uses_two_budget_attempts_then_reuses_success(
+    adapter, provider, budget, saved_work
+):
+    provider.side_effects = [
+        RetryableProviderError(provider_request_id="r1", actual_cost=ZERO),
+        accepted_payload("Memory"),
+    ]
+    with pytest.raises(RetryableProviderFailure):
+        adapter.process(saved_work)
+    success = adapter.process(saved_work)
+    repeated = adapter.process(saved_work)
+    assert budget.attempt_states == ["reconciled", "reconciled"]
+    assert len(set(budget.attempt_ids)) == 2
+    assert success.extraction_artifact_id == repeated.extraction_artifact_id
+    assert provider.call_count == 2
+
+def test_unknown_outcome_timeout_remains_uncertain_until_retry_policy_allows(
+    adapter, budget, saved_work
+):
+    result = adapter.record_timeout(saved_work, provider_dispatch_confirmed=True)
+    assert result.attempt.state == "uncertain"
+    assert budget.reservation_is_open(result.attempt.id) is True
+    assert adapter.retry_now(result.logical_request_id).status == "provider_outcome_uncertain"
 ```
 
 - [ ] **Step 2: Run tests and confirm global projection is absent**
@@ -1046,15 +1278,15 @@ Expected: FAIL on global projection import.
 
 - [ ] **Step 3: Implement separate global association and many-to-many bridge**
 
-Do not add economic uniqueness to `SocialThemeAssociation`. Global association revisions are unique by economic theme and `stock_universe.id`; bridge every contributing legacy association/evidence work row. Preserve legacy decision rows. Matching decisions consolidate; a rejection prevents accepted membership; mixed administrator accept/reject becomes `conflict_review_required` and remains out of accepted membership. Never resolve conflict by processing order.
+Do not add economic uniqueness to `SocialThemeAssociation`. Create stable `EconomicSocialAssociation` identity with `UNIQUE(economic_theme_id, security_id)`, where `security_id` is `stock_universe.id`. Store history in `EconomicSocialAssociationRevision` with `UNIQUE(association_id, revision_number)` and idempotent decision keys; never put pair-only uniqueness on the revision table. `EconomicSocialDecisionRevision`, bridges, generation manifests, and reader projections reference the intended immutable association revision. Bridge every contributing legacy association/evidence work row and preserve legacy decision rows. Matching decisions consolidate; a rejection prevents accepted membership; mixed administrator accept/reject becomes `conflict_review_required` and remains out of accepted membership. Never resolve conflict by processing order.
 
 - [ ] **Step 4: Implement live admission and compatibility mirroring**
 
-Only published, succeeded, policy-admitted saved work contributes narrative evidence. Proposed, rejected, unpublished, and exploratory work stays review-only. Constituent decisions remain separate from evidence admission. New global membership begins `pending_legacy_mirror`; an ordered event creates/reuses the legacy compatibility cluster and association without requiring an existing non-null legacy association, then acknowledgement permits live acceptance while rollback compatibility is required. Each generation pins the exact association and decision projection revisions, so later administrator action cannot alter an old generation.
+Only published, succeeded, policy-admitted saved work with effective Task 5 evidence precedence contributes narrative evidence. Proposed, rejected, unpublished, exploratory, late-archive `hold_review`, and partial-recapture `hold_review` work stays review-only. A later Social admission ordinal alone cannot revive obsolete claims. Constituent decisions remain separate from evidence admission. New global membership begins `pending_legacy_mirror`; an ordered event creates/reuses the legacy compatibility cluster and association without requiring an existing non-null legacy association, then acknowledgement permits live acceptance while rollback compatibility is required. Each generation pins the exact association revision, decision revision, and projection revision, so later administrator action cannot alter an old generation.
 
 - [ ] **Step 5: Reserve/reconcile every additional provider call outside projection locks**
 
-Use stable Social LLM attempt keys containing evidence packet and operation kind. Reserve before the call, reconcile success/failure afterward, and only then enter the short fenced projection transaction.
+Use the existing `SocialLLMAttempt` as Social's concrete provider-attempt and budget record rather than creating a parallel attempt authority. Extend it with stable logical operation key, operation kind, and attempt number as needed; each actual provider dispatch gets a distinct idempotency key. Reserve before each call, mark dispatched, and reconcile known success/failure afterward; only then enter the short fenced projection transaction. Known pre-dispatch failure releases the reservation. Transient failure preserves its attempt and schedules retry with a new attempt key. Timeout with unknown provider outcome remains `uncertain` and retains conservative budget treatment until the existing Social budget policy permits reconciliation or another call. Reusing a successful artifact consumes no new budget. Do not infer exactly-once provider billing from request idempotency.
 
 - [ ] **Step 6: Run unit and PostgreSQL Social tests**
 
@@ -1062,7 +1294,7 @@ Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_social_a
 
 Run: `cd backend && STOCKSCANNER_TEST_ALLOW_POSTGRES=1 DATABASE_URL=postgresql://ci:ci@localhost:5432/ci ./venv/bin/pytest tests/integration/test_economic_taxonomy_social_postgres.py tests/integration/test_social_theme_projection.py -q`
 
-Expected: historical rows/decisions remain unchanged; identical decisions consolidate; conflicts and unpublished work remain non-live.
+Expected: historical legacy rows/decisions remain unchanged; stable pair identity accepts multiple immutable revisions; G1/G2 retain their selected accepted/rejected states; identical revision retries are idempotent; conflicts, unpublished work, and stale/partial captures remain non-live; retryable calls have truthful per-call reservations while uncertain outcomes stay conservatively blocked.
 
 - [ ] **Step 7: Commit Social integration**
 
@@ -1167,7 +1399,7 @@ Expected: FAIL on import or 404.
 
 - [ ] **Step 3: Implement generation-scoped schemas and read endpoints**
 
-Return generation, taxonomy version, interpretation set, generation-input manifest hash, metrics revision, availability states, direct/derived counts, signals, constituents, developments, relationships, mappings, and reconciliation state. Include the pinned eligibility, constituent-decision, Social association/decision, development, override, mapping/redirect, metrics-policy, and compatibility revisions used by the payload. Default reads resolve one serving generation at request start; explicit historical reads require a generation ID. An interpretation-set ID alone is insufficient for product reads.
+Return generation, taxonomy version, interpretation set, generation-input manifest hash, metrics revision, availability states, direct/derived counts, signals, constituents, developments, relationships, mappings, and reconciliation state. Include the pinned evidence-precedence, eligibility, constituent-decision, Social association/decision, development, override, mapping/redirect, metrics-policy, and compatibility revisions used by the payload. Default reads resolve one serving generation at request start; explicit historical reads require a generation ID. An interpretation-set ID alone is insufficient for product reads.
 
 - [ ] **Step 4: Build immutable snapshot bundles without switching pointers**
 
@@ -1223,7 +1455,7 @@ Seal immutable run inputs, source hashes, taxonomy/policy hashes, and migration 
 
 - [ ] **Step 4: Implement exact manifest replay and benchmark fixtures**
 
-Replay sorted committed revision-log tuples, not sequence maxima. Every fixture declares required and forbidden identities, relationships, assignments, interpretation selections, and retractions; any mismatch makes the script exit nonzero. Include pseudo-theme rejection, tanker segmentation, AI/Memory co-occurrence, AI Memory/HBM specificity, AI Security mechanism contrast, Copper direction, Refining split, Social consolidation/conflict, same-source reclassification, successful empty correction, and duplicate-route deduplication.
+Replay sorted committed revision-log tuples, not sequence maxima. Every fixture declares required and forbidden identities, relationships, assignments, interpretation selections, and retractions; any mismatch makes the script exit nonzero. Include pseudo-theme rejection, tanker segmentation, AI/Memory co-occurrence, AI Memory/HBM specificity, AI Security mechanism contrast, Copper direction, Refining split, Social consolidation/conflict, same-source reclassification, successful empty correction, first-admitted late archive after corrected-empty, less-complete recapture after attachment-backed evidence, and duplicate-route deduplication.
 
 - [ ] **Step 5: Run tests and commit**
 
@@ -1269,6 +1501,28 @@ def test_structural_invalidator_aborts_without_switch(coordinator):
     with pytest.raises(ManifestChanged):
         coordinator.publish_generation(prepared.id)
     assert coordinator.authority().serving_generation_id != prepared.id
+
+def test_crash_after_publication_commit_cannot_strand_compatibility_events(
+    coordinator, delivery_worker, fault
+):
+    prepared = coordinator.prepare_generation(coordinator.capture_cutoff())
+    fault.raise_after("publication_commit_before_notification")
+    with pytest.raises(InjectedCrash):
+        coordinator.publish_generation(prepared.id)
+    delivery_worker.run_without_publish_notification()
+    delivery_worker.run_without_publish_notification()
+    assert coordinator.generation(prepared.id).has_event("published")
+    assert coordinator.compatibility_checkpoint(prepared.id).acknowledged is True
+    assert coordinator.compatibility_checkpoint(prepared.id).applied_effect_count == 1
+    next_generation = coordinator.prepare_generation(coordinator.capture_cutoff())
+    coordinator.publish_generation(next_generation.id)
+    assert coordinator.authority().serving_generation_id == next_generation.id
+
+def test_abandoned_generation_events_are_never_delivered(coordinator, delivery_worker):
+    prepared = coordinator.prepare_generation(coordinator.capture_cutoff())
+    coordinator.abandon(prepared.id, reason="stale_parent")
+    delivery_worker.run()
+    assert coordinator.compatibility_checkpoint(prepared.id).delivery_count == 0
 ```
 
 - [ ] **Step 2: Run tests and confirm coordinator is absent**
@@ -1287,7 +1541,9 @@ From frozen C, build and seal the interpretation set, metrics revision, UI/API s
 
 - [ ] **Step 5: Implement the short final compare-and-set barrier**
 
-Under `exclusive_publication()`, lock authority and verify manifest integrity, artifact hashes, expected parent generation, captured semantic-invalidation revision, prior-generation compatibility acknowledgements, staged candidate payloads, reader capability, and snapshot hashes. Do not require equality with ordinary revisions committed after C. If the parent or a declared structural invalidator changed, append `abandoned`, release, and prepare again outside the transaction. Otherwise switch serving generation and reader pointers, optionally mode, increment epoch, record catch-up cursor C, append `published` and prior-generation `superseded`, and commit. Then release the candidate generation's compatibility events.
+Under `exclusive_publication()`, lock authority and verify manifest integrity, artifact hashes, expected parent generation, captured semantic-invalidation revision, prior-generation compatibility acknowledgements, staged candidate payloads, reader capability, and snapshot hashes. Do not require equality with ordinary revisions committed after C. If the parent or a declared structural invalidator changed, append `abandoned`, release, and prepare again outside the transaction. Otherwise switch serving generation and reader pointers, optionally mode, increment epoch, record catch-up cursor C, and append `published` plus prior-generation `superseded` in the same commit.
+
+That committed `published` event is the durable compatibility-delivery eligibility record used by Task 11 workers. Do not depend on a later release-state write. A post-commit queue notification may wake workers but carries no authority; a crash before notification is recovered by ordinary polling. Publication never waits for delivery. Superseded published generations remain eligible until their staged events are delivered or made harmless by newer projection checkpoints; abandoned generations never become eligible.
 
 - [ ] **Step 6: Implement catch-up and rollback recovery outside the barrier**
 
@@ -1297,7 +1553,7 @@ Replay and drain outside publication. Routine economic publication may expose it
 
 Run: `cd backend && STOCKSCANNER_TEST_ALLOW_POSTGRES=1 DATABASE_URL=postgresql://ci:ci@localhost:5432/ci ./venv/bin/pytest tests/integration/test_economic_taxonomy_publication_postgres.py -q`
 
-Expected: existing source change, late lower-ID commit, blocked outbox, evidence after snapshot construction, continuous arrivals, stale parent, structural invalidation, old writer race, injected crash, and unhealthy rollback all end with one coherent old or new generation and no deadlock. Ordinary post-C revisions publish later without invalidating the candidate.
+Expected: existing source change, late lower-ID commit, blocked outbox, evidence after snapshot construction, continuous arrivals, stale parent, structural invalidation, old writer race, crash after publication commit/before notification, abandoned candidate, injected pre-commit crash, and unhealthy rollback all end with one coherent old or new generation and no deadlock. Published events are eventually checkpointed exactly once in effect, abandoned events are never delivered, and ordinary post-C revisions publish later without invalidating the candidate.
 
 - [ ] **Step 8: Run unit tests and commit**
 
@@ -1339,6 +1595,15 @@ def test_economic_refresh_coalesces_to_one_generation_per_five_minutes(refresh, 
 
 def test_review_required_structural_change_is_held(refresh, merge_proposal):
     assert refresh.run()["held_revision_ids"] == [merge_proposal.revision_id]
+
+def test_delivery_poll_recovers_missing_publish_notification(delivery, published_without_notification):
+    result = delivery.run()
+    assert result.claimed_generation_ids == [published_without_notification.id]
+    assert result.checkpointed == 1
+
+def test_delivery_poll_ignores_abandoned_generation(delivery, abandoned_generation):
+    result = delivery.run()
+    assert abandoned_generation.id not in result.claimed_generation_ids
 ```
 
 - [ ] **Step 2: Run tests and confirm tasks are absent**
@@ -1349,7 +1614,7 @@ Expected: FAIL on task import/registration.
 
 - [ ] **Step 3: Implement bounded entry points**
 
-Provider work uses no publication lock; persistence uses the shared fence. Discovery/processing runs in shadow, dual, and economic modes. Delivery retries ordered logical events. Lifecycle and metrics target explicit processing/interpretation inputs. Classify dirty log entries as routine or review-required. Routine includes evidence, eligible provisional discovery, accepted decision revisions, lifecycle evaluation, and metrics refresh. Hold unknown dimensions, ambiguous identities, merges, splits, retirements, defining-mechanism changes, and all other review-required structural proposals.
+Provider work uses no publication lock; persistence uses the shared fence. Discovery/processing runs in shadow, dual, and economic modes. Delivery polls staged events joined to append-only successful publication history, including superseded published generations, and retries ordered logical events; it does not require a publisher notification or current-generation match and ignores prepared/abandoned generations. Lifecycle and metrics target explicit processing/interpretation inputs. Classify dirty log entries as routine or review-required. Routine includes evidence, eligible provisional discovery, accepted decision revisions, lifecycle evaluation, and metrics refresh. Hold unknown dimensions, ambiguous identities, merges, splits, retirements, defining-mechanism changes, and all other review-required structural proposals.
 
 - [ ] **Step 4: Implement automatic routine economic-mode publication**
 
@@ -1363,7 +1628,7 @@ Use the existing `celery` queue: discovery every five minutes, delivery every mi
 
 Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_tasks.py tests/unit/test_economic_taxonomy_celery_contract.py tests/unit/test_theme_discovery_ingestion_tasks.py tests/unit/test_social_worker_compose_contract.py -q`
 
-Expected: PASS.
+Expected: PASS, including recovery of published compatibility work after a missed notification and exclusion of abandoned-generation events.
 
 ```bash
 git add backend/app/tasks/economic_taxonomy_tasks.py backend/app/celery_app.py backend/tests/unit/test_economic_taxonomy_tasks.py backend/tests/unit/test_economic_taxonomy_celery_contract.py
@@ -1493,6 +1758,8 @@ Expected: FAIL on missing script/runbook.
 
 Read non-comment node IDs, run `pytest --collect-only`, fail if any ID is absent, then execute with a plugin that counts pass/fail/skip/xfail/xpass. Exit nonzero unless every listed node passed and PostgreSQL identity was verified. Include snapshot sealing, fence, work, processing publication, outbox, Social, and publication race suites.
 
+The exact-node manifest must include PostgreSQL versions of the new critical contracts: concurrent provider-attempt numbering, concurrent observation-only assignments without head advancement, two immutable Social revisions for one association pair, publication-commit crash before notification with worker recovery, and abandoned-generation delivery exclusion. Unit coverage for late archive/partial recapture precedence, dimension-definition hashing, retryable-versus-uncertain provider outcomes, and reactivated-to-dormant lifecycle remains mandatory in the focused suite below; Task 19 does not replace their owning task gates.
+
 - [ ] **Step 4: Add the CI gate**
 
 ```yaml
@@ -1509,7 +1776,7 @@ Document migration, seed, shadow, benchmark, reviewed dispositions/allocations, 
 
 - [ ] **Step 6: Run focused backend and legacy regressions**
 
-Run: `cd backend && ./venv/bin/pytest -q tests/unit/test_economic_taxonomy_contracts.py tests/unit/test_economic_taxonomy_snapshots.py tests/unit/test_economic_taxonomy_interpretations.py tests/unit/test_economic_taxonomy_mappings.py tests/unit/test_economic_taxonomy_outbox.py tests/unit/test_economic_taxonomy_social_adapter.py tests/unit/test_economic_taxonomy_developments.py tests/unit/test_economic_taxonomy_publication.py tests/unit/test_economic_theme_read_service.py tests/unit/test_economic_theme_consumer_cutover.py tests/unit/test_required_economic_taxonomy_postgres.py tests/unit/test_economic_taxonomy_runbook.py tests/unit/test_theme_claim_review.py tests/unit/test_theme_state_authorities.py tests/unit/test_theme_development.py tests/integration/test_social_theme_projection.py`
+Run: `cd backend && ./venv/bin/pytest -q tests/unit/test_economic_taxonomy_contracts.py tests/unit/test_economic_taxonomy_snapshots.py tests/unit/test_economic_source_admission.py tests/unit/test_economic_taxonomy_work_repo.py tests/unit/test_economic_exposure_extraction.py tests/unit/test_economic_exposure_claim_review.py tests/unit/test_economic_taxonomy_processor.py tests/unit/test_economic_taxonomy_interpretations.py tests/unit/test_economic_taxonomy_mappings.py tests/unit/test_economic_theme_lifecycle.py tests/unit/test_economic_theme_metrics.py tests/unit/test_economic_taxonomy_outbox.py tests/unit/test_economic_taxonomy_social_adapter.py tests/unit/services/test_social_llm_budget.py tests/unit/test_economic_taxonomy_developments.py tests/unit/test_economic_taxonomy_publication.py tests/unit/test_economic_taxonomy_tasks.py tests/unit/test_economic_theme_read_service.py tests/unit/test_economic_theme_consumer_cutover.py tests/unit/test_required_economic_taxonomy_postgres.py tests/unit/test_economic_taxonomy_runbook.py tests/unit/test_theme_claim_review.py tests/unit/test_theme_state_authorities.py tests/unit/test_theme_development.py tests/integration/test_social_theme_projection.py`
 
 Expected: PASS with zero skips in this focused set.
 
