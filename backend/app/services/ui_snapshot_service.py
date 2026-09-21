@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from hashlib import sha256
 from threading import Lock
 from typing import Any
+from uuid import UUID
 
-from sqlalchemy import func, text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
@@ -18,8 +21,40 @@ from app.domain.analytics.scope import market_scope_tag
 from app.domain.common.query import PageSpec, SortOrder, SortSpec
 from app.domain.scanning.filter_expression_model import QuerySpec
 from app.infra.db.models.relative_strength import MarketRsFormulaPointer
+from app.infra.db.models.social_analysis import (
+    EconomicSocialAssociation,
+    EconomicSocialAssociationRevision,
+)
 from app.infra.db.uow import SqlUnitOfWork
 from app.infra.serialization import json_safe
+from app.models.economic_taxonomy import (
+    EconomicThemeAlias,
+    EconomicThemeFacet,
+    EconomicThemeRedirect,
+    EconomicThemeRelationship,
+    EconomicThemeRevision,
+    FacetDimension,
+    FacetValue,
+    LegacyClaimAllocation,
+    LegacyDestinationMapping,
+    LegacyIdentityDisposition,
+    TaxonomyVersion,
+)
+from app.models.economic_taxonomy_runtime import (
+    ClaimAssignment,
+    DevelopmentSelectionRevision,
+    GenerationInputManifest,
+    InterpretationSelection,
+    InterpretationSet,
+    MetricsRevision,
+    ReaderSnapshotBundle,
+    ReaderSnapshotEntry,
+    SocialAssociationRevisionRef,
+    ThemeConstituentExposure,
+    ThemeMetric,
+    ThemeObservation,
+    ThemeSignalObservation,
+)
 from app.models.industry import IBDGroupRank
 from app.models.market_breadth import MarketBreadth
 from app.models.scan_result import Scan
@@ -32,6 +67,10 @@ from app.models.theme import (
     ThemeMergeSuggestion,
     ThemeMetrics,
     ThemePipelineRun,
+)
+from app.models.theme_intelligence import (
+    EconomicThemeDevelopment,
+    ThemeDevelopmentObservation,
 )
 from app.models.ui_view_snapshot import UIViewSnapshot, UIViewSnapshotPointer
 from app.schemas.groups import GroupRankingsResponse, GroupRankResponse, MoversResponse
@@ -111,6 +150,589 @@ class SnapshotResult:
             "is_stale": self.is_stale,
             "payload": self.payload,
         }
+
+
+class SnapshotBundleError(ValueError):
+    """A reader bundle cannot be built from incoherent generation inputs."""
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationSnapshotInputs:
+    taxonomy_version_id: UUID
+    interpretation_set_id: UUID
+    generation_input_manifest_id: UUID
+    metrics_revision_id: UUID
+    created_by: str
+
+
+_ECONOMIC_RANKING_VIEWS = (
+    "technical_attention",
+    "fundamental_attention",
+    "narrative_attention",
+    "emerging",
+    "broad_confirmation",
+)
+
+
+def _snapshot_hash(payload: Any) -> str:
+    return sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def build_snapshot_bundle(
+    db: Session,
+    generation_inputs: GenerationSnapshotInputs | Mapping[str, Any],
+) -> ReaderSnapshotBundle:
+    """Build and seal immutable API/UI payload rows without switching pointers."""
+
+    inputs = (
+        generation_inputs
+        if isinstance(generation_inputs, GenerationSnapshotInputs)
+        else GenerationSnapshotInputs(**dict(generation_inputs))
+    )
+    taxonomy = db.get(TaxonomyVersion, inputs.taxonomy_version_id)
+    interpretation = db.get(InterpretationSet, inputs.interpretation_set_id)
+    manifest = db.get(
+        GenerationInputManifest, inputs.generation_input_manifest_id
+    )
+    metrics = db.get(MetricsRevision, inputs.metrics_revision_id)
+    if taxonomy is None or taxonomy.status != "sealed":
+        raise SnapshotBundleError("sealed_taxonomy_required")
+    if interpretation is None or interpretation.status != "sealed":
+        raise SnapshotBundleError("sealed_interpretation_required")
+    if manifest is None or manifest.status != "sealed":
+        raise SnapshotBundleError("sealed_manifest_required")
+    if metrics is None or metrics.status != "sealed":
+        raise SnapshotBundleError("sealed_metrics_required")
+    if {
+        interpretation.generation_input_manifest_id,
+        metrics.generation_input_manifest_id,
+    } != {manifest.id}:
+        raise SnapshotBundleError("snapshot_manifest_mismatch")
+
+    catalog, review = _build_economic_snapshot_payloads(
+        db,
+        taxonomy=taxonomy,
+        interpretation=interpretation,
+        manifest=manifest,
+        metrics=metrics,
+    )
+    entries = (
+        ("economic_themes", "catalog", catalog),
+        ("economic_taxonomy", "review", review),
+    )
+    entry_index = [
+        {
+            "snapshot_kind": kind,
+            "resource_key": key,
+            "payload_hash": _snapshot_hash(payload),
+        }
+        for kind, key, payload in entries
+    ]
+    bundle_summary = {
+        "taxonomy_version_id": str(taxonomy.id),
+        "interpretation_set_id": str(interpretation.id),
+        "generation_input_manifest_id": str(manifest.id),
+        "generation_input_manifest_hash": manifest.semantic_hash,
+        "metrics_revision_id": str(metrics.id),
+        "entries": entry_index,
+    }
+    bundle = ReaderSnapshotBundle(
+        status="unsealed",
+        generation_input_manifest_id=manifest.id,
+        payload=bundle_summary,
+        created_by=inputs.created_by,
+    )
+    db.add(bundle)
+    db.flush()
+    for kind, key, payload in entries:
+        db.add(
+            ReaderSnapshotEntry(
+                reader_snapshot_bundle_id=bundle.id,
+                snapshot_kind=kind,
+                resource_key=key,
+                payload=payload,
+                payload_hash=_snapshot_hash(payload),
+            )
+        )
+    db.flush()
+    bundle.seal(
+        semantic_hash=_snapshot_hash(
+            {
+                "taxonomy_semantic_hash": taxonomy.semantic_hash,
+                "manifest_semantic_hash": manifest.semantic_hash,
+                "interpretation_semantic_hash": interpretation.semantic_hash,
+                "metrics_semantic_hash": metrics.semantic_hash,
+                "entries": entry_index,
+            }
+        ),
+        artifact_integrity_hash=_snapshot_hash(
+            {"bundle": bundle_summary, "entries": [value[2] for value in entries]}
+        ),
+    )
+    db.flush()
+    return bundle
+
+
+def _build_economic_snapshot_payloads(
+    db,
+    *,
+    taxonomy,
+    interpretation,
+    manifest,
+    metrics,
+):
+    revisions = db.scalars(
+        select(EconomicThemeRevision)
+        .where(EconomicThemeRevision.taxonomy_version_id == taxonomy.id)
+        .order_by(EconomicThemeRevision.display_name, EconomicThemeRevision.theme_id)
+    ).all()
+    theme_ids = {row.theme_id for row in revisions}
+    aliases = db.scalars(
+        select(EconomicThemeAlias).where(
+            EconomicThemeAlias.taxonomy_version_id == taxonomy.id
+        )
+    ).all()
+    dimensions = db.scalars(
+        select(FacetDimension).where(FacetDimension.taxonomy_version_id == taxonomy.id)
+    ).all()
+    values = db.scalars(
+        select(FacetValue).where(FacetValue.taxonomy_version_id == taxonomy.id)
+    ).all()
+    facets = db.scalars(
+        select(EconomicThemeFacet).where(
+            EconomicThemeFacet.taxonomy_version_id == taxonomy.id
+        )
+    ).all()
+    relationships = db.scalars(
+        select(EconomicThemeRelationship).where(
+            EconomicThemeRelationship.taxonomy_version_id == taxonomy.id
+        )
+    ).all()
+    dispositions = db.scalars(
+        select(LegacyIdentityDisposition).where(
+            LegacyIdentityDisposition.taxonomy_version_id == taxonomy.id
+        )
+    ).all()
+    destinations = db.scalars(
+        select(LegacyDestinationMapping).where(
+            LegacyDestinationMapping.taxonomy_version_id == taxonomy.id
+        )
+    ).all()
+    allocations = db.scalars(
+        select(LegacyClaimAllocation).where(
+            LegacyClaimAllocation.taxonomy_version_id == taxonomy.id
+        )
+    ).all()
+    redirects = db.scalars(
+        select(EconomicThemeRedirect).where(
+            EconomicThemeRedirect.taxonomy_version_id == taxonomy.id
+        )
+    ).all()
+    metric_rows = db.scalars(
+        select(ThemeMetric).where(ThemeMetric.metrics_revision_id == metrics.id)
+    ).all()
+
+    dimension_keys = {row.key for row in dimensions}
+    value_keys = {(row.dimension_key, row.normalized_value) for row in values}
+    referenced_theme_ids = {
+        row.theme_id for row in aliases
+    } | {row.theme_id for row in facets}
+    referenced_theme_ids |= {
+        endpoint
+        for row in relationships
+        for endpoint in (row.source_theme_id, row.target_theme_id)
+    }
+    referenced_theme_ids |= {
+        row.destination_theme_id for row in destinations
+    }
+    referenced_theme_ids |= {
+        row.destination_theme_id
+        for row in allocations
+        if row.destination_theme_id is not None
+    }
+    referenced_theme_ids |= {
+        endpoint
+        for row in redirects
+        for endpoint in (row.source_theme_id, row.target_theme_id)
+    }
+    referenced_theme_ids |= {row.economic_theme_id for row in metric_rows}
+    if not referenced_theme_ids.issubset(theme_ids):
+        raise SnapshotBundleError("snapshot_reference_not_in_taxonomy")
+    if any(row.dimension_key not in dimension_keys for row in facets):
+        raise SnapshotBundleError("snapshot_facet_dimension_missing")
+    if any(
+        (row.dimension_key, row.normalized_value) not in value_keys for row in facets
+    ):
+        raise SnapshotBundleError("snapshot_facet_value_missing")
+
+    assignments = db.scalars(
+        select(ClaimAssignment)
+        .join(
+            InterpretationSelection,
+            InterpretationSelection.selected_classification_attempt_id
+            == ClaimAssignment.classification_attempt_id,
+        )
+        .where(
+            InterpretationSelection.interpretation_set_id == interpretation.id
+        )
+    ).all()
+    assignment_by_id = {row.id: row for row in assignments}
+    assignment_ids = tuple(assignment_by_id)
+    observation_rows = (
+        db.scalars(
+            select(ThemeObservation).where(
+                ThemeObservation.claim_assignment_id.in_(assignment_ids)
+            )
+        ).all()
+        if assignment_ids
+        else []
+    )
+    constituent_rows = (
+        db.scalars(
+            select(ThemeConstituentExposure).where(
+                ThemeConstituentExposure.claim_assignment_id.in_(assignment_ids)
+            )
+        ).all()
+        if assignment_ids
+        else []
+    )
+    signal_rows = (
+        db.scalars(
+            select(ThemeSignalObservation).where(
+                ThemeSignalObservation.claim_assignment_id.in_(assignment_ids)
+            )
+        ).all()
+        if assignment_ids
+        else []
+    )
+    if any(row.economic_theme_id not in theme_ids for row in assignments):
+        raise SnapshotBundleError("snapshot_reference_not_in_taxonomy")
+
+    development_ids = _pinned_development_observation_ids(db, manifest)
+    development_rows = (
+        db.execute(
+            select(ThemeDevelopmentObservation, EconomicThemeDevelopment)
+            .join(
+                EconomicThemeDevelopment,
+                EconomicThemeDevelopment.observation_id
+                == ThemeDevelopmentObservation.id,
+            )
+            .where(ThemeDevelopmentObservation.id.in_(development_ids))
+        ).all()
+        if development_ids
+        else []
+    )
+    if any(link.economic_theme_id not in theme_ids for _, link in development_rows):
+        raise SnapshotBundleError("snapshot_reference_not_in_taxonomy")
+
+    social_by_theme = _pinned_social_memberships(db, interpretation.id)
+    if any(theme_id not in theme_ids for theme_id in social_by_theme):
+        raise SnapshotBundleError("snapshot_reference_not_in_taxonomy")
+
+    themes = []
+    for revision in revisions:
+        theme_aliases = sorted(
+            row.alias for row in aliases if row.theme_id == revision.theme_id
+        )
+        theme_facets = sorted(
+            (
+                {
+                    "dimension": row.dimension_key,
+                    "value": row.normalized_value,
+                    "display_value": next(
+                        value.display_value
+                        for value in values
+                        if value.dimension_key == row.dimension_key
+                        and value.normalized_value == row.normalized_value
+                    ),
+                }
+                for row in facets
+                if row.theme_id == revision.theme_id
+            ),
+            key=lambda value: (value["dimension"], value["value"]),
+        )
+        theme_metrics = {}
+        for view in _ECONOMIC_RANKING_VIEWS:
+            row = next(
+                (
+                    value
+                    for value in metric_rows
+                    if value.economic_theme_id == revision.theme_id
+                    and value.ranking_view == view
+                ),
+                None,
+            )
+            theme_metrics[view] = (
+                {
+                    "availability": (row.components or {}).get(
+                        "availability", "available" if row.available else "unavailable"
+                    ),
+                    "raw_value": row.raw_value,
+                    "percentile": row.percentile,
+                    "components": dict(row.components or {}),
+                }
+                if row is not None
+                else {
+                    "availability": "unavailable",
+                    "raw_value": None,
+                    "percentile": None,
+                    "components": {"reason": "not_computed"},
+                }
+            )
+        theme_observations = [
+            row
+            for row in observation_rows
+            if revision.theme_id
+            in {
+                UUID(value)
+                for value in row.payload.get("economic_theme_ids", [])
+            }
+            or assignment_by_id[row.claim_assignment_id].economic_theme_id
+            == revision.theme_id
+        ]
+        themes.append(
+            {
+                "economic_theme_id": str(revision.theme_id),
+                "display_name": revision.display_name,
+                "definition": revision.definition,
+                "mechanism": revision.mechanism,
+                "lifecycle": revision.lifecycle,
+                "aliases": theme_aliases,
+                "facets": theme_facets,
+                "metrics": theme_metrics,
+                "direct_observation_count": len(
+                    {row.id for row in theme_observations if row.observation_kind == "primary"}
+                ),
+                "derived_observation_count": len(
+                    {row.id for row in theme_observations if row.observation_kind != "primary"}
+                ),
+                "signals": [
+                    {
+                        "signal_id": str(row.id),
+                        "security_id": row.security_id,
+                        "signal_kind": row.signal_kind,
+                        "available_at": row.available_at.isoformat(),
+                        "payload": dict(row.payload),
+                    }
+                    for row in signal_rows
+                    if assignment_by_id[row.claim_assignment_id].economic_theme_id
+                    == revision.theme_id
+                ],
+                "constituents": [
+                    {
+                        "exposure_id": str(row.id),
+                        "security_id": row.security_id,
+                        "exposure_kind": row.exposure_kind,
+                        "exposure_strength": row.exposure_strength,
+                        "payload": dict(row.payload),
+                    }
+                    for row in constituent_rows
+                    if assignment_by_id[row.claim_assignment_id].economic_theme_id
+                    == revision.theme_id
+                ],
+                "developments": [
+                    {
+                        "observation_id": row.id,
+                        "analysis_channel": row.analysis_channel,
+                        "development_support": row.development_support,
+                        "classification": row.classification,
+                        "facts": dict(row.facts),
+                        "citations": list(row.citations),
+                    }
+                    for row, link in development_rows
+                    if link.economic_theme_id == revision.theme_id
+                ],
+                "relationships": [
+                    _relationship_payload(row)
+                    for row in relationships
+                    if revision.theme_id
+                    in {row.source_theme_id, row.target_theme_id}
+                ],
+                "mappings": [
+                    _mapping_payload(row)
+                    for row in destinations
+                    if row.destination_theme_id == revision.theme_id
+                ],
+                "social_memberships": social_by_theme.get(revision.theme_id, []),
+                "reconciliation_state": (
+                    "conflict_review_required"
+                    if any(
+                        item["state"] == "conflict_review_required"
+                        for item in social_by_theme.get(revision.theme_id, [])
+                    )
+                    else "reconciled"
+                    if social_by_theme.get(revision.theme_id)
+                    else "not_applicable"
+                ),
+            }
+        )
+
+    relationship_payloads = sorted(
+        (_relationship_payload(row) for row in relationships),
+        key=lambda row: (
+            row["source_theme_id"],
+            row["target_theme_id"],
+            row["kind"],
+        ),
+    )
+    mapping_payloads = sorted(
+        (_mapping_payload(row) for row in destinations),
+        key=lambda row: (
+            row["legacy_theme_cluster_id"],
+            row["destination_theme_id"],
+        ),
+    )
+    base = {
+        "taxonomy_version_id": str(taxonomy.id),
+        "taxonomy_semantic_hash": taxonomy.semantic_hash,
+        "interpretation_set_id": str(interpretation.id),
+        "generation_input_manifest_id": str(manifest.id),
+        "generation_input_manifest_hash": manifest.semantic_hash,
+        "metrics_revision_id": str(metrics.id),
+        "metrics_formula_version": metrics.formula_version,
+        "metrics_as_of": metrics.as_of.isoformat(),
+        "pinned_revisions": list(manifest.selections or []),
+        "committed_revision_tuples": list(
+            manifest.committed_revision_tuples or []
+        ),
+        "relationships": relationship_payloads,
+        "mappings": mapping_payloads,
+        "redirects": [
+            {
+                "source_theme_id": str(row.source_theme_id),
+                "target_theme_id": str(row.target_theme_id),
+                "reason": row.reason,
+            }
+            for row in redirects
+        ],
+    }
+    catalog = {**base, "themes": themes}
+    review = {
+        **base,
+        "dispositions": [
+            {
+                "legacy_theme_cluster_id": row.legacy_theme_cluster_id,
+                "disposition": row.disposition,
+                "review_comment": row.review_comment,
+            }
+            for row in dispositions
+        ],
+        "allocations": [
+            {
+                "legacy_theme_cluster_id": row.legacy_theme_cluster_id,
+                "allocation_kind": row.allocation_kind,
+                "allocation_key": row.allocation_key,
+                "destination_theme_id": (
+                    str(row.destination_theme_id)
+                    if row.destination_theme_id is not None
+                    else None
+                ),
+                "reviewed_exclusion": row.reviewed_exclusion,
+            }
+            for row in allocations
+        ],
+        "reconciliation": [
+            {
+                "economic_theme_id": str(theme_id),
+                "memberships": rows,
+            }
+            for theme_id, rows in sorted(
+                social_by_theme.items(), key=lambda value: str(value[0])
+            )
+        ],
+    }
+    return catalog, review
+
+
+def _relationship_payload(row):
+    return {
+        "id": str(row.id),
+        "source_theme_id": str(row.source_theme_id),
+        "target_theme_id": str(row.target_theme_id),
+        "kind": row.kind,
+        "direction": row.direction,
+        "discriminator": row.discriminator,
+    }
+
+
+def _mapping_payload(row):
+    return {
+        "legacy_theme_cluster_id": row.legacy_theme_cluster_id,
+        "destination_theme_id": str(row.destination_theme_id),
+        "review_comment": row.review_comment,
+    }
+
+
+def _pinned_development_observation_ids(db, manifest):
+    observation_ids = set()
+    for raw in manifest.selections or []:
+        revision_number = raw.get("development_revision")
+        if revision_number is None:
+            continue
+        query = select(DevelopmentSelectionRevision).where(
+            DevelopmentSelectionRevision.revision_number == int(revision_number)
+        )
+        identity = raw.get("development_identity")
+        if identity is not None:
+            query = query.where(
+                DevelopmentSelectionRevision.development_identity
+                == UUID(str(identity))
+            )
+        rows = db.scalars(query).all()
+        if len(rows) != 1:
+            raise SnapshotBundleError("development_revision_not_pinned")
+        observation_ids.update(rows[0].payload.get("observation_ids", []))
+    return observation_ids
+
+
+def _pinned_social_memberships(db, interpretation_set_id):
+    refs = db.scalars(
+        select(SocialAssociationRevisionRef)
+        .join(
+            InterpretationSelection,
+            InterpretationSelection.social_association_revision_ref_id
+            == SocialAssociationRevisionRef.id,
+        )
+        .where(InterpretationSelection.interpretation_set_id == interpretation_set_id)
+    ).all()
+    grouped = {}
+    for ref in refs:
+        association = db.get(EconomicSocialAssociation, ref.association_id)
+        revision = db.scalar(
+            select(EconomicSocialAssociationRevision).where(
+                EconomicSocialAssociationRevision.association_id
+                == ref.association_id,
+                EconomicSocialAssociationRevision.revision_number
+                == ref.revision_number,
+            )
+        )
+        if association is None or revision is None:
+            raise SnapshotBundleError("social_revision_not_pinned")
+        grouped.setdefault(association.economic_theme_id, []).append(
+            {
+                "association_id": str(association.id),
+                "association_revision_id": str(revision.id),
+                "revision_number": revision.revision_number,
+                "decision_revision_id": (
+                    str(revision.decision_revision_id)
+                    if revision.decision_revision_id
+                    else None
+                ),
+                "security_id": association.security_id,
+                "state": revision.state,
+                "live": revision.live,
+                "admission_state": revision.admission_state,
+                "mirror_state": revision.mirror_state,
+            }
+        )
+    return grouped
 
 
 class GroupsBootstrapUnavailableError(RuntimeError):

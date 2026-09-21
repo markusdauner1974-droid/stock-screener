@@ -128,6 +128,8 @@ from .economic_taxonomy_runtime import (
     GenerationInputManifest,
     ReaderCapabilityManifest,
     ReaderSnapshotBundle,
+    ReaderSnapshotEntry,
+    ReaderSnapshotPointer,
     SemanticInvalidationRevision,
     ServingGeneration,
     ServingGenerationEvent,
@@ -308,5 +310,7 @@ __all__ = [
     "ServingGeneration",
     "ServingGenerationEvent",
     "ReaderSnapshotBundle",
+    "ReaderSnapshotEntry",
+    "ReaderSnapshotPointer",
     "ReaderCapabilityManifest",
 ]

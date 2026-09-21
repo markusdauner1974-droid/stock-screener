@@ -982,6 +982,12 @@ class ReaderSnapshotBundle(Base):
     created_at = _created_at()
     sealed_at = Column(DateTime(timezone=True))
 
+    entries = relationship(
+        "ReaderSnapshotEntry",
+        back_populates="bundle",
+        order_by="ReaderSnapshotEntry.snapshot_kind, ReaderSnapshotEntry.resource_key",
+    )
+
     __table_args__ = (
         CheckConstraint(
             "status IN ('unsealed','sealed')",
@@ -996,6 +1002,61 @@ class ReaderSnapshotBundle(Base):
         self.semantic_hash = semantic_hash
         self.artifact_integrity_hash = artifact_integrity_hash
         self.sealed_at = datetime.now(timezone.utc)
+
+
+class ReaderSnapshotEntry(Base):
+    __tablename__ = "economic_reader_snapshot_entries"
+
+    id = _uuid_pk()
+    reader_snapshot_bundle_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_reader_snapshot_bundles.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    snapshot_kind = Column(String(80), nullable=False)
+    resource_key = Column(String(500), nullable=False)
+    payload = Column(JSON, nullable=False)
+    payload_hash = Column(String(128), nullable=False)
+    created_at = _created_at()
+
+    bundle = relationship("ReaderSnapshotBundle", back_populates="entries")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "reader_snapshot_bundle_id",
+            "snapshot_kind",
+            "resource_key",
+            name="uq_economic_reader_snapshot_entry",
+        ),
+    )
+
+
+class ReaderSnapshotPointer(Base):
+    __tablename__ = "economic_reader_snapshot_pointers"
+
+    reader_key = Column(String(120), primary_key=True)
+    serving_generation_id = Column(
+        Uuid(as_uuid=True), ForeignKey("economic_serving_generations.id")
+    )
+    reader_snapshot_bundle_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_reader_snapshot_bundles.id"),
+    )
+    authority_epoch = Column(Integer, nullable=False, default=0)
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "(serving_generation_id IS NULL AND reader_snapshot_bundle_id IS NULL) "
+            "OR (serving_generation_id IS NOT NULL AND reader_snapshot_bundle_id IS NOT NULL)",
+            name="ck_economic_reader_snapshot_pointer_complete",
+        ),
+    )
 
 
 class ServingGeneration(Base):
@@ -1418,6 +1479,8 @@ ECONOMIC_TAXONOMY_RUNTIME_TABLES = [
     ReaderCapabilityManifest.__table__,
     GenerationInputManifest.__table__,
     ReaderSnapshotBundle.__table__,
+    ReaderSnapshotEntry.__table__,
+    ReaderSnapshotPointer.__table__,
     ServingGeneration.__table__,
     ServingGenerationEvent.__table__,
     TaxonomyOperationRequest.__table__,
@@ -1547,10 +1610,24 @@ def _protect_economic_taxonomy_runtime(session, _flush_context, _instances):
             _validate_serving_generation(session, row)
 
     for row in session.deleted:
+        if isinstance(row, ReaderSnapshotEntry):
+            with session.no_autoflush:
+                parent = session.get(
+                    ReaderSnapshotBundle, row.reader_snapshot_bundle_id
+                )
+            if parent is not None and parent.status == "sealed":
+                raise ImmutableRuntimePayload("sealed_payload_immutable")
         if isinstance(row, APPEND_ONLY_RUNTIME_MODELS + SEALED_RUNTIME_MODELS):
             raise ImmutableRuntimePayload("runtime_payload_immutable")
 
     for row in session.dirty:
+        if isinstance(row, ReaderSnapshotEntry):
+            with session.no_autoflush:
+                parent = session.get(
+                    ReaderSnapshotBundle, row.reader_snapshot_bundle_id
+                )
+            if parent is not None and parent.status == "sealed":
+                raise ImmutableRuntimePayload("sealed_payload_immutable")
         if isinstance(row, APPEND_ONLY_RUNTIME_MODELS):
             raise ImmutableRuntimePayload("runtime_payload_immutable")
         if isinstance(row, SEALED_RUNTIME_MODELS):
@@ -1565,6 +1642,9 @@ def _protect_economic_taxonomy_runtime(session, _flush_context, _instances):
         elif isinstance(row, ThemeMetric):
             parent_type = MetricsRevision
             parent_id = row.metrics_revision_id
+        elif isinstance(row, ReaderSnapshotEntry):
+            parent_type = ReaderSnapshotBundle
+            parent_id = row.reader_snapshot_bundle_id
         if parent_type is None or parent_id is None:
             continue
         with session.no_autoflush:
@@ -1628,6 +1708,25 @@ _CREATE_RUNTIME_TRIGGER_FUNCTIONS = DDL(
       RETURN NEW;
     END;
     $$ LANGUAGE plpgsql;
+
+    CREATE OR REPLACE FUNCTION economic_runtime_guard_snapshot_child()
+    RETURNS trigger AS $$
+    DECLARE
+      bundle_id uuid;
+    BEGIN
+      bundle_id := CASE WHEN TG_OP = 'DELETE'
+                        THEN OLD.reader_snapshot_bundle_id
+                        ELSE NEW.reader_snapshot_bundle_id END;
+      IF EXISTS (
+        SELECT 1 FROM economic_reader_snapshot_bundles
+        WHERE id = bundle_id AND status = 'sealed'
+        FOR KEY SHARE
+      ) THEN
+        RAISE EXCEPTION 'sealed_payload_immutable';
+      END IF;
+      RETURN CASE WHEN TG_OP = 'DELETE' THEN OLD ELSE NEW END;
+    END;
+    $$ LANGUAGE plpgsql;
     """
 ).execute_if(dialect="postgresql")
 
@@ -1678,6 +1777,17 @@ event.listen(
         CREATE TRIGGER trg_economic_theme_metric_parent_open
         BEFORE INSERT ON economic_theme_metrics
         FOR EACH ROW EXECUTE FUNCTION economic_runtime_guard_metric_child();
+        """
+    ).execute_if(dialect="postgresql"),
+)
+event.listen(
+    ReaderSnapshotEntry.__table__,
+    "after_create",
+    DDL(
+        """
+        CREATE TRIGGER trg_economic_reader_snapshot_entry_parent_open
+        BEFORE INSERT OR UPDATE OR DELETE ON economic_reader_snapshot_entries
+        FOR EACH ROW EXECUTE FUNCTION economic_runtime_guard_snapshot_child();
         """
     ).execute_if(dialect="postgresql"),
 )
