@@ -22,6 +22,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -1188,6 +1189,118 @@ class TaxonomyOverrideEvent(Base):
     )
 
 
+class TaxonomyProjectionEvent(Base):
+    __tablename__ = "economic_taxonomy_projection_events"
+
+    id = _uuid_pk()
+    serving_generation_id = Column(
+        Uuid(as_uuid=True), ForeignKey("economic_serving_generations.id")
+    )
+    source_lineage = Column(String(500), nullable=False)
+    projection_revision = Column(Integer, nullable=False)
+    projection_kind = Column(String(80), nullable=False)
+    projection_version = Column(Integer, nullable=False)
+    target_representation = Column(String(80), nullable=False)
+    payload = Column(JSON, nullable=False)
+    payload_hash = Column(String(128), nullable=False)
+    origin_representation = Column(String(80), nullable=False)
+    delivery_scope = Column(String(24), nullable=False, default="candidate")
+    staged_epoch = Column(Integer, nullable=False)
+    created_at = _created_at()
+
+    __table_args__ = (
+        CheckConstraint(
+            "projection_revision > 0 AND projection_version > 0",
+            name="ck_economic_projection_positive_revisions",
+        ),
+        CheckConstraint(
+            "delivery_scope IN ('shadow','candidate')",
+            name="ck_economic_projection_delivery_scope",
+        ),
+        UniqueConstraint(
+            "source_lineage",
+            "projection_revision",
+            "projection_kind",
+            "projection_version",
+            "target_representation",
+            name="uq_economic_projection_logical_event",
+        ),
+        Index(
+            "ix_economic_projection_generation_scope",
+            "serving_generation_id",
+            "delivery_scope",
+        ),
+    )
+
+
+class TaxonomyProjectionDeliveryAttempt(Base):
+    __tablename__ = "economic_taxonomy_projection_delivery_attempts"
+
+    id = _uuid_pk()
+    projection_event_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_taxonomy_projection_events.id"),
+        nullable=False,
+    )
+    attempt_number = Column(Integer, nullable=False)
+    claimed_epoch = Column(Integer, nullable=False)
+    lease_token = Column(Uuid(as_uuid=True), nullable=False, unique=True)
+    lease_owner = Column(String(200), nullable=False)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = _created_at()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "projection_event_id",
+            "attempt_number",
+            name="uq_economic_projection_delivery_attempt_number",
+        ),
+    )
+
+
+class TaxonomyProjectionDeliveryEvent(Base):
+    __tablename__ = "economic_taxonomy_projection_delivery_events"
+
+    id = _uuid_pk()
+    delivery_attempt_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_taxonomy_projection_delivery_attempts.id"),
+        nullable=False,
+        unique=True,
+    )
+    outcome = Column(String(40), nullable=False)
+    error = Column(Text)
+    details = Column(JSON, nullable=False, default=dict)
+    completed_at = _created_at()
+
+    __table_args__ = (
+        CheckConstraint(
+            "outcome IN ('success','stale_noop','retryable_failure','terminal_failure')",
+            name="ck_economic_projection_delivery_outcome",
+        ),
+    )
+
+
+class ProjectionCheckpoint(Base):
+    __tablename__ = "economic_taxonomy_projection_checkpoints"
+
+    target_representation = Column(String(80), primary_key=True)
+    source_lineage = Column(String(500), primary_key=True)
+    projection_kind = Column(String(80), primary_key=True)
+    last_applied_revision = Column(Integer, nullable=False)
+    projection_event_id = Column(
+        Uuid(as_uuid=True), ForeignKey("economic_taxonomy_projection_events.id")
+    )
+    origin_representation = Column(String(80), nullable=False)
+    payload = Column(JSON, nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
 class TaxonomyAuthority(Base):
     __tablename__ = "taxonomy_authority"
 
@@ -1257,6 +1370,9 @@ APPEND_ONLY_RUNTIME_MODELS = (
     TaxonomyOperationEvent,
     TaxonomyProposalEvent,
     TaxonomyOverrideEvent,
+    TaxonomyProjectionEvent,
+    TaxonomyProjectionDeliveryAttempt,
+    TaxonomyProjectionDeliveryEvent,
 )
 
 SEALED_RUNTIME_MODELS = (
@@ -1309,6 +1425,10 @@ ECONOMIC_TAXONOMY_RUNTIME_TABLES = [
     TaxonomyOperationEvent.__table__,
     TaxonomyProposalEvent.__table__,
     TaxonomyOverrideEvent.__table__,
+    TaxonomyProjectionEvent.__table__,
+    TaxonomyProjectionDeliveryAttempt.__table__,
+    TaxonomyProjectionDeliveryEvent.__table__,
+    ProjectionCheckpoint.__table__,
     TaxonomyAuthority.__table__,
 ]
 

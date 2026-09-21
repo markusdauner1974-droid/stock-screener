@@ -61,6 +61,14 @@ def _theme_metrics_last_run_key(pipeline: str) -> str:
     return f"{_THEME_METRICS_LAST_RUN_KEY_PREFIX}{pipeline}"
 
 
+def _taxonomy_authority_epoch(db) -> int:
+    """Capture the epoch before entering a fenced legacy mutation."""
+    from ..models.economic_taxonomy_runtime import TaxonomyAuthority
+
+    authority = db.get(TaxonomyAuthority, 1)
+    return int(authority.authority_epoch) if authority is not None else 1
+
+
 def _get_theme_metrics_last_success(db, pipeline: str) -> datetime | None:
     from ..models.app_settings import AppSetting
 
@@ -499,6 +507,7 @@ def calculate_theme_metrics(pipeline: str = None):
         }
 
         completed_at = datetime.now(timezone.utc)
+        authority_epoch = _taxonomy_authority_epoch(db)
         pipelines_with_work: list[str] = []
         for p in pipelines:
             if not _theme_metrics_work_pending(db, p):
@@ -508,7 +517,9 @@ def calculate_theme_metrics(pipeline: str = None):
 
             logger.info(f"Calculating metrics for pipeline: {p}")
             service = ThemeDiscoveryService(db, pipeline=p)
-            result = service.update_all_theme_metrics()
+            result = service.update_all_theme_metrics(
+                expected_authority_epoch=authority_epoch
+            )
             pipelines_with_work.append(p)
 
             # Aggregate results
@@ -718,9 +729,13 @@ def promote_candidate_themes(pipeline: str = None, limit: int = 1000):
         logger.info(f"Pipelines: {pipelines}")
         logger.info("=" * 60)
 
+        authority_epoch = _taxonomy_authority_epoch(db)
         for p in pipelines:
             service = ThemeDiscoveryService(db, pipeline=p)
-            result = service.promote_candidate_themes(limit=limit)
+            result = service.promote_candidate_themes(
+                limit=limit,
+                expected_authority_epoch=authority_epoch,
+            )
             summary["pipelines"][p] = result
             summary["promoted_total"] += result.get("promoted", 0)
             summary["scanned_total"] += result.get("scanned", 0)
@@ -775,9 +790,13 @@ def apply_lifecycle_policies(pipeline: str = None, limit: int = 1000):
         logger.info(f"Pipelines: {pipelines}")
         logger.info("=" * 60)
 
+        authority_epoch = _taxonomy_authority_epoch(db)
         for p in pipelines:
             service = ThemeDiscoveryService(db, pipeline=p)
-            result = service.apply_dormancy_and_reactivation_policies(limit=limit)
+            result = service.apply_dormancy_and_reactivation_policies(
+                limit=limit,
+                expected_authority_epoch=authority_epoch,
+            )
             summary["pipelines"][p] = result
             summary["to_dormant_total"] += result.get("to_dormant", 0)
             summary["to_reactivated_total"] += result.get("to_reactivated", 0)
@@ -823,9 +842,13 @@ def infer_theme_relationships(pipeline: str = None, max_merge_suggestions: int =
     summary = {"pipelines": {}, "edges_written": 0, "errors": 0}
 
     try:
+        authority_epoch = _taxonomy_authority_epoch(db)
         for p in pipelines:
             service = ThemeDiscoveryService(db, pipeline=p)
-            result = service.infer_theme_relationships(max_merge_suggestions=max_merge_suggestions)
+            result = service.infer_theme_relationships(
+                max_merge_suggestions=max_merge_suggestions,
+                expected_authority_epoch=authority_epoch,
+            )
             summary["pipelines"][p] = result
             summary["edges_written"] += (
                 result.get("merge_edges_written", 0) + result.get("rule_edges_written", 0)
