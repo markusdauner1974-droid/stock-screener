@@ -103,6 +103,245 @@ def test_missing_charge_retains_reservation_until_known(ledger):
     assert budget.status(NOW).remaining_usd == Decimal("1.70")
 
 
+def test_logical_operation_attempts_are_distinct_and_monotonic(ledger):
+    budget = service(ledger)
+    first = budget.reserve(
+        "dispatch-1",
+        (1,),
+        Decimal(".20"),
+        NOW,
+        logical_operation_key="request:42",
+        operation_kind="economic_extract",
+    )
+    budget.mark_dispatched(first)
+    budget.reconcile(first, Decimal("0"), "provider-1")
+    second = budget.reserve(
+        "dispatch-2",
+        (1,),
+        Decimal(".20"),
+        NOW,
+        logical_operation_key="request:42",
+        operation_kind="economic_extract",
+    )
+
+    with ledger() as db:
+        from app.infra.db.models.social_analysis import SocialLLMAttempt
+
+        attempts = db.scalars(
+            select(SocialLLMAttempt).order_by(SocialLLMAttempt.attempt_number)
+        ).all()
+        assert [attempt.id for attempt in attempts] == [first, second]
+        assert [attempt.attempt_number for attempt in attempts] == [1, 2]
+        assert len({attempt.idempotency_key for attempt in attempts}) == 2
+
+
+def test_uncertain_logical_operation_blocks_immediate_new_dispatch(ledger):
+    budget = service(ledger)
+    first = budget.reserve(
+        "dispatch-1",
+        (1,),
+        Decimal(".20"),
+        NOW,
+        logical_operation_key="request:uncertain",
+        operation_kind="economic_extract",
+    )
+    budget.mark_dispatched(first)
+    budget.reconcile(first, None, None)
+
+    assert budget.reserve(
+        "dispatch-2",
+        (1,),
+        Decimal(".20"),
+        NOW,
+        logical_operation_key="request:uncertain",
+        operation_kind="economic_extract",
+    ) is None
+    assert budget.reservation_is_open(first) is True
+
+
+def _economic_request(ledger):
+    from app.infra.db.repositories.economic_taxonomy_work_repo import (
+        EconomicTaxonomyWorkRepository,
+    )
+    from app.models.economic_taxonomy_runtime import TaxonomyAuthority
+    from app.services.economic_source_admission import (
+        EconomicSourceAdmissionService,
+        EvidenceAdmission,
+    )
+
+    with ledger.begin() as db:
+        db.add(
+            TaxonomyAuthority(
+                id=1,
+                mode="shadow",
+                processing_head_revision=1,
+                authority_epoch=1,
+                writes_fenced=False,
+                rollback_state="ready",
+            )
+        )
+        db.flush()
+        admitted = EconomicSourceAdmissionService(db).admit_social_work(
+            EvidenceAdmission(
+                provider="x",
+                canonical_item_id="social-budget-post",
+                capture_route="social",
+                original_text="Memory pricing rose.",
+                preparation_version="social-v1",
+                captured_at=NOW,
+                available_at=NOW,
+                evidence_channels=("narrative",),
+            )
+        )
+        request = EconomicTaxonomyWorkRepository(db).enqueue_request(
+            source_lineage_id=admitted.source_lineage_id,
+            evidence_packet_id=admitted.packet_id,
+            policy_bundle_version="bundle-v1",
+            available_at=NOW,
+        )
+        return request.id
+
+
+class _EconomicProvider:
+    def __init__(self, *effects):
+        self.effects = list(effects)
+        self.call_count = 0
+
+    def extract(self, **_kwargs):
+        self.call_count += 1
+        effect = self.effects.pop(0)
+        if isinstance(effect, Exception):
+            raise effect
+        return effect
+
+
+def _accepted_economic_payload():
+    return {
+        "status": "accepted_candidates",
+        "candidates": [
+            {
+                "candidate_key": "memory",
+                "display_name": "Memory",
+                "raw_facets": {"industry": "Memory"},
+                "mechanism": "Pricing changes producer margins.",
+                "evidence_spans": ["Memory pricing rose."],
+                "relationship_evidence": [],
+                "exposure_support": "direct",
+                "development_support": "present",
+                "securities": [],
+            }
+        ],
+        "provider_request_id": "provider-success",
+        "actual_cost": Decimal("0.01"),
+    }
+
+
+def test_exhausted_social_budget_prevents_economic_provider_dispatch(ledger):
+    from app.services.economic_exposure_extraction import (
+        BudgetExhausted,
+        EconomicExposureExtractor,
+    )
+    from app.services.social_llm_budget_service import (
+        SocialEconomicReservationManager,
+        SocialLLMBudgetService,
+    )
+
+    request_id = _economic_request(ledger)
+    provider = _EconomicProvider(_accepted_economic_payload())
+    budget = SocialLLMBudgetService(ledger, daily_limit_usd=Decimal("0"))
+    reservations = SocialEconomicReservationManager(
+        budget,
+        work_ids=(1,),
+        maximum_usd=Decimal("0.20"),
+        now=NOW,
+        pricing_version="test-v1",
+        input_token_limit=100,
+        output_token_limit=100,
+    )
+    extractor = EconomicExposureExtractor(
+        ledger,
+        provider=provider,
+        extraction_policy_version="extract-v1",
+        approved_dimensions={"industry"},
+        reservations=reservations,
+    )
+
+    with pytest.raises(BudgetExhausted, match="budget_exhausted"):
+        extractor.extract(request_id)
+
+    assert provider.call_count == 0
+
+
+def test_social_retry_uses_two_attempts_then_reuses_successful_artifact(ledger):
+    from app.infra.db.models.social_analysis import SocialLLMAttempt
+    from app.services.economic_exposure_extraction import (
+        EconomicExposureExtractor,
+        RetryableProviderError,
+        RetryableProviderFailure,
+    )
+    from app.services.social_llm_budget_service import (
+        SocialEconomicReservationManager,
+        SocialLLMBudgetService,
+    )
+
+    request_id = _economic_request(ledger)
+    provider = _EconomicProvider(
+        RetryableProviderError(
+            "temporary",
+            provider_request_id="provider-retry",
+            actual_cost=Decimal("0"),
+        ),
+        _accepted_economic_payload(),
+    )
+    budget = SocialLLMBudgetService(ledger)
+    reservations = SocialEconomicReservationManager(
+        budget,
+        work_ids=(1,),
+        maximum_usd=Decimal("0.20"),
+        now=NOW,
+        pricing_version="test-v1",
+        input_token_limit=100,
+        output_token_limit=100,
+    )
+    extractor = EconomicExposureExtractor(
+        ledger,
+        provider=provider,
+        extraction_policy_version="extract-v1",
+        approved_dimensions={"industry"},
+        reservations=reservations,
+    )
+
+    with pytest.raises(RetryableProviderFailure):
+        extractor.extract(request_id)
+    success = extractor.extract(request_id)
+    repeated = extractor.extract(request_id)
+
+    with ledger.begin() as db:
+        from app.models.economic_taxonomy_runtime import ProcessingRequest
+        from app.services.economic_source_admission import (
+            EconomicSourceAdmissionService,
+        )
+
+        request = db.get(ProcessingRequest, request_id)
+        eligibility = EconomicSourceAdmissionService(db).revise_lens_eligibility(
+            request.evidence_packet_id,
+            add="fundamental",
+            reason="additional Social lens",
+        )
+
+    with ledger() as db:
+        attempts = db.scalars(
+            select(SocialLLMAttempt).where(
+                SocialLLMAttempt.logical_operation_key == str(request_id)
+            )
+        ).all()
+        assert [attempt.state for attempt in attempts] == ["reconciled", "reconciled"]
+        assert len({attempt.idempotency_key for attempt in attempts}) == 2
+    assert success.id == repeated.id
+    assert eligibility.evidence_channels == ("fundamental", "narrative")
+    assert provider.call_count == 2
+
+
 def test_cancel_before_dispatch_and_idempotency(ledger):
     budget = service(ledger)
     attempt = budget.reserve("a", (1,), Decimal("2"), NOW)

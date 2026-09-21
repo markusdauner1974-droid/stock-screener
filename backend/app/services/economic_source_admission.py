@@ -484,6 +484,7 @@ class EconomicSourceAdmissionService:
             and (
                 "archive" in evidence.capture_route.lower()
                 or bool(evidence.source_metadata.get("archived"))
+                or bool(evidence.source_metadata.get("partial_recapture"))
             )
         )
 

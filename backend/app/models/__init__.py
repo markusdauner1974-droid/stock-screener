@@ -67,7 +67,16 @@ from app.infra.db.models.cot import (
     CotWeeklyPosition,
 )
 
-from app.infra.db.models.social_analysis import SocialExtractionWork, SocialRunWork, SocialLLMBudgetDay, SocialLLMAttempt
+from app.infra.db.models.social_analysis import (
+    EconomicSocialAssociation,
+    EconomicSocialAssociationRevision,
+    EconomicSocialAssociationSource,
+    EconomicSocialDecisionRevision,
+    SocialExtractionWork,
+    SocialLLMAttempt,
+    SocialLLMBudgetDay,
+    SocialRunWork,
+)
 from app.infra.db.models.social_signals import (
     ContentPipelineEligibility, SocialSourceRegistry, SocialSourceConfiguration,
     SocialSourceAuditEvent, SocialPostSource, SocialContentMetrics,
@@ -147,6 +156,10 @@ __all__ = [
     "ThemeDevelopmentWork",
     "ThemeEquivalenceOperation",
     "SocialExtractionWork", "SocialRunWork", "SocialLLMBudgetDay", "SocialLLMAttempt",
+    "EconomicSocialAssociation",
+    "EconomicSocialAssociationRevision",
+    "EconomicSocialAssociationSource",
+    "EconomicSocialDecisionRevision",
     "ContentPipelineEligibility", "SocialSourceRegistry", "SocialSourceConfiguration",
     "SocialSourceAuditEvent", "SocialPostSource", "SocialContentMetrics",
     "SocialPostTicker", "SocialSignalRun", "SocialSignalSnapshot", "SocialSignalRunPointer",
