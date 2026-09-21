@@ -114,9 +114,9 @@ def generate_facts(pipeline, db, bundle):
     known = (
         db.query(ThemeDevelopmentEvent)
         .filter(
-            ThemeDevelopmentEvent.pipeline == pipeline,
             exists().where(
                 ThemeDevelopmentObservation.event_id == ThemeDevelopmentEvent.id,
+                ThemeDevelopmentObservation.analysis_channel == pipeline,
                 ThemeDevelopmentTheme.observation_id == ThemeDevelopmentObservation.id,
                 ThemeDevelopmentTheme.theme_id.in_(members),
                 ThemeDevelopmentObservation.superseded.is_(False),

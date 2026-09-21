@@ -5,8 +5,11 @@ from uuid import uuid4
 
 from sqlalchemy import func, or_
 
+from app.models.economic_taxonomy_runtime import TaxonomyAuthority
 from app.models.theme import ContentItem, ThemeMention
 from app.models.theme_intelligence import ThemeDevelopmentWork
+from app.services.economic_taxonomy_fence import producer_write
+from app.services.theme_development_facts import normalize_batch
 from app.services.theme_development_preparation import generate_facts, input_bundle
 from app.services.theme_development_service import record_developments
 from app.services.theme_evidence_eligibility_service import legacy_eligibility_exists
@@ -156,35 +159,55 @@ def process_one(sessions, generate=generate_facts):
                 if bundle["revision"] == revision
                 else None
             )
-        with sessions.begin() as db:
-            # Parent then work is the same lock order used by enqueue.
-            db.query(ContentItem).filter_by(id=item_id).with_for_update().one()
-            row = (
-                db.query(ThemeDevelopmentWork)
-                .filter_by(id=work_id)
-                .with_for_update()
-                .one()
-            )
-            if row.claim_token != token:
-                return True
-            current = input_bundle(db, item_id, pipeline)
-            if values is None or current["revision"] != revision:
-                row.status = "superseded"
-                enqueue(db, item_id, pipeline)
-            else:
-                record_developments(
-                    db,
-                    item=current["item"],
-                    pipeline=pipeline,
-                    revision=revision,
-                    theme_ids=current["theme_ids"],
-                    sources=current["sources"],
-                    source_urls=current["source_urls"],
-                    observations=values,
-                    available_at=datetime.now(timezone.utc),
+            prepared = (
+                normalize_batch(
+                    values,
+                    item_id=item_id,
+                    theme_ids=set(bundle["theme_ids"]),
+                    sources=bundle["sources"],
                 )
-                row.status = "complete"
-            row.lease_until, row.claim_token, row.error_code = None, None, None
+                if values is not None
+                else None
+            )
+        with sessions.begin() as db:
+            authority = db.get(TaxonomyAuthority, 1)
+            expected_epoch = authority.authority_epoch if authority is not None else 1
+            with producer_write(
+                db,
+                expected_epoch=expected_epoch,
+                allowed_modes={"legacy", "shadow", "dual", "economic"},
+            ) as locked_authority:
+                # Fence and authority precede the established parent/work lock order.
+                db.query(ContentItem).filter_by(id=item_id).with_for_update().one()
+                row = (
+                    db.query(ThemeDevelopmentWork)
+                    .filter_by(id=work_id)
+                    .with_for_update()
+                    .one()
+                )
+                if row.claim_token != token:
+                    return True
+                current = input_bundle(db, item_id, pipeline)
+                if values is None or current["revision"] != revision:
+                    row.status = "superseded"
+                    enqueue(db, item_id, pipeline)
+                else:
+                    record_developments(
+                        db,
+                        item=current["item"],
+                        pipeline=pipeline,
+                        revision=revision,
+                        theme_ids=current["theme_ids"],
+                        sources=current["sources"],
+                        source_urls=current["source_urls"],
+                        observations=values,
+                        prepared_observations=prepared,
+                        available_at=datetime.now(timezone.utc),
+                        authority_fenced=True,
+                        authority_epoch=locked_authority.authority_epoch,
+                    )
+                    row.status = "complete"
+                row.lease_until, row.claim_token, row.error_code = None, None, None
     except Exception:  # noqa: BLE001 -- Provider failures become bounded, visible retries.
         with sessions.begin() as db:
             row = (

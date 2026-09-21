@@ -84,6 +84,8 @@ from app.infra.db.models.social_signals import (
 )
 
 from .theme_intelligence import (
+    EconomicThemeDevelopment,
+    LegacyDevelopmentEventMapping,
     ThemeDevelopmentEvent,
     ThemeDevelopmentObservation,
     ThemeDevelopmentTheme,
@@ -150,6 +152,8 @@ from .economic_taxonomy_runtime import (
 )
 
 __all__ = [
+    "EconomicThemeDevelopment",
+    "LegacyDevelopmentEventMapping",
     "ThemeDevelopmentEvent",
     "ThemeDevelopmentObservation",
     "ThemeDevelopmentTheme",
