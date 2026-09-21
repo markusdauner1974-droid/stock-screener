@@ -1,12 +1,12 @@
 # Open Multi-Dimensional Economic Taxonomy
 
-**Status:** Second contract revision for review
+**Status:** Approved; implementation plan aligned
 
 **Date:** 2026-09-20
 
 **Revised:** 2026-09-21
 
-**Implementation plan:** `docs/superpowers/plans/2026-09-21-economic-taxonomy.md` remains on the prior revision and must be updated after this design revision is approved. Schema work remains gated on approval of both documents.
+**Implementation plan:** `docs/superpowers/plans/2026-09-21-economic-taxonomy.md` implements this revision. Production economic mode remains gated by that plan's Task 19 release checks.
 
 **Replaces:** Pipeline-scoped/L1-L2 theme identity after a staged cutover; it does not delete legacy records.
 
@@ -820,9 +820,9 @@ The entry gate is an approved driver-pack design/ADR answering all nine items pl
 - Inferring improving or deteriorating fundamentals from eligibility or unsigned attention counts.
 - Solving any section 21 entry decision inside the taxonomy migration.
 
-## 23. Plan rewrite gate
+## 23. Implementation-plan alignment gate
 
-Before schema implementation, the implementation plan must add a focused Task 0 that turns these contracts into executable interfaces, state machines, migrations, and test fixtures:
+The approved implementation plan satisfies this gate by making its Task 0 turn these contracts into executable interfaces, state machines, migrations, and test fixtures before schema work:
 
 1. stable processing requests, reusable extraction/review artifacts, exact classification attempts, and route-independent lineage;
 2. complete generation-input selection for eligibility, decisions, developments, overrides, mappings, and compatibility projections;
@@ -834,4 +834,4 @@ Before schema implementation, the implementation plan must add a focused Task 0 
 8. cardinality-safe mapping, redirect, and Social-decision contracts; and
 9. executable lifecycle, Fundamental Attention, signal weighting, benchmark, and release-gate contracts.
 
-Task 0 must produce failing counterexample tests and schema/interface decisions before the existing schema tasks begin. It must also verify and update the already-present `docs/adr/0005-economic-taxonomy-snapshots-and-interpretations.md`; it must not assume the ADR is absent or create a duplicate. Production economic mode remains impossible until authority-aware readers and the full release gate are complete.
+Task 0 is required to produce failing counterexample tests and schema/interface decisions before the schema tasks begin. It also verifies and updates the already-present `docs/adr/0005-economic-taxonomy-snapshots-and-interpretations.md`; it must not assume the ADR is absent or create a duplicate. Production economic mode remains impossible until authority-aware readers and the full release gate are complete.
