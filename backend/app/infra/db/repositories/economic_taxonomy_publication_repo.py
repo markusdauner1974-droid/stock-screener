@@ -8,6 +8,7 @@ from hashlib import sha256
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.orm import Session
 
 from app.models.economic_taxonomy import TaxonomyVersion
@@ -47,22 +48,29 @@ class EconomicTaxonomyPublicationRepository:
         self.session = session
 
     def lock_authority(self) -> TaxonomyAuthority:
+        defaults = {
+            "id": 1,
+            "mode": "legacy",
+            "processing_head_revision": 0,
+            "authority_epoch": 1,
+            "writes_fenced": False,
+            "semantic_invalidation_revision": 0,
+            "cutover_catch_up_cursor": [],
+            "rollback_state": "ready",
+        }
+        if self.session.get_bind().dialect.name == "postgresql":
+            self.session.execute(
+                postgresql_insert(TaxonomyAuthority)
+                .values(**defaults)
+                .on_conflict_do_nothing(index_elements=[TaxonomyAuthority.id])
+            )
         authority = self.session.execute(
             select(TaxonomyAuthority)
             .where(TaxonomyAuthority.id == 1)
             .with_for_update()
         ).scalar_one_or_none()
         if authority is None:
-            authority = TaxonomyAuthority(
-                id=1,
-                mode="legacy",
-                processing_head_revision=0,
-                authority_epoch=1,
-                writes_fenced=False,
-                semantic_invalidation_revision=0,
-                cutover_catch_up_cursor=[],
-                rollback_state="ready",
-            )
+            authority = TaxonomyAuthority(**defaults)
             self.session.add(authority)
             self.session.flush()
         return authority

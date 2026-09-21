@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from threading import Event
+from threading import Barrier, Event
 from uuid import UUID, uuid4
 
 import pytest
@@ -160,3 +160,37 @@ def test_manifest_cutoff_includes_late_lower_id_and_ignores_later_ordinary_work(
     finally:
         first.close()
         second.close()
+
+
+def test_concurrent_first_writers_create_one_authority_row():
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    start = Barrier(2)
+
+    def write(ordinal):
+        session = factory()
+        try:
+            start.wait(timeout=5)
+            with producer_write(
+                session,
+                expected_epoch=1,
+                allowed_modes={"legacy"},
+            ) as authority:
+                EconomicTaxonomyPublicationRepository(session).append_source_revision(
+                    producer_kind="content",
+                    logical_source_key=f"first-writer:{ordinal}",
+                    revision_kind="evidence",
+                    revision_number=1,
+                    content_hash=f"hash-{ordinal}",
+                    authority_epoch=authority.authority_epoch,
+                )
+            session.commit()
+        finally:
+            session.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(write, ordinal) for ordinal in range(2)]
+        for future in futures:
+            future.result(timeout=5)
+
+    with factory() as session:
+        assert session.query(TaxonomyAuthority).count() == 1

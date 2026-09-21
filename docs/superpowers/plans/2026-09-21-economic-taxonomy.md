@@ -12,7 +12,7 @@
 
 **ADR:** `docs/adr/0005-economic-taxonomy-snapshots-and-interpretations.md`
 
-**Status:** Aligned with the approved design and round-three implementation-contract amendments; ready for implementation. Production cutover remains gated by Task 19.
+**Status:** production-ready. Production cutover remains gated by Task 19's exact PostgreSQL checks and the operator procedure in `docs/runbooks/economic-taxonomy-cutover.md`; the completed disposable-database exercise is recorded in `docs/runbooks/artifacts/economic-taxonomy-rehearsal-2026-09-21.md`.
 
 ## Global Constraints
 
@@ -1731,7 +1731,7 @@ git commit -m "feat: cut readers over to serving generations"
 - Consumes: every prior task.
 - Produces: exact PostgreSQL gate, reader-ready release artifact, and catch-up/barrier/recovery procedures.
 
-- [ ] **Step 1: Write failing gate and runbook contract tests**
+- [x] **Step 1: Write failing gate and runbook contract tests**
 
 ```python
 def test_required_gate_rejects_skipped_node(tmp_path, fake_pytest):
@@ -1748,19 +1748,19 @@ def test_runbook_names_catchup_barrier_and_recovery():
         assert phrase in text
 ```
 
-- [ ] **Step 2: Run tests and confirm gate/runbook are absent**
+- [x] **Step 2: Run tests and confirm gate/runbook are absent**
 
 Run: `cd backend && ./venv/bin/pytest tests/unit/test_required_economic_taxonomy_postgres.py tests/unit/test_economic_taxonomy_runbook.py -q`
 
 Expected: FAIL on missing script/runbook.
 
-- [ ] **Step 3: Implement the exact-node PostgreSQL runner**
+- [x] **Step 3: Implement the exact-node PostgreSQL runner**
 
 Read non-comment node IDs, run `pytest --collect-only`, fail if any ID is absent, then execute with a plugin that counts pass/fail/skip/xfail/xpass. Exit nonzero unless every listed node passed and PostgreSQL identity was verified. Include snapshot sealing, fence, work, processing publication, outbox, Social, and publication race suites.
 
 The exact-node manifest must include PostgreSQL versions of the new critical contracts: concurrent provider-attempt numbering, concurrent observation-only assignments without head advancement, two immutable Social revisions for one association pair, publication-commit crash before notification with worker recovery, and abandoned-generation delivery exclusion. Unit coverage for late archive/partial recapture precedence, dimension-definition hashing, retryable-versus-uncertain provider outcomes, and reactivated-to-dormant lifecycle remains mandatory in the focused suite below; Task 19 does not replace their owning task gates.
 
-- [ ] **Step 4: Add the CI gate**
+- [x] **Step 4: Add the CI gate**
 
 ```yaml
 - name: Required economic taxonomy PostgreSQL contracts
@@ -1770,17 +1770,17 @@ The exact-node manifest must include PostgreSQL versions of the new critical con
   run: cd backend && ./venv/bin/python scripts/run_required_economic_taxonomy_postgres.py
 ```
 
-- [ ] **Step 5: Write exact operator commands and stop conditions**
+- [x] **Step 5: Write exact operator commands and stop conditions**
 
 Document migration, seed, shadow, benchmark, reviewed dispositions/allocations, dual mode, catch-up outside the publication transaction, short cutoff capture, outbox drain, generation preparation, reader-capability verification, final compare-and-set barrier, `> C` backlog, automatic routine publication, publication verification, temporarily unavailable rollback, normal rollback, and `rollback_recovery`. Stop on unresolved allocations/conflicts, parent or semantic-invalidation mismatch, pending required prior-generation delivery, unstaged candidate projections, stale snapshot hash, missing reader capability, benchmark failure, unauthorized principal, or any skipped required PostgreSQL node. Ordinary revisions after C are backlog, not a stop condition.
 
-- [ ] **Step 6: Run focused backend and legacy regressions**
+- [x] **Step 6: Run focused backend and legacy regressions**
 
-Run: `cd backend && ./venv/bin/pytest -q tests/unit/test_economic_taxonomy_contracts.py tests/unit/test_economic_taxonomy_snapshots.py tests/unit/test_economic_source_admission.py tests/unit/test_economic_taxonomy_work_repo.py tests/unit/test_economic_exposure_extraction.py tests/unit/test_economic_exposure_claim_review.py tests/unit/test_economic_taxonomy_processor.py tests/unit/test_economic_taxonomy_interpretations.py tests/unit/test_economic_taxonomy_mappings.py tests/unit/test_economic_theme_lifecycle.py tests/unit/test_economic_theme_metrics.py tests/unit/test_economic_taxonomy_outbox.py tests/unit/test_economic_taxonomy_social_adapter.py tests/unit/services/test_social_llm_budget.py tests/unit/test_economic_taxonomy_developments.py tests/unit/test_economic_taxonomy_publication.py tests/unit/test_economic_taxonomy_tasks.py tests/unit/test_economic_theme_read_service.py tests/unit/test_economic_theme_consumer_cutover.py tests/unit/test_required_economic_taxonomy_postgres.py tests/unit/test_economic_taxonomy_runbook.py tests/unit/test_theme_claim_review.py tests/unit/test_theme_state_authorities.py tests/unit/test_theme_development.py tests/integration/test_social_theme_projection.py`
+Run: `cd backend && THEME_REVIEW_TEST_DATABASE_URL=postgresql://ci:ci@localhost:5432/economic_taxonomy_ci ./venv/bin/pytest -q tests/unit/test_economic_taxonomy_contracts.py tests/unit/test_economic_taxonomy_snapshots.py tests/unit/test_economic_source_admission.py tests/unit/test_economic_taxonomy_work_repo.py tests/unit/test_economic_exposure_extraction.py tests/unit/test_economic_exposure_claim_review.py tests/unit/test_economic_taxonomy_processor.py tests/unit/test_economic_taxonomy_interpretations.py tests/unit/test_economic_taxonomy_mappings.py tests/unit/test_economic_theme_lifecycle.py tests/unit/test_economic_theme_metrics.py tests/unit/test_economic_taxonomy_outbox.py tests/unit/test_economic_taxonomy_social_adapter.py tests/unit/services/test_social_llm_budget.py tests/unit/test_economic_taxonomy_developments.py tests/unit/test_economic_taxonomy_publication.py tests/unit/test_economic_taxonomy_tasks.py tests/unit/test_economic_theme_read_service.py tests/unit/test_economic_theme_consumer_cutover.py tests/unit/test_required_economic_taxonomy_postgres.py tests/unit/test_economic_taxonomy_runbook.py tests/unit/test_theme_claim_review.py tests/unit/test_theme_state_authorities.py tests/unit/test_theme_development.py tests/integration/test_social_theme_projection.py`
 
 Expected: PASS with zero skips in this focused set.
 
-- [ ] **Step 7: Run the required PostgreSQL gate and full frontend verification**
+- [x] **Step 7: Run the required PostgreSQL gate and full frontend verification**
 
 Run: `cd backend && DATABASE_URL=postgresql://ci:ci@localhost:5432/ci STOCKSCANNER_TEST_ALLOW_POSTGRES=1 ./venv/bin/python scripts/run_required_economic_taxonomy_postgres.py`
 
@@ -1790,15 +1790,15 @@ Run: `cd frontend && npm run build`
 
 Expected: every manifest node passes with zero skips/xfails; full Vitest and production build pass.
 
-- [ ] **Step 8: Rehearse cutover and rollback recovery in disposable PostgreSQL**
+- [x] **Step 8: Rehearse cutover and rollback recovery in disposable PostgreSQL**
 
 Seed representative legacy themes, a Refining split, duplicate/conflicting Social associations, Social-native development, corrected-to-empty source, UI snapshots, and an out-of-order compatibility event. Run the exact runbook and record generation IDs, taxonomy/interpretation/manifest hashes, checkpoints, epoch, capability manifest, and post-rollback reader equivalence.
 
-- [ ] **Step 9: Verify deferred-work entry gates are documented and non-blocking**
+- [x] **Step 9: Verify deferred-work entry gates are documented and non-blocking**
 
 Copy the `Deferred Work Boundary` below into the runbook's scope section. State that none of those capabilities is required for V1 cutover and that no implementation may begin until its listed decisions and evidence gate are approved. Verify no API/schema uses misleading reserved fields (especially `fundamental_momentum`) in anticipation of deferred direction work.
 
-- [ ] **Step 10: Mark the design/plan production-readiness gate and commit**
+- [x] **Step 10: Mark the design/plan production-readiness gate and commit**
 
 The design is approved for implementation, but update the design and plan to `production-ready` only after the rehearsal artifact is attached. Link the runbook to the design, ADR, and this plan.
 

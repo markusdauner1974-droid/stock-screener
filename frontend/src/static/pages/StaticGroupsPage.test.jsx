@@ -122,7 +122,7 @@ describe('StaticGroupsPage', () => {
     renderPage();
 
     expect(await screen.findByRole('heading', { name: 'US Group Rankings' })).toBeInTheDocument();
-    const table = screen.getByRole('columnheader', { name: 'Avg RS' }).closest('table');
+    const table = (await screen.findByRole('columnheader', { name: 'Avg RS' })).closest('table');
     const headers = within(table).getAllByRole('columnheader').map((cell) => cell.textContent.trim());
     expect(headers).toEqual([
       'Rank',
@@ -156,7 +156,7 @@ describe('StaticGroupsPage', () => {
     renderPage();
 
     expect(await screen.findByRole('heading', { name: 'US Group Rankings' })).toBeInTheDocument();
-    const table = screen.getByRole('columnheader', { name: 'Avg RS' }).closest('table');
+    const table = (await screen.findByRole('columnheader', { name: 'Avg RS' })).closest('table');
     const rows = within(table).getAllByRole('row');
     const leaderCells = within(rows[1]).getAllByRole('cell');
     const laggardCells = within(rows[2]).getAllByRole('cell');

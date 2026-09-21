@@ -1,12 +1,12 @@
 # Open Multi-Dimensional Economic Taxonomy
 
-**Status:** Approved; implementation plan aligned
+**Status:** production-ready after the recorded PostgreSQL rehearsal
 
 **Date:** 2026-09-20
 
 **Revised:** 2026-09-21
 
-**Implementation plan:** `docs/superpowers/plans/2026-09-21-economic-taxonomy.md` implements this revision. Production economic mode remains gated by that plan's Task 19 release checks.
+**Implementation plan:** `docs/superpowers/plans/2026-09-21-economic-taxonomy.md` implements this revision. Production economic mode remains gated by that plan's Task 19 release checks, the operator procedure in `docs/runbooks/economic-taxonomy-cutover.md`, and a deployment-specific repeat of `docs/runbooks/artifacts/economic-taxonomy-rehearsal-2026-09-21.md`.
 
 **Replaces:** Pipeline-scoped/L1-L2 theme identity after a staged cutover; it does not delete legacy records.
 

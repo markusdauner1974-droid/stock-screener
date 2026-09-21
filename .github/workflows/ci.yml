@@ -78,6 +78,15 @@ jobs:
           DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
           STOCKSCANNER_TEST_ALLOW_POSTGRES: "1"
 
+      - name: Required economic taxonomy PostgreSQL contracts
+        run: |
+          PGPASSWORD=ci createdb -h localhost -U ci economic_taxonomy_ci
+          cd backend
+          python scripts/run_required_economic_taxonomy_postgres.py
+        env:
+          DATABASE_URL: postgresql://ci:ci@localhost:5432/economic_taxonomy_ci
+          STOCKSCANNER_TEST_ALLOW_POSTGRES: "1"
+
       - name: "Gate 4: Performance baselines"
         run: make gate-4
 
