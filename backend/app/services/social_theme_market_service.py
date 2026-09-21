@@ -24,6 +24,7 @@ from app.models.stock import StockPrice
 from app.models.stock_universe import StockUniverse
 from app.models.theme import ThemeCluster
 from app.services.benchmark_registry_service import BenchmarkRegistryService
+from app.services.economic_theme_read_service import EconomicThemeReader
 from app.services.security_master_service import security_master_resolver
 from app.services.social_company_identity_service import SocialCompanyIdentityService
 from app.services.social_confirmation_reader import (
@@ -67,10 +68,16 @@ class AcceptedBasketReader(Protocol):
 
 
 class LiveAcceptedBasketReader:
-    def __init__(self, db, *, pipeline="technical"):
+    def __init__(self, db, *, pipeline="technical", authority_source=None):
         self.db, self.pipeline = db, pipeline
+        self.authority_source = authority_source
 
     def read(self, theme_key, market):
+        authority_source = self.authority_source or EconomicThemeReader(
+            self.db
+        ).source_name
+        if authority_source == "economic":
+            raise MeasurementUnavailable("legacy_theme_authority_disabled")
         identity = SocialCompanyIdentityService(self.db).read()
         theme = self.db.scalar(select(ThemeCluster).where(
             ThemeCluster.canonical_key == theme_key, ThemeCluster.pipeline == self.pipeline,
@@ -162,15 +169,24 @@ class SocialThemeMarketService:
         self.registry = benchmark_registry or BenchmarkRegistryService()
         self.reader = SocialConfirmationReader(db, calendar=calendar, benchmark_registry=self.registry, grace_minutes=grace_minutes)
         self.calendar = self.reader.calendar
-        self.membership_reader = membership_reader or (
-            EconomicAcceptedBasketReader(
-                db,
-                economic_theme_id=economic_theme_id,
-                association_revision_ref_ids=association_revision_ref_ids,
-            )
-            if economic_theme_id is not None
-            else LiveAcceptedBasketReader(db, pipeline=pipeline)
-        )
+        if membership_reader is not None:
+            self.membership_reader = membership_reader
+        else:
+            authority_source = EconomicThemeReader(db).source_name
+            if authority_source == "economic":
+                if economic_theme_id is None:
+                    raise MeasurementUnavailable("economic_theme_id_required")
+                self.membership_reader = EconomicAcceptedBasketReader(
+                    db,
+                    economic_theme_id=economic_theme_id,
+                    association_revision_ref_ids=association_revision_ref_ids,
+                )
+            else:
+                self.membership_reader = LiveAcceptedBasketReader(
+                    db,
+                    pipeline=pipeline,
+                    authority_source=authority_source,
+                )
         self.pinned_feature_run = pinned_feature_run
         self.benchmark_symbol = benchmark_symbol
 

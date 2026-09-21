@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
 from threading import Lock
 from typing import Any
@@ -42,14 +43,20 @@ from app.models.economic_taxonomy import (
 )
 from app.models.economic_taxonomy_runtime import (
     ClaimAssignment,
+    ClassificationAttempt,
     DevelopmentSelectionRevision,
     GenerationInputManifest,
     InterpretationSelection,
     InterpretationSet,
     MetricsRevision,
+    ProcessingRequest,
     ReaderSnapshotBundle,
     ReaderSnapshotEntry,
     SocialAssociationRevisionRef,
+    SourceLineage,
+    TaxonomyOperationEvent,
+    TaxonomyOperationPreview,
+    TaxonomyOperationRequest,
     ThemeConstituentExposure,
     ThemeMetric,
     ThemeObservation,
@@ -58,6 +65,7 @@ from app.models.economic_taxonomy_runtime import (
 from app.models.industry import IBDGroupRank
 from app.models.market_breadth import MarketBreadth
 from app.models.scan_result import Scan
+from app.models.stock_universe import StockUniverse
 from app.models.theme import (
     ContentItem,
     ContentItemPipelineState,
@@ -102,6 +110,7 @@ from app.schemas.theme import (
 )
 from app.services.breadth.query import breadth_query, latest_breadth
 from app.services.breadth.types import CURRENT_BREADTH_CALCULATION_REVISION
+from app.services.economic_theme_read_service import EconomicThemeReader
 from app.services.group_ranking_payloads import group_snapshot_metadata
 from app.services.theme_discovery_service import ThemeDiscoveryService
 from app.services.theme_pipeline_state_service import compute_pipeline_observability
@@ -415,6 +424,44 @@ def _build_economic_snapshot_payloads(
     if any(row.economic_theme_id not in theme_ids for row in assignments):
         raise SnapshotBundleError("snapshot_reference_not_in_taxonomy")
 
+    assignment_family = (
+        dict(
+            db.execute(
+                select(ClaimAssignment.id, SourceLineage.source_family_id)
+                .join(
+                    ClassificationAttempt,
+                    ClassificationAttempt.id
+                    == ClaimAssignment.classification_attempt_id,
+                )
+                .join(
+                    ProcessingRequest,
+                    ProcessingRequest.id
+                    == ClassificationAttempt.processing_request_id,
+                )
+                .join(
+                    SourceLineage,
+                    SourceLineage.id == ProcessingRequest.source_lineage_id,
+                )
+                .where(ClaimAssignment.id.in_(assignment_ids))
+            )
+        )
+        if assignment_ids
+        else {}
+    )
+    security_ids = {
+        row.security_id for row in constituent_rows if row.security_id is not None
+    } | {row.security_id for row in signal_rows if row.security_id is not None}
+    securities = (
+        {
+            row.id: row
+            for row in db.scalars(
+                select(StockUniverse).where(StockUniverse.id.in_(security_ids))
+            )
+        }
+        if security_ids
+        else {}
+    )
+
     development_ids = _pinned_development_observation_ids(db, manifest)
     development_rows = (
         db.execute(
@@ -497,6 +544,11 @@ def _build_economic_snapshot_payloads(
             or assignment_by_id[row.claim_assignment_id].economic_theme_id
             == revision.theme_id
         ]
+        source_family_ids = {
+            assignment_family.get(row.claim_assignment_id)
+            for row in theme_observations
+            if assignment_family.get(row.claim_assignment_id) is not None
+        }
         themes.append(
             {
                 "economic_theme_id": str(revision.theme_id),
@@ -513,10 +565,21 @@ def _build_economic_snapshot_payloads(
                 "derived_observation_count": len(
                     {row.id for row in theme_observations if row.observation_kind != "primary"}
                 ),
+                "deduplicated_source_family_count": len(source_family_ids),
                 "signals": [
                     {
                         "signal_id": str(row.id),
                         "security_id": row.security_id,
+                        "canonical_symbol": (
+                            securities[row.security_id].symbol
+                            if row.security_id in securities
+                            else None
+                        ),
+                        "market": (
+                            securities[row.security_id].market
+                            if row.security_id in securities
+                            else None
+                        ),
                         "signal_kind": row.signal_kind,
                         "available_at": row.available_at.isoformat(),
                         "payload": dict(row.payload),
@@ -529,6 +592,16 @@ def _build_economic_snapshot_payloads(
                     {
                         "exposure_id": str(row.id),
                         "security_id": row.security_id,
+                        "canonical_symbol": (
+                            securities[row.security_id].symbol
+                            if row.security_id in securities
+                            else None
+                        ),
+                        "market": (
+                            securities[row.security_id].market
+                            if row.security_id in securities
+                            else None
+                        ),
                         "exposure_kind": row.exposure_kind,
                         "exposure_strength": row.exposure_strength,
                         "payload": dict(row.payload),
@@ -647,6 +720,7 @@ def _build_economic_snapshot_payloads(
                 social_by_theme.items(), key=lambda value: str(value[0])
             )
         ],
+        "operation_previews": _operation_preview_payloads(db, taxonomy.id),
     }
     return catalog, review
 
@@ -715,8 +789,10 @@ def _pinned_social_memberships(db, interpretation_set_id):
         )
         if association is None or revision is None:
             raise SnapshotBundleError("social_revision_not_pinned")
+        security = db.get(StockUniverse, association.security_id)
         grouped.setdefault(association.economic_theme_id, []).append(
             {
+                "association_revision_ref_id": str(ref.id),
                 "association_id": str(association.id),
                 "association_revision_id": str(revision.id),
                 "revision_number": revision.revision_number,
@@ -726,6 +802,8 @@ def _pinned_social_memberships(db, interpretation_set_id):
                     else None
                 ),
                 "security_id": association.security_id,
+                "canonical_symbol": security.symbol if security is not None else None,
+                "market": security.market if security is not None else None,
                 "state": revision.state,
                 "live": revision.live,
                 "admission_state": revision.admission_state,
@@ -733,6 +811,44 @@ def _pinned_social_memberships(db, interpretation_set_id):
             }
         )
     return grouped
+
+
+def _operation_preview_payloads(db, current_taxonomy_version_id):
+    rows = db.execute(
+        select(TaxonomyOperationRequest, TaxonomyOperationPreview).join(
+            TaxonomyOperationPreview,
+            TaxonomyOperationPreview.operation_request_id
+            == TaxonomyOperationRequest.id,
+        )
+    ).all()
+    payloads = []
+    for request, preview in rows:
+        latest_event = db.scalar(
+            select(TaxonomyOperationEvent)
+            .where(TaxonomyOperationEvent.operation_request_id == request.id)
+            .order_by(TaxonomyOperationEvent.sequence_number.desc())
+            .limit(1)
+        )
+        payloads.append(
+            {
+                "operation_request_id": str(request.id),
+                "operation_kind": request.operation_kind,
+                "base_taxonomy_version_id": str(request.base_taxonomy_version_id),
+                "candidate_taxonomy_version_id": str(
+                    preview.candidate_taxonomy_version_id
+                ),
+                "preview_hash": preview.preview_hash,
+                "affected_identities": deepcopy(preview.affected_identities or []),
+                "assignments": deepcopy(preview.assignments or []),
+                "mappings": deepcopy(preview.mappings or []),
+                "validation_errors": deepcopy(preview.validation_errors or []),
+                "stale": request.base_taxonomy_version_id
+                != current_taxonomy_version_id,
+                "status": latest_event.event_type if latest_event else "previewed",
+                "reviewer_reason": latest_event.reason if latest_event else None,
+            }
+        )
+    return sorted(payloads, key=lambda row: row["operation_request_id"])
 
 
 class GroupsBootstrapUnavailableError(RuntimeError):
@@ -844,7 +960,12 @@ class UISnapshotService:
         except GroupsBootstrapUnavailableError:
             return None
 
-    def get_themes_bootstrap(self, pipeline: str = "technical", theme_view: str = "grouped") -> SnapshotResult | None:
+    def get_themes_bootstrap(
+        self, pipeline: str = "technical", theme_view: str = "grouped"
+    ) -> SnapshotResult | None:
+        economic = self._economic_themes_snapshot()
+        if economic is not None:
+            return economic
         self._ensure_schema()
         variant_key = self._themes_variant_key(pipeline, theme_view)
         return self._run_with_storage_recovery(
@@ -856,10 +977,34 @@ class UISnapshotService:
             )
         )
 
-    def publish_themes_bootstrap(self, pipeline: str = "technical", theme_view: str = "grouped") -> SnapshotResult:
+    def publish_themes_bootstrap(
+        self, pipeline: str = "technical", theme_view: str = "grouped"
+    ) -> SnapshotResult:
+        economic = self._economic_themes_snapshot()
+        if economic is not None:
+            return economic
         from .theme_group_coordination import publication_scope
         with self._session_factory() as db, publication_scope(db):
             return self._publish_themes_bootstrap(pipeline, theme_view)
+
+    def _economic_themes_snapshot(self) -> SnapshotResult | None:
+        with self._session_factory() as db:
+            reader = EconomicThemeReader(db)
+            if reader.source_name != "economic":
+                return None
+            payload = reader.read_current_catalog()
+            published_at = payload["generation"].get("published_at")
+            return SnapshotResult(
+                snapshot_revision=payload["generation_id"],
+                source_revision=payload["generation_input_manifest_hash"],
+                published_at=(
+                    datetime.fromisoformat(published_at)
+                    if published_at
+                    else datetime.now(UTC)
+                ),
+                is_stale=False,
+                payload=payload,
+            )
 
     def _publish_themes_bootstrap(self, pipeline: str, theme_view: str) -> SnapshotResult:
         self._ensure_schema()

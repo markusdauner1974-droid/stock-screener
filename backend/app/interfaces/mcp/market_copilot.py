@@ -23,6 +23,7 @@ from app.models.theme import ThemeAlert, ThemeCluster, ThemeConstituent, ThemeMe
 from app.models.user_watchlist import UserWatchlist, WatchlistItem
 from app.schemas.scanning import ExplainResponse
 from app.services.breadth.query import breadth_query, latest_breadth
+from app.services.economic_theme_read_service import EconomicThemeReader
 from app.services.task_registry_service import SCHEDULED_TASKS
 from app.tasks.market_queues import SUPPORTED_MARKETS
 from app.use_cases.feature_store.compare_runs import (
@@ -644,6 +645,9 @@ class MarketCopilotService:
 
     def _theme_state(self, args: ThemeStateArgs) -> ToolEnvelope:
         with self._session_scope() as db:
+            economic = EconomicThemeReader(db)
+            if economic.source_name == "economic":
+                return self._economic_theme_state(economic, args)
             if args.theme_name:
                 theme = self._resolve_theme(db, args.theme_name)
                 if theme is None:
@@ -729,6 +733,79 @@ class MarketCopilotService:
             ),
             themes=ranked_themes,
             alerts=alerts,
+        )
+
+    def _economic_theme_state(
+        self, reader: EconomicThemeReader, args: ThemeStateArgs
+    ) -> ToolEnvelope:
+        catalog = reader.read_current_catalog()
+        if args.theme_name:
+            theme = reader.find_theme(args.theme_name)
+            if theme is None:
+                return self._envelope(
+                    f"No published Economic Theme matched {args.theme_name!r}.",
+                    facts=[],
+                    citations=[],
+                    next_actions=[
+                        "Use a broader theme name or omit theme_name to inspect the published generation."
+                    ],
+                    freshness=self._freshness(),
+                    themes=[],
+                )
+            theme_id = str(theme["economic_theme_id"])
+            constituents = list(theme.get("constituents", []))[: args.limit]
+            return self._envelope(
+                f"Economic Theme {theme['display_name']} has {len(constituents)} published constituents.",
+                facts=[
+                    self._fact("economic_theme_id", theme_id, "economic_themes"),
+                    self._fact(
+                        "published_constituents",
+                        len(constituents),
+                        "reader_snapshot_bundles",
+                    ),
+                ],
+                citations=[
+                    self._citation(
+                        "economic_theme",
+                        theme["display_name"],
+                        f"economic_themes:{theme_id}",
+                    )
+                ],
+                next_actions=[],
+                freshness=self._freshness(
+                    theme_generation=catalog["generation_id"],
+                    theme_published_at=catalog["generation"].get("published_at"),
+                ),
+                theme=theme,
+                constituents=constituents,
+                alerts=[],
+                unavailable={"theme_alerts": "not_defined_for_economic_taxonomy"},
+            )
+
+        ranked_themes = reader.ranked_themes(limit=args.limit)
+        return self._envelope(
+            f"Published Economic Theme generation includes {len(ranked_themes)} ranked themes; legacy alerts are unavailable.",
+            facts=[
+                self._fact(
+                    "ranked_themes", len(ranked_themes), "reader_snapshot_bundles"
+                ),
+                self._fact(
+                    "generation_id", catalog["generation_id"], "serving_generations"
+                ),
+            ],
+            citations=[],
+            next_actions=(
+                []
+                if ranked_themes
+                else ["Publish an Economic Theme generation with calculated metrics."]
+            ),
+            freshness=self._freshness(
+                theme_generation=catalog["generation_id"],
+                theme_published_at=catalog["generation"].get("published_at"),
+            ),
+            themes=ranked_themes,
+            alerts=[],
+            unavailable={"theme_alerts": "not_defined_for_economic_taxonomy"},
         )
 
     def _task_status(self, args: TaskStatusArgs) -> ToolEnvelope:
@@ -997,32 +1074,57 @@ class MarketCopilotService:
                 .order_by(UserWatchlist.position.asc())
                 .all()
             )
-            constituent_base_query = (
-                db.query(ThemeConstituent, ThemeCluster)
-                .join(ThemeCluster, ThemeCluster.id == ThemeConstituent.theme_cluster_id)
-                .filter(
-                    ThemeConstituent.symbol == args.symbol,
-                    ThemeConstituent.is_active.is_(True),
-                    ThemeCluster.is_active.is_(True),
-                )
-                .order_by(ThemeCluster.display_name.asc())
-            )
-            if run is not None:
-                constituent_rows = (
-                    constituent_base_query
-                    .add_entity(ThemeMetrics)
-                    .outerjoin(
-                        ThemeMetrics,
-                        (ThemeMetrics.theme_cluster_id == ThemeCluster.id)
-                        & (ThemeMetrics.date == run.as_of_date),
-                    )
-                    .all()
+            economic = EconomicThemeReader(db)
+            if economic.source_name == "economic":
+                themes = economic.theme_summaries_for_symbol(args.symbol)
+                has_theme_metrics = any(
+                    row.get("momentum_score") is not None for row in themes
                 )
             else:
-                constituent_rows = [
-                    (constituent, cluster, None)
-                    for constituent, cluster in constituent_base_query.all()
+                constituent_base_query = (
+                    db.query(ThemeConstituent, ThemeCluster)
+                    .join(
+                        ThemeCluster,
+                        ThemeCluster.id == ThemeConstituent.theme_cluster_id,
+                    )
+                    .filter(
+                        ThemeConstituent.symbol == args.symbol,
+                        ThemeConstituent.is_active.is_(True),
+                        ThemeCluster.is_active.is_(True),
+                    )
+                    .order_by(ThemeCluster.display_name.asc())
+                )
+                if run is not None:
+                    constituent_rows = (
+                        constituent_base_query.add_entity(ThemeMetrics)
+                        .outerjoin(
+                            ThemeMetrics,
+                            (ThemeMetrics.theme_cluster_id == ThemeCluster.id)
+                            & (ThemeMetrics.date == run.as_of_date),
+                        )
+                        .all()
+                    )
+                else:
+                    constituent_rows = [
+                        (constituent, cluster, None)
+                        for constituent, cluster in constituent_base_query.all()
+                    ]
+                themes = [
+                    {
+                        "display_name": cluster.display_name,
+                        "canonical_key": cluster.canonical_key,
+                        "category": cluster.category,
+                        "lifecycle_state": cluster.lifecycle_state,
+                        "confidence": constituent.confidence,
+                        "mention_count": constituent.mention_count,
+                        "momentum_score": getattr(metrics, "momentum_score", None),
+                        "status": getattr(metrics, "status", None),
+                    }
+                    for constituent, cluster, metrics in constituent_rows
                 ]
+                has_theme_metrics = any(
+                    metrics is not None for _, _, metrics in constituent_rows
+                )
 
         if stock is None:
             return self._envelope(
@@ -1052,20 +1154,6 @@ class MarketCopilotService:
                 technicals["run_id"] = run.id
                 technicals["as_of_date"] = run.as_of_date.isoformat()
 
-        themes = [
-            {
-                "display_name": cluster.display_name,
-                "canonical_key": cluster.canonical_key,
-                "category": cluster.category,
-                "lifecycle_state": cluster.lifecycle_state,
-                "confidence": constituent.confidence,
-                "mention_count": constituent.mention_count,
-                "momentum_score": getattr(metrics, "momentum_score", None),
-                "status": getattr(metrics, "status", None),
-            }
-            for constituent, cluster, metrics in constituent_rows
-        ]
-        has_theme_metrics = any(metrics is not None for _, _, metrics in constituent_rows)
         breadth_record = self._breadth_record(breadth)
         watchlist_rows = [{"id": row.id, "name": row.name} for row in watchlists]
         run_date = run.as_of_date if run is not None else None
@@ -1080,7 +1168,16 @@ class MarketCopilotService:
             facts.append(self._fact("composite_score", technicals.get("composite_score"), "feature_runs", run_date))
         citations = [self._citation("stock_universe", stock.symbol, f"stock_universe:{stock.symbol}")]
         citations.extend(
-            self._citation("theme_clusters", theme["display_name"], f"theme_clusters:{theme['canonical_key']}", run_date)
+            self._citation(
+                "economic_themes" if theme.get("theme_id") else "theme_clusters",
+                theme["display_name"],
+                (
+                    f"economic_themes:{theme['theme_id']}"
+                    if theme.get("theme_id")
+                    else f"theme_clusters:{theme['canonical_key']}"
+                ),
+                run_date,
+            )
             for theme in themes[:3]
         )
         if breadth is not None:

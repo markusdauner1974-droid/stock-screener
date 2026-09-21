@@ -15,7 +15,6 @@ from ...models.theme import (
     ContentItem,
     ThemeAlert,
     ThemeCluster,
-    ThemeConstituent,
     ThemeMention,
     ThemeMetrics,
 )
@@ -26,7 +25,6 @@ from ...schemas.theme import (
     CrossIndustryPairResponse,
     EmergingThemeResponse,
     EmergingThemesResponse,
-    NewEntrantResponse,
     SimilarThemeResponse,
     SimilarThemesResponse,
     ThemeAlertResponse,
@@ -44,11 +42,11 @@ from ...schemas.theme import (
     ThemeMetricsResponse,
     ThemeRankingItem,
     ThemeRankingsResponse,
-    ThemeReference,
     ThemeRelationshipResponse,
     ThemeValidationResponse,
 )
 from ...schemas.ui_view_snapshot import UISnapshotEnvelope
+from ...services.economic_theme_read_service import EconomicThemeReader
 from ...services.live_attachment_service import attachment_snapshots
 from ...services.theme_correlation_service import ThemeCorrelationService
 from ...services.theme_discovery_service import ThemeDiscoveryService
@@ -59,6 +57,21 @@ from .themes_common import parse_csv_values, safe_theme_cluster_response
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _economic_reader(db: Session) -> EconomicThemeReader | None:
+    reader = EconomicThemeReader(db)
+    return reader if reader.source_name == "economic" else None
+
+
+def _economic_endpoint_required() -> None:
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "economic_generation_endpoint_required",
+            "endpoint": "/api/v1/economic-themes",
+        },
+    )
 
 
 @router.get("/bootstrap", response_model=UISnapshotEnvelope)
@@ -94,6 +107,22 @@ def get_theme_rankings(
     db: Session = Depends(get_db),
 ):
     """Get current theme rankings sorted by momentum score."""
+    economic = _economic_reader(db)
+    if economic is not None:
+        lifecycle_filter = set(parse_csv_values(lifecycle_states) or []) or None
+        rows, total = economic.legacy_rankings(
+            pipeline=pipeline,
+            limit=limit,
+            offset=offset,
+            lifecycle_states=lifecycle_filter,
+        )
+        catalog = economic.read_current_catalog()
+        return ThemeRankingsResponse(
+            date=str(catalog.get("metrics_as_of") or "")[:10] or None,
+            total_themes=total,
+            pipeline=pipeline,
+            rankings=[ThemeRankingItem(**row) for row in rows],
+        )
     service = ThemeDiscoveryService(db, pipeline=pipeline)
 
     if recalculate:
@@ -144,6 +173,41 @@ def get_emerging_themes(
     db: Session = Depends(get_db),
 ):
     """Discover newly emerging themes."""
+    economic = _economic_reader(db)
+    if economic is not None:
+        catalog = economic.read_current_catalog()
+        generated_at = str(
+            catalog.get("metrics_as_of")
+            or catalog.get("generation", {}).get("published_at")
+            or ""
+        )
+        rows = []
+        for theme in economic.ranked_themes(
+            ranking_view="emerging",
+            limit=max(len(catalog.get("themes", [])), 1),
+            include_unavailable=False,
+        ):
+            metric = theme["selected_metric"]
+            velocity = float(metric.get("raw_value") or 0)
+            mentions = int(theme.get("deduplicated_source_family_count") or 0)
+            if velocity < min_velocity or mentions < min_mentions:
+                continue
+            rows.append(
+                EmergingThemeResponse(
+                    theme=theme["display_name"],
+                    first_seen=generated_at,
+                    mentions_7d=mentions,
+                    velocity=velocity,
+                    sentiment=0,
+                    lifecycle_state=theme["lifecycle"],
+                    tickers=[
+                        row["canonical_symbol"]
+                        for row in theme.get("constituents", [])
+                        if row.get("canonical_symbol")
+                    ],
+                )
+            )
+        return EmergingThemesResponse(count=len(rows), themes=rows)
     service = ThemeDiscoveryService(db, pipeline=pipeline)
     lifecycle_states_list = parse_csv_values(lifecycle_states)
     themes = service.discover_emerging_themes(
@@ -164,6 +228,8 @@ def get_alerts(
     db: Session = Depends(get_db),
 ):
     """Get theme alerts (excluding dismissed alerts)."""
+    if _economic_reader(db) is not None:
+        return AlertsResponse(total=0, unread=0, alerts=[])
     query = db.query(ThemeAlert).filter(ThemeAlert.is_dismissed == False)
     if unread_only:
         query = query.filter(ThemeAlert.is_read == False)
@@ -192,6 +258,8 @@ def get_lifecycle_transitions(
     db: Session = Depends(get_db),
 ):
     """Get lifecycle transition audit history with decision context."""
+    if _economic_reader(db) is not None:
+        _economic_endpoint_required()
     service = ThemeDiscoveryService(db, pipeline=pipeline)
     history, total_count = service.get_lifecycle_transition_history(
         limit=limit,
@@ -211,6 +279,8 @@ def dismiss_alert(
     db: Session = Depends(get_db),
 ):
     """Dismiss (soft delete) an alert."""
+    if _economic_reader(db) is not None:
+        _economic_endpoint_required()
     alert = db.query(ThemeAlert).filter(ThemeAlert.id == alert_id).first()
     if not alert:
         raise HTTPException(status_code=404, detail="Alert not found")
@@ -448,6 +518,8 @@ def get_theme_detail(
     db: Session = Depends(get_db),
 ):
     """Get detailed information for a specific theme."""
+    if _economic_reader(db) is not None:
+        _economic_endpoint_required()
     cluster = db.query(ThemeCluster).filter(ThemeCluster.id == theme_id).first()
     if not cluster:
         raise HTTPException(status_code=404, detail="Theme not found")
@@ -506,6 +578,8 @@ def get_theme_history(
     db: Session = Depends(get_db),
 ):
     """Get historical metrics for a theme."""
+    if _economic_reader(db) is not None:
+        _economic_endpoint_required()
     cluster = db.query(ThemeCluster).filter(ThemeCluster.id == theme_id).first()
     if not cluster:
         raise HTTPException(status_code=404, detail="Theme not found")
@@ -544,6 +618,8 @@ def get_theme_mentions(
     db: Session = Depends(get_db),
 ):
     """Get content items that mention this theme."""
+    if _economic_reader(db) is not None:
+        _economic_endpoint_required()
     cluster = db.query(ThemeCluster).filter(ThemeCluster.id == theme_id).first()
     if not cluster:
         raise HTTPException(status_code=404, detail="Theme not found")
@@ -626,6 +702,8 @@ def discover_correlation_clusters(
     db: Session = Depends(get_db),
 ):
     """Discover hidden themes via correlation clustering."""
+    if _economic_reader(db) is not None:
+        _economic_endpoint_required()
     service = ThemeCorrelationService(db)
     clusters = service.discover_correlation_clusters(
         correlation_threshold=correlation_threshold,
@@ -652,6 +730,8 @@ def validate_theme(
     db: Session = Depends(get_db),
 ):
     """Validate a theme by checking internal correlations."""
+    if _economic_reader(db) is not None:
+        _economic_endpoint_required()
     cluster = db.query(ThemeCluster).filter(ThemeCluster.id == theme_id).first()
     if not cluster:
         raise HTTPException(status_code=404, detail="Theme not found")
@@ -671,6 +751,8 @@ def find_theme_entrants(
     db: Session = Depends(get_db),
 ):
     """Find stocks that may be joining this theme."""
+    if _economic_reader(db) is not None:
+        _economic_endpoint_required()
     cluster = db.query(ThemeCluster).filter(ThemeCluster.id == theme_id).first()
     if not cluster:
         raise HTTPException(status_code=404, detail="Theme not found")
@@ -694,6 +776,8 @@ def find_similar_themes(
     db: Session = Depends(get_db),
 ):
     """Find themes similar to the given theme using embedding similarity."""
+    if _economic_reader(db) is not None:
+        _economic_endpoint_required()
     cluster = db.query(ThemeCluster).filter(ThemeCluster.id == theme_id).first()
     if not cluster:
         raise HTTPException(status_code=404, detail="Theme not found")

@@ -1,24 +1,43 @@
 """Read-only daily snapshot facts; Task 9 owns Social run orchestration."""
-from dataclasses import replace
-from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
 import math
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from uuid import UUID
 
 from sqlalchemy import select
 
 from app.domain.feature_store.run_metadata import feature_run_market
-from app.domain.social_signals.records import (ConfirmationInput, ThemeMarketEvidence, validate_utc_timestamp,
-    DailyFreshness, PinnedFeatureRun, ConfirmationFacts, MarketConfirmationContext,
-    GroupConfirmationContext, MarketConfirmationBatch)
-from app.infra.db.models.feature_store import FeatureRun, FeatureRunPointer, StockFeatureDaily
-from app.models.market_exposure import MarketExposure
-from app.services.benchmark_registry_service import BenchmarkRegistryService
-from app.services.market_calendar_service import MarketCalendarService
-from app.services.feature_run_rs_identity import resolve_feature_run_rs_identity, FeatureRunRsIdentityError
-from app.services.opportunity_state_service import read_liquidity_evidence
-from app.services.group_rank_snapshot_reader import GroupRankSnapshotReader, GroupSnapshotIntegrityError
+from app.domain.social_signals.records import (
+    ConfirmationFacts,
+    ConfirmationInput,
+    DailyFreshness,
+    GroupConfirmationContext,
+    MarketConfirmationBatch,
+    MarketConfirmationContext,
+    PinnedFeatureRun,
+    validate_utc_timestamp,
+)
+from app.infra.db.models.feature_store import (
+    FeatureRun,
+    FeatureRunPointer,
+    StockFeatureDaily,
+)
 from app.models.industry import IBDGroupRank
+from app.models.market_exposure import MarketExposure
 from app.models.stock_universe import StockUniverse
+from app.services.benchmark_registry_service import BenchmarkRegistryService
+from app.services.economic_theme_read_service import EconomicThemeReader
+from app.services.feature_run_rs_identity import (
+    FeatureRunRsIdentityError,
+    resolve_feature_run_rs_identity,
+)
+from app.services.group_rank_snapshot_reader import (
+    GroupRankSnapshotReader,
+    GroupSnapshotIntegrityError,
+)
+from app.services.market_calendar_service import MarketCalendarService
+from app.services.opportunity_state_service import read_liquidity_evidence
 from app.services.security_master_service import security_master_resolver
 
 
@@ -125,21 +144,25 @@ class SocialConfirmationReader:
         Pass PreparedThemeApplication plus all measured keys for staged additions.
         This method never repins features or exposure, and never accepts raw proposals.
         """
-        from app.models.theme import ThemeCluster
         from app.services.social_theme_market_service import (
-            LiveAcceptedBasketReader, SocialThemeMarketService, MeasurementUnavailable,
+            EconomicAcceptedBasketReader,
+            LiveAcceptedBasketReader,
+            MeasurementUnavailable,
+            SocialThemeMarketService,
         )
         context = batch.market_context
         evidence, reasons = [], []
-        members = membership_reader or LiveAcceptedBasketReader(self.db)
         with self.db.no_autoflush:
-            keys = theme_keys if theme_keys is not None else tuple(self.db.scalars(select(ThemeCluster.canonical_key)
-                .where(ThemeCluster.pipeline == "technical", ThemeCluster.is_active.is_(True))))
-            service = SocialThemeMarketService(self.db, calendar=self.calendar, benchmark_registry=self.registry,
-                membership_reader=members, grace_minutes=int(self.grace.total_seconds() // 60),
-                pinned_feature_run=batch.pinned_run, benchmark_symbol=context.benchmark_symbol)
+            reader = EconomicThemeReader(self.db)
+            memberships = self._theme_memberships(
+                reader,
+                theme_keys=theme_keys,
+                membership_reader=membership_reader,
+                economic_reader_type=EconomicAcceptedBasketReader,
+                legacy_reader_type=LiveAcceptedBasketReader,
+            )
             symbols = {symbol for symbol, _ in batch.facts}
-            for key in sorted(set(keys)):
+            for key, members in memberships:
                 try:
                     basket = members.read(key, context.market)
                     if not any(m.canonical_symbol in symbols for m in basket.membership):
@@ -147,6 +170,15 @@ class SocialConfirmationReader:
                     if (not context.freshness.fresh or context.benchmark_symbol is None
                             or context.benchmark_symbol not in context.benchmark_candidates):
                         raise MeasurementUnavailable("market_benchmark_unavailable")
+                    service = SocialThemeMarketService(
+                        self.db,
+                        calendar=self.calendar,
+                        benchmark_registry=self.registry,
+                        membership_reader=members,
+                        grace_minutes=int(self.grace.total_seconds() // 60),
+                        pinned_feature_run=batch.pinned_run,
+                        benchmark_symbol=context.benchmark_symbol,
+                    )
                     evidence.append(service.measure(key, context.market, context.observed_at,
                         tuple(m.canonical_symbol for m in basket.membership)))
                 except MeasurementUnavailable as exc:
@@ -154,6 +186,65 @@ class SocialConfirmationReader:
         inputs = tuple(replace(row, theme_confirmations=tuple(e for e in evidence
             if any(f"{m.market}:{m.canonical_symbol}" == row.candidate_key for m in e.membership))) for row in batch.inputs)
         return replace(batch, inputs=inputs, theme_evidence=tuple(evidence), theme_reasons=tuple(reasons))
+
+    def _theme_memberships(
+        self,
+        reader,
+        *,
+        theme_keys,
+        membership_reader,
+        economic_reader_type,
+        legacy_reader_type,
+    ):
+        if membership_reader is not None:
+            return tuple(
+                (key, membership_reader) for key in sorted(set(theme_keys or ()))
+            )
+        if reader.source_name == "economic":
+            catalog = reader.read_current_catalog()
+            requested = {str(key).casefold() for key in theme_keys or ()}
+            rows = []
+            for theme in catalog.get("themes", []):
+                theme_id = str(theme["economic_theme_id"])
+                names = {
+                    theme_id.casefold(),
+                    str(theme.get("display_name") or "").casefold(),
+                }
+                if requested and requested.isdisjoint(names):
+                    continue
+                ref_ids = tuple(
+                    UUID(str(item["association_revision_ref_id"]))
+                    for item in theme.get("social_memberships", [])
+                    if item.get("association_revision_ref_id")
+                )
+                if not ref_ids:
+                    continue
+                rows.append(
+                    (
+                        theme_id,
+                        economic_reader_type(
+                            self.db,
+                            economic_theme_id=UUID(theme_id),
+                            association_revision_ref_ids=ref_ids,
+                        ),
+                    )
+                )
+            return tuple(rows)
+
+        from app.models.theme import ThemeCluster
+
+        keys = theme_keys
+        if keys is None:
+            keys = tuple(
+                self.db.scalars(
+                    select(ThemeCluster.canonical_key).where(
+                        ThemeCluster.pipeline == "technical",
+                        ThemeCluster.is_active.is_(True),
+                    )
+                )
+            )
+        members = legacy_reader_type(self.db, authority_source=reader.source_name)
+        return tuple((key, members) for key in sorted(set(keys)))
 
     def _group_context(self, pin, now):
         run = self.db.get(FeatureRun, pin.run_id) if pin.run_id else None

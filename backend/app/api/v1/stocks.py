@@ -28,6 +28,7 @@ from ...schemas.stock import (
 )
 from ...schemas.validation import StockValidationResponse
 from ...services.breadth.query import latest_breadth
+from ...services.economic_theme_read_service import EconomicThemeReader
 from ...services.price_history_symbols import require_valid_price_history_symbol
 from ...services.stock_event_context_service import StockEventContextService
 from ...services.strategy_profile_service import DEFAULT_PROFILE, StrategyProfileService
@@ -317,6 +318,10 @@ def _build_regime_payload(breadth: MarketBreadth | None, latest_run) -> dict:
 
 
 def _load_theme_summaries(db: Session, symbol: str) -> list[dict]:
+    economic = EconomicThemeReader(db)
+    if economic.source_name == "economic":
+        return economic.theme_summaries_for_symbol(symbol)
+
     latest_metrics_subquery = (
         db.query(
             ThemeMetrics.theme_cluster_id.label("theme_cluster_id"),
