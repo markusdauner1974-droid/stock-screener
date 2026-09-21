@@ -201,7 +201,26 @@ class ProcessingRequest(Base):
         Uuid(as_uuid=True), ForeignKey("economic_evidence_packets.id"), nullable=False
     )
     policy_bundle_version = Column(String(160), nullable=False)
+    status = Column(String(32), nullable=False, default="pending")
+    available_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    lease_token = Column(Uuid(as_uuid=True))
+    lease_owner = Column(String(200))
+    lease_expires_at = Column(DateTime(timezone=True))
+    observed_processing_head_revision = Column(Integer)
+    observed_authority_epoch = Column(Integer)
+    completion_code = Column(String(80))
+    result_payload = Column(JSON)
     created_at = _created_at()
+    updated_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -209,6 +228,177 @@ class ProcessingRequest(Base):
             "evidence_packet_id",
             "policy_bundle_version",
             name="uq_economic_processing_request_identity",
+        ),
+        CheckConstraint(
+            "status IN ('pending','leased','retryable','completed','terminal_failure')",
+            name="ck_economic_processing_request_status",
+        ),
+        CheckConstraint(
+            "(status = 'leased' AND lease_token IS NOT NULL "
+            "AND lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL) OR "
+            "(status <> 'leased' AND lease_token IS NULL "
+            "AND lease_owner IS NULL AND lease_expires_at IS NULL)",
+            name="ck_economic_processing_request_lease_shape",
+        ),
+    )
+
+
+class ProcessingRequestEvent(Base):
+    __tablename__ = "economic_processing_request_events"
+
+    id = _uuid_pk()
+    processing_request_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_processing_requests.id"),
+        nullable=False,
+    )
+    sequence_number = Column(Integer, nullable=False)
+    event_type = Column(String(80), nullable=False)
+    event_payload = Column(JSON, nullable=False, default=dict)
+    created_at = _created_at()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "processing_request_id",
+            "sequence_number",
+            name="uq_economic_processing_request_event_sequence",
+        ),
+    )
+
+
+class ProviderAttempt(Base):
+    __tablename__ = "economic_provider_attempts"
+
+    id = _uuid_pk()
+    logical_request_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_processing_requests.id"),
+        nullable=False,
+    )
+    operation_kind = Column(String(80), nullable=False)
+    attempt_number = Column(Integer, nullable=False)
+    dispatch_id = Column(String(200), nullable=False)
+    created_at = _created_at()
+
+    events = relationship(
+        "ProviderAttemptEvent",
+        order_by="ProviderAttemptEvent.sequence_number",
+        lazy="selectin",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "logical_request_id",
+            "operation_kind",
+            "attempt_number",
+            name="uq_economic_provider_attempt_number",
+        ),
+        UniqueConstraint(
+            "logical_request_id",
+            "operation_kind",
+            "dispatch_id",
+            name="uq_economic_provider_attempt_dispatch",
+        ),
+    )
+
+    @property
+    def outcome(self) -> str | None:
+        return self.events[-1].outcome if self.events else None
+
+
+class ProviderAttemptEvent(Base):
+    __tablename__ = "economic_provider_attempt_events"
+
+    id = _uuid_pk()
+    provider_attempt_id = Column(
+        Uuid(as_uuid=True), ForeignKey("economic_provider_attempts.id"), nullable=False
+    )
+    sequence_number = Column(Integer, nullable=False)
+    outcome = Column(String(40), nullable=False)
+    result_artifact_id = Column(Uuid(as_uuid=True))
+    event_payload = Column(JSON, nullable=False, default=dict)
+    created_at = _created_at()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider_attempt_id",
+            "sequence_number",
+            name="uq_economic_provider_attempt_event_sequence",
+        ),
+        CheckConstraint(
+            "outcome IN ('success','retryable_failure','uncertain','terminal_failure')",
+            name="ck_economic_provider_attempt_event_outcome",
+        ),
+        CheckConstraint(
+            "(outcome = 'success' AND result_artifact_id IS NOT NULL) OR "
+            "(outcome <> 'success' AND result_artifact_id IS NULL)",
+            name="ck_economic_provider_attempt_result_shape",
+        ),
+    )
+
+
+class EconomicExposureCandidate(Base):
+    __tablename__ = "economic_exposure_candidates"
+
+    id = _uuid_pk()
+    processing_request_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_processing_requests.id"),
+        nullable=False,
+    )
+    candidate_key = Column(String(160), nullable=False)
+    payload = Column(JSON, nullable=False)
+    created_at = _created_at()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "processing_request_id",
+            "candidate_key",
+            name="uq_economic_exposure_candidate_key",
+        ),
+    )
+
+
+class DimensionProposal(Base):
+    __tablename__ = "economic_dimension_proposals"
+
+    id = _uuid_pk()
+    processing_request_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_processing_requests.id"),
+        nullable=False,
+    )
+    dimension_key = Column(String(120), nullable=False)
+    payload = Column(JSON, nullable=False)
+    created_at = _created_at()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "processing_request_id",
+            "dimension_key",
+            name="uq_economic_dimension_proposal_key",
+        ),
+    )
+
+
+class NamingProposal(Base):
+    __tablename__ = "economic_naming_proposals"
+
+    id = _uuid_pk()
+    processing_request_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_processing_requests.id"),
+        nullable=False,
+    )
+    proposal_key = Column(String(160), nullable=False)
+    payload = Column(JSON, nullable=False)
+    created_at = _created_at()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "processing_request_id",
+            "proposal_key",
+            name="uq_economic_naming_proposal_key",
         ),
     )
 
@@ -920,7 +1110,12 @@ APPEND_ONLY_RUNTIME_MODELS = (
     EvidencePacket,
     EvidencePrecedenceRevision,
     LensEligibilityRevision,
-    ProcessingRequest,
+    ProcessingRequestEvent,
+    ProviderAttempt,
+    ProviderAttemptEvent,
+    EconomicExposureCandidate,
+    DimensionProposal,
+    NamingProposal,
     ExtractionArtifact,
     ClaimReviewArtifact,
     ClassificationAttempt,
@@ -958,6 +1153,12 @@ ECONOMIC_TAXONOMY_RUNTIME_TABLES = [
     EvidencePrecedenceRevision.__table__,
     LensEligibilityRevision.__table__,
     ProcessingRequest.__table__,
+    ProcessingRequestEvent.__table__,
+    ProviderAttempt.__table__,
+    ProviderAttemptEvent.__table__,
+    EconomicExposureCandidate.__table__,
+    DimensionProposal.__table__,
+    NamingProposal.__table__,
     ExtractionArtifact.__table__,
     ClaimReviewArtifact.__table__,
     ClassificationAttempt.__table__,
