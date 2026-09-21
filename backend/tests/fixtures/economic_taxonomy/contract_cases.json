@@ -1,5 +1,78 @@
 {
   "schema_version": 1,
+  "benchmark_schema_version": 1,
+  "benchmark_cases": [
+    {
+      "name": "pseudo_theme_rejection",
+      "required": {"identities": [], "relationships": [], "assignments": [], "interpretation_selections": [], "retractions": ["claim:pseudo-theme"]},
+      "forbidden": {"identities": ["theme:watchlist"], "relationships": [], "assignments": ["claim:pseudo-theme->theme:watchlist"], "interpretation_selections": [], "retractions": []}
+    },
+    {
+      "name": "tanker_segmentation",
+      "required": {"identities": ["theme:crude-tankers", "theme:product-tankers"], "relationships": ["theme:crude-tankers|theme:product-tankers|distinct"], "assignments": [], "interpretation_selections": [], "retractions": []},
+      "forbidden": {"identities": ["theme:tankers"], "relationships": [], "assignments": [], "interpretation_selections": [], "retractions": []}
+    },
+    {
+      "name": "ai_memory_cooccurrence",
+      "required": {"identities": ["theme:artificial-intelligence", "theme:memory"], "relationships": [], "assignments": ["claim:ai->theme:artificial-intelligence", "claim:memory->theme:memory"], "interpretation_selections": ["source:cooccurrence->attempt:two-claims"], "retractions": []},
+      "forbidden": {"identities": ["theme:ai-memory"], "relationships": [], "assignments": ["claim:cooccurrence->theme:ai-memory"], "interpretation_selections": [], "retractions": []}
+    },
+    {
+      "name": "ai_memory_hbm_specificity",
+      "required": {"identities": ["theme:ai-memory", "theme:hbm"], "relationships": ["theme:hbm|theme:ai-memory|specialization"], "assignments": ["claim:hbm-demand->theme:hbm"], "interpretation_selections": [], "retractions": []},
+      "forbidden": {"identities": [], "relationships": ["theme:ai-memory|theme:hbm|specialization"], "assignments": ["claim:hbm-demand->theme:memory"], "interpretation_selections": [], "retractions": []}
+    },
+    {
+      "name": "ai_security_mechanism_contrast",
+      "required": {"identities": ["theme:ai-security", "theme:cybersecurity"], "relationships": ["theme:ai-security|theme:cybersecurity|distinct"], "assignments": ["claim:model-safety->theme:ai-security"], "interpretation_selections": [], "retractions": []},
+      "forbidden": {"identities": [], "relationships": ["theme:ai-security|theme:cybersecurity|equivalent"], "assignments": ["claim:model-safety->theme:cybersecurity"], "interpretation_selections": [], "retractions": []}
+    },
+    {
+      "name": "copper_relationship_direction",
+      "required": {"identities": ["theme:copper", "theme:copper-miners"], "relationships": ["theme:copper|theme:copper-miners|broader"], "assignments": [], "interpretation_selections": [], "retractions": []},
+      "forbidden": {"identities": [], "relationships": ["theme:copper|theme:copper-miners|narrower"], "assignments": [], "interpretation_selections": [], "retractions": []}
+    },
+    {
+      "name": "refining_split",
+      "required": {"identities": ["theme:petroleum-refining", "theme:metals-refining"], "relationships": [], "assignments": ["mention:petroleum->theme:petroleum-refining", "mention:metals->theme:metals-refining"], "interpretation_selections": ["legacy:refining->allocation:reviewed"], "retractions": []},
+      "forbidden": {"identities": ["theme:refining"], "relationships": [], "assignments": ["mention:metals->theme:petroleum-refining"], "interpretation_selections": [], "retractions": []}
+    },
+    {
+      "name": "social_consolidation",
+      "required": {"identities": ["theme:ai-memory"], "relationships": [], "assignments": ["social:legacy-a->theme:ai-memory", "social:legacy-b->theme:ai-memory"], "interpretation_selections": ["social:association-a", "social:association-b"], "retractions": []},
+      "forbidden": {"identities": ["theme:ai-memory-duplicate"], "relationships": [], "assignments": [], "interpretation_selections": [], "retractions": []}
+    },
+    {
+      "name": "social_decision_conflict",
+      "required": {"identities": ["theme:ai-memory"], "relationships": [], "assignments": [], "interpretation_selections": ["social:conflict-review-required"], "retractions": []},
+      "forbidden": {"identities": [], "relationships": [], "assignments": ["social:conflicted-membership->accepted"], "interpretation_selections": [], "retractions": []}
+    },
+    {
+      "name": "same_source_reclassification",
+      "required": {"identities": ["theme:ai-memory"], "relationships": [], "assignments": ["claim:memory->theme:ai-memory"], "interpretation_selections": ["source:42->attempt:policy-v2"], "retractions": ["source:42->attempt:policy-v1"]},
+      "forbidden": {"identities": [], "relationships": [], "assignments": [], "interpretation_selections": ["source:42->attempt:policy-v1"], "retractions": []}
+    },
+    {
+      "name": "successful_empty_correction",
+      "required": {"identities": [], "relationships": [], "assignments": [], "interpretation_selections": ["source:43->attempt:empty"], "retractions": ["claim:old-ai-memory"]},
+      "forbidden": {"identities": [], "relationships": [], "assignments": ["claim:old-ai-memory->theme:ai-memory"], "interpretation_selections": ["source:43->attempt:old"], "retractions": []}
+    },
+    {
+      "name": "late_archive_after_corrected_empty_benchmark",
+      "required": {"identities": [], "relationships": [], "assignments": [], "interpretation_selections": ["source:44->packet:corrected-empty"], "retractions": ["claim:old-theme"]},
+      "forbidden": {"identities": [], "relationships": [], "assignments": ["claim:archive->theme:old"], "interpretation_selections": ["source:44->packet:late-archive"], "retractions": []}
+    },
+    {
+      "name": "less_complete_recapture",
+      "required": {"identities": [], "relationships": [], "assignments": ["claim:attachment-backed->theme:ai-memory"], "interpretation_selections": ["source:45->packet:attachment-complete"], "retractions": []},
+      "forbidden": {"identities": [], "relationships": [], "assignments": [], "interpretation_selections": ["source:45->packet:missing-attachment"], "retractions": ["claim:attachment-backed"]}
+    },
+    {
+      "name": "duplicate_route_deduplication",
+      "required": {"identities": ["theme:ai-memory"], "relationships": [], "assignments": ["claim:route-shared->theme:ai-memory"], "interpretation_selections": ["source-family:post-46->one-current-interpretation"], "retractions": []},
+      "forbidden": {"identities": ["theme:ai-memory-duplicate"], "relationships": [], "assignments": ["claim:route-shared-duplicate->theme:ai-memory"], "interpretation_selections": [], "retractions": []}
+    }
+  ],
   "cases": [
     {
       "name": "late_archive_after_corrected_empty",
