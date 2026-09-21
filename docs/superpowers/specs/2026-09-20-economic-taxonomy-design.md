@@ -6,7 +6,7 @@
 
 **Revised:** 2026-09-21
 
-**Implementation plan:** `docs/superpowers/plans/2026-09-21-economic-taxonomy.md` is held pending approval of this revision. It must be rewritten before schema work begins.
+**Implementation plan:** `docs/superpowers/plans/2026-09-21-economic-taxonomy.md` is aligned with this revision and ready for review. Schema work remains gated on approval of both documents.
 
 **Replaces:** Pipeline-scoped/L1-L2 theme identity after a staged cutover; it does not delete legacy records.
 

@@ -2,136 +2,164 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace pipeline-scoped and L1/L2 theme identity with a versioned global Economic Theme taxonomy, while preserving evidence provenance and supporting a fenced, reversible production cutover.
+**Goal:** Replace pipeline-scoped and L1/L2 theme identity with a global Economic Theme taxonomy whose semantic snapshots, accepted evidence interpretations, projections, metrics, and reader pointers are published coherently and can be rolled back safely.
 
-**Architecture:** Build an immutable Economic Taxonomy beside the legacy Theme Catalog. Source-level work extracts evidence-backed exposure candidates, retrieval proposes possible matches, semantic resolution decides identity, and observations attach analytical lenses without duplicating evidence. A database authority row, epoch fencing, durable outbox, versioned UI snapshots, migration mappings, and continued compatibility writes provide shadow, dual, economic, and rollback modes.
+**Architecture:** Build an immutable processing taxonomy beside the legacy Theme Catalog, but expose it only through immutable serving generations. Frozen evidence packets feed immutable classification runs and assignments; each generation selects the accepted run for every source lineage. One publication coordinator prepares all artifacts outside the final lock, then atomically switches taxonomy, interpretation, metrics, and reader pointers under a short producer fence.
 
-**Tech Stack:** Python 3.11, FastAPI, SQLAlchemy, Alembic, PostgreSQL 16, SQLite test harness, Celery, existing LLM and embedding services, React, MUI, TanStack Query, pytest, Vitest.
+**Tech Stack:** Python 3.11, FastAPI, SQLAlchemy, Alembic, PostgreSQL 16, SQLite unit/migration harness, Celery, existing LLM/embedding and Social-budget services, React, MUI, TanStack Query, pytest, Vitest.
 
 **Spec:** `docs/superpowers/specs/2026-09-20-economic-taxonomy-design.md`
 
+**ADR:** `docs/adr/0005-economic-taxonomy-snapshots-and-interpretations.md`
+
+**Status:** Revised and ready for review; no schema implementation is authorized by this document alone.
+
 ## Global Constraints
 
-- `EconomicTheme.semantic_key` is an opaque UUID assigned once; display names and facets never define identity.
-- Published taxonomy versions are complete immutable snapshots; drafts clone their complete parent snapshot.
-- Production authority is the singleton `taxonomy_authority` row with mode `legacy|shadow|dual|economic`, an active version, and a monotonically increasing epoch.
-- `shadow` and `dual` serve legacy reads; `economic` serves the sealed Economic Taxonomy version.
-- Similarity may retrieve candidates but cannot decide equivalence.
-- Compound themes require explicit composition support; co-occurrence alone is insufficient.
-- A source revision may have multiple distinct primary claims, while derived observations share a root and all claims share one source-family identity.
-- `security_id` always means `stock_universe.id` resolved through SecurityMaster rules.
-- Existing grounding, evidence eligibility, Social administration, and development-event history remain authoritative.
-- Structural merges, splits, defining-mechanism changes, new dimensions, and retirement require reviewed proposals.
-- Legacy Theme Catalog writes continue after economic cutover until a separate cleanup project retires rollback compatibility.
-- This project does not infer issuer revenue materiality, add recursive ontology propagation, replace SecurityMaster, or create a general asset master.
-- Production publication requires PostgreSQL concurrency tests; skipped PostgreSQL variants do not satisfy the gate.
+- `EconomicTheme.semantic_key` is an opaque UUID assigned once; mutable semantic fields live only in version-owned rows.
+- Taxonomy versions have only `draft|sealed`; a sealed version cannot reopen, mutate, or receive moved rows.
+- `taxonomy_authority.processing_taxonomy_version_id` is not a reader pointer. Readers use only `serving_generation_id`.
+- A serving generation binds one sealed taxonomy, interpretation set, evidence manifest, metrics revision, UI/API snapshot bundle, and reader-capability manifest.
+- Source-family identity, evidence-packet identity, processing-policy identity, and lens-eligibility identity are separate.
+- Successful empty classification is authoritative when selected; failed or partial classification never replaces the last accepted run.
+- Similarity retrieves candidates but never authorizes equivalence.
+- Proposed-candidate relationship outcomes are directional: proposed `Copper` relative to existing `Copper Miners` is `broader`.
+- Migration disposition is one-per-legacy-identity, but destinations and claim allocations are zero-to-many.
+- Existing `SocialThemeAssociation` rows and their decisions are preserved. Global Social membership is a separate projection.
+- Every content, Social, development, structural, compatibility, and migration writer acquires the shared taxonomy fence and rechecks authority before commit.
+- The final publisher acquires the exclusive form of that fence, performs no provider call or worker wait, and aborts if its exact evidence manifest changed.
+- Logical outbox event identity excludes authority epoch; targets reject older revisions and mirror-origin events never recurse.
+- Evidence-channel eligibility does not itself create a technical, fundamental, or narrative metric observation.
+- `security_id` means `stock_universe.id`; ADR-0003 remains unchanged for StockUniverse history.
+- Economic mode is impossible until reader capability, frontend contract, compatibility, PostgreSQL concurrency, and zero-skip release gates all pass.
 
 ## Review Focus
 
-1. Independent AI and memory mentions must not create `AI Memory`; Task 7 pins this with an unsupported-composition test.
-2. An authority epoch change during processing must leave no mixed write; Tasks 6 and 17 pin this with stale-worker and publication-race tests.
-3. A source discussing two independent themes plus derived parents must count as one source family without collapsing the two primary roots; Task 10 pins this invariant.
-4. Social admin decisions and evidence-work IDs must survive shadow, dual, economic, and rollback modes; Task 14 pins state-preservation and compatibility-write tests.
-5. A failed UI snapshot or delta replay must leave the old authority and pointers active; Tasks 15 and 17 inject failures before the atomic switch.
+1. Crash after creating a provisional processing snapshot: retry must yield one identity, one classification run, one logical mirror event, and no reader-visible partial state. Task 7 owns this test.
+2. Source correction to empty followed by failed reprocessing: current reads must select the empty accepted run, while a later failed run leaves it unchanged and all three histories remain reproducible. Task 8 owns this test.
+3. Legacy split plus Social many-to-one consolidation: claim allocation must preserve historical legacy interpretation and conflicting administrator decisions must remain blocked. Tasks 9 and 12 own these tests.
+4. Late producer commit and out-of-order compatibility delivery: old-mode work must not cross cutover, and revision 1 after revision 2 must be a no-op. Tasks 3, 11, and 16 own these tests.
+5. One post through legacy and Social with a later lens-only change: it must retain one source family, avoid a second extraction, consume no extra budget, and count as one independent source. Tasks 5 and 12 own this test.
 
 ## Delivery Slices
 
-- **Slice A — Semantic kernel:** Tasks 1-4 deliver pure policy, immutable schema, authority, facets, and naming without changing production behavior.
-- **Slice B — Source processing:** Tasks 5-9 deliver durable source work, extraction, retrieval, resolution, and provisional publication in shadow storage.
-- **Slice C — Evidence and governance:** Tasks 10-12 deliver observations, constituents, lifecycle, metrics, and reviewed operations.
-- **Slice D — Producer and reader adapters:** Tasks 13-15 integrate legacy and Social producers, APIs, and versioned UI snapshots while legacy remains authoritative.
-- **Slice E — Migration and cutover:** Tasks 16-18 deliver benchmarked migration, epoch-fenced publication, rollback, and scheduled operations.
-- **Slice F — Product cutover:** Tasks 19-21 replace UI and downstream readers, enforce CI gates, and publish the operator runbook.
+- **Slice A — Contract kernel:** Task 0 freezes the cross-component state machines and counterexamples before any schema is written.
+- **Slice B — Immutable storage and fencing:** Tasks 1-3 add semantic snapshots, runtime history, serving generations, manifests, and the shared producer fence.
+- **Slice C — Processing:** Tasks 4-8 add governed extraction, frozen admission, resolution, atomic processing-head advancement, assignments, and current-interpretation selection.
+- **Slice D — Governance and measurements:** Tasks 9-10 add cardinality-safe restructuring, lifecycle, structured signals, and executable ranking views.
+- **Slice E — Producer integration:** Tasks 11-13 add ordered compatibility delivery, Social reconciliation/budgeting, and narrative development authority.
+- **Slice F — Read artifacts and migration:** Tasks 14-15 add APIs, versioned reader snapshots, migration, and the contrast benchmark.
+- **Slice G — Publication and release:** Tasks 16-19 add the coordinator, cutover/rollback, schedules, authority-aware readers/UI, CI enforcement, and the operator runbook.
 
 ## File Map
 
-### New domain and persistence files
+### Domain and persistence
 
-- `backend/app/domain/economic_taxonomy/contracts.py` — enums and immutable value objects shared by services.
-- `backend/app/domain/economic_taxonomy/policy.py` — pure validation, lifecycle, propagation, and review-gate policy.
-- `backend/app/models/economic_taxonomy.py` — stable identities and complete immutable taxonomy snapshot tables.
-- `backend/app/models/economic_taxonomy_runtime.py` — work, candidates, observations, metrics, proposals, migration, and outbox tables.
-- `backend/app/infra/db/repositories/economic_taxonomy_repo.py` — snapshot, authority, draft, and publication persistence.
-- `backend/app/infra/db/repositories/economic_taxonomy_work_repo.py` — idempotent enqueue, lease, retry, observation, and outbox persistence.
+- `backend/app/domain/economic_taxonomy/contracts.py` — enums, immutable keys, results, and serving-generation contract.
+- `backend/app/domain/economic_taxonomy/policy.py` — pure interpretation, mapping, relationship, lifecycle, and reconciliation rules.
+- `backend/app/models/economic_taxonomy.py` — stable identities and version-owned semantic snapshot rows.
+- `backend/app/models/economic_taxonomy_runtime.py` — source families, packets, runs, assignments, selections, observations, mappings, metrics, outbox, and serving artifacts.
+- `backend/app/infra/db/repositories/economic_taxonomy_repo.py` — clone, validate, hash, and seal semantic snapshots.
+- `backend/app/infra/db/repositories/economic_taxonomy_work_repo.py` — evidence/work/run idempotency and leases.
+- `backend/app/infra/db/repositories/economic_taxonomy_publication_repo.py` — manifests, prepared generations, and atomic pointer changes.
 
-### New services and interfaces
+### Services
 
-- `backend/app/services/economic_taxonomy_authority.py` — authority state, mode transitions, advisory lock, and epoch checks.
-- `backend/app/services/economic_taxonomy_seed.py` — approved facet-dimension seed data.
-- `backend/app/services/economic_theme_naming.py` — deterministic names and naming-review result.
-- `backend/app/services/economic_source_revision.py` — canonical content and Social source revisions/families.
-- `backend/app/services/economic_exposure_extraction.py` — structured extraction only.
-- `backend/app/services/economic_exposure_claim_review.py` — evidence review and legacy-status mapping.
-- `backend/app/services/economic_theme_candidate_retrieval.py` — bounded lexical, facet, alias, embedding, and constituent retrieval.
-- `backend/app/services/economic_theme_resolution.py` — constrained semantic identity decision and deterministic post-validation.
-- `backend/app/services/economic_taxonomy_processor.py` — end-to-end source processing and provisional identity publication.
-- `backend/app/services/economic_theme_observation_service.py` — primary/derived provenance and lens associations.
-- `backend/app/services/economic_theme_lifecycle_service.py` — provisional, established, dormant, and reactivated transitions.
-- `backend/app/services/economic_theme_metrics_service.py` — lens metrics with direct/root/source-family counts.
-- `backend/app/services/economic_taxonomy_operations.py` — proposal preview/apply and immutable structural operations.
-- `backend/app/services/economic_taxonomy_runtime.py` — mode-aware write routing and legacy compatibility delivery.
-- `backend/app/services/economic_taxonomy_migration.py` — migration runs, dispositions, mappings, and delta replay.
-- `backend/app/services/economic_taxonomy_cutover.py` — prepare, publish, rollback, and validation gates.
-- `backend/app/services/economic_theme_read_service.py` — authority-aware reads for API, stock, digest, assistant, and MCP callers.
-- `backend/app/api/v1/economic_themes.py` and `backend/app/api/v1/economic_taxonomy.py` — global read and reviewed-write APIs.
-- `backend/app/tasks/economic_taxonomy_tasks.py` — discovery, processing, outbox, lifecycle, metrics, and shadow-validation tasks.
+- `backend/app/services/economic_taxonomy_fence.py` — shared producer and exclusive publisher lock protocol.
+- `backend/app/services/economic_source_admission.py` — canonical source families, frozen packets, and lens eligibility.
+- `backend/app/services/economic_exposure_extraction.py` — structured exposure extraction.
+- `backend/app/services/economic_exposure_claim_review.py` — evidence and composition validation.
+- `backend/app/services/economic_theme_candidate_retrieval.py` — bounded retrieval only.
+- `backend/app/services/economic_theme_resolution.py` — semantic decisions with explicit direction.
+- `backend/app/services/economic_theme_naming.py` — governed normalization and deterministic names.
+- `backend/app/services/economic_taxonomy_processor.py` — immutable run persistence and one-shot processing-head advancement.
+- `backend/app/services/economic_theme_observation_service.py` — assignment-derived observations, constituents, and signals.
+- `backend/app/services/economic_taxonomy_interpretations.py` — accepted interpretation-set construction.
+- `backend/app/services/economic_taxonomy_operations.py` — reviewed merge, split, redirect, allocation, and lifecycle operations.
+- `backend/app/services/economic_theme_metrics_service.py` — versioned channel and ranking-view calculations.
+- `backend/app/services/economic_taxonomy_runtime.py` — fenced legacy/economic routing and compatibility delivery.
+- `backend/app/services/economic_taxonomy_migration.py` — migration dispositions, allocations, replay, and benchmark.
+- `backend/app/services/economic_taxonomy_publication.py` — prepare, validate, publish, cutover, and rollback recovery.
+- `backend/app/services/economic_theme_read_service.py` — generation-scoped reader facade.
 
-### Migrations and tests
+### Migrations
 
-- `backend/alembic/versions/20260921_0046_economic_taxonomy_core.py` — identity, immutable snapshot, and authority tables.
-- `backend/alembic/versions/20260921_0047_economic_taxonomy_runtime.py` — work, evidence, metrics, proposals, migration, mapping, and outbox tables.
-- `backend/alembic/versions/20260921_0048_economic_taxonomy_social_adapter.py` — Social association mapping columns.
-- `backend/alembic/versions/20260921_0049_economic_taxonomy_ui_snapshot.py` — UI snapshot authority columns.
-- Unit tests use `backend/tests/unit/test_economic_*.py`; migration and concurrency tests use `backend/tests/integration/test_economic_*.py`.
-- `backend/tests/fixtures/economic_taxonomy/contrast_cases.json` contains the cutover benchmark corpus.
+- `backend/alembic/versions/20260921_0046_economic_taxonomy_core.py` — identity and sealed semantic snapshots.
+- `backend/alembic/versions/20260921_0047_economic_taxonomy_interpretations.py` — evidence packets, runs, assignments, selections, observations, and signals.
+- `backend/alembic/versions/20260921_0048_economic_taxonomy_publication.py` — authority, revision log, manifests, generations, and reader capabilities.
+- `backend/alembic/versions/20260921_0049_economic_taxonomy_work.py` — leased work, candidates, proposals, and provider attempts.
+- `backend/alembic/versions/20260921_0050_economic_taxonomy_mappings.py` — dispositions, destinations, allocations, redirects, and operations.
+- `backend/alembic/versions/20260921_0051_economic_taxonomy_outbox.py` — ordered outbox, delivery attempts, and projection checkpoints.
+- `backend/alembic/versions/20260921_0052_economic_taxonomy_social.py` — global Social projection and legacy bridge.
+- `backend/alembic/versions/20260921_0053_economic_taxonomy_developments.py` — narrative development provenance and economic links.
+- `backend/alembic/versions/20260921_0054_economic_taxonomy_reader_snapshots.py` — generation-scoped API/UI snapshot pointers.
 
-### Frontend and operations
+### Product, tests, and operations
 
-- `frontend/src/api/economicThemes.js` — global read and governance clients.
-- `frontend/src/features/themes/components/EconomicThemeDetailModal.jsx` — facets, relationships, evidence, developments, and constituents.
-- `frontend/src/components/Themes/EconomicTaxonomyReview.jsx` — migration and structural review queue.
-- `docs/runbooks/economic-taxonomy-cutover.md` — exact shadow, dual, publish, verify, and rollback commands.
+- `backend/app/api/v1/economic_themes.py` and `backend/app/api/v1/economic_taxonomy.py` — global reads and reviewed writes.
+- `backend/app/tasks/economic_taxonomy_tasks.py` — bounded work, delivery, preparation, lifecycle, and metrics tasks.
+- `frontend/src/api/economicThemes.js` — generation-aware API client.
+- `frontend/src/features/themes/components/EconomicThemeDetailModal.jsx` — identity, evidence, signals, metrics, and constituents.
+- `frontend/src/components/Themes/EconomicTaxonomyReview.jsx` — mapping, decision-conflict, and structural review.
+- `backend/tests/fixtures/economic_taxonomy/contract_cases.json` — named counterexamples and expected outcomes.
+- `backend/tests/required_economic_taxonomy_postgres.txt` — exact non-skippable PostgreSQL node IDs.
+- `backend/scripts/run_required_economic_taxonomy_postgres.py` — collection/result gate that rejects missing, skipped, or xfailed nodes.
+- `docs/runbooks/economic-taxonomy-cutover.md` — catch-up, barrier, publish, rollback, and recovery commands.
 
 ---
 
-### Task 1: Define the semantic contracts and pure policy
+### Task 0: Freeze the cross-component contracts and counterexamples
 
 **Files:**
 - Create: `backend/app/domain/economic_taxonomy/__init__.py`
 - Create: `backend/app/domain/economic_taxonomy/contracts.py`
 - Create: `backend/app/domain/economic_taxonomy/policy.py`
-- Test: `backend/tests/unit/test_economic_taxonomy_policy.py`
+- Create: `backend/tests/unit/test_economic_taxonomy_contracts.py`
+- Create: `backend/tests/fixtures/economic_taxonomy/contract_cases.json`
 
 **Interfaces:**
-- Consumes: no database or provider services.
-- Produces: `EvidenceRef`, `LensEligibility`, `SourceRevision`, `FacetClaim`, `ConstituentClaim`, `ExposureCandidate`, `ResolutionCandidate`, `ResolutionDecision`, `CandidateValidation`, `LifecycleEvidence`, `DerivedTarget`, and the enums used by every later task.
+- Consumes: the approved design and existing authority names from the legacy Theme/Social domains.
+- Produces: `ClassificationRunKey`, `InterpretationChoice`, `PublicationInputs`, `LogicalEventKey`, `MigrationDispositionResult`, `SocialDecisionResult`, `choose_interpretation()`, `relationship_from_proposed()`, `reconcile_social_decisions()`, `validate_split_allocations()`, and all shared enums.
 
-- [ ] **Step 1: Write failing tests for namespace, specificity, lifecycle, and propagation policy**
+- [ ] **Step 1: Write failing pure contract tests for every blocking counterexample**
 
 ```python
-def test_technical_setup_is_not_an_economic_theme():
-    result = validate_candidate(candidate(name="VCP", mechanism="technical setup"))
-    assert result.accepted is False
-    assert result.error_code == "unsupported_exposure"
+def test_successful_empty_supersedes_old_interpretation():
+    old = run("old", status="completed", assignment_count=1)
+    empty = run("empty", status="completed", assignment_count=0)
+    assert choose_interpretation(previous=old, candidate=empty) == empty
 
-def test_missing_hbm_specificity_stops_at_ai_memory():
-    result = choose_specificity(supported=("AI", "Memory"), unsupported=("HBM",))
-    assert result.resolved == ("AI", "Memory")
-    assert result.unresolved_narrower == (("AI", "HBM"),)
+def test_failed_reprocessing_retains_previous_interpretation():
+    assert choose_interpretation(
+        previous=run("accepted", status="completed"),
+        candidate=run("failed", status="failed"),
+    ).run_key == "accepted"
 
-def test_propagation_is_one_hop_only():
-    assert derive_targets(primary=11, relationships={11: (12,), 12: (13,)}) == (
-        DerivedTarget(theme_id=12, path=(11, 12)),
+def test_split_requires_all_claims_to_be_allocated():
+    result = validate_split_allocations(
+        claim_ids={1, 2}, allocations={1: "petroleum", 2: "metals"}
     )
+    assert result.complete is True
+
+def test_social_accept_reject_conflict_blocks_membership():
+    result = reconcile_social_decisions(("accepted", "rejected"))
+    assert result.state == "conflict_review_required"
+    assert result.live is False
+
+def test_logical_event_identity_ignores_attempt_epoch():
+    key = LogicalEventKey(
+        source="post:1", revision=2, projection="legacy_theme:v1", target="legacy"
+    )
+    assert "authority_epoch" not in key.__dataclass_fields__
 ```
 
-- [ ] **Step 2: Run the policy test and confirm it fails on missing imports**
+- [ ] **Step 2: Run the contract tests and confirm the package is absent**
 
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_policy.py -q`
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_contracts.py -q`
 
 Expected: FAIL with `ModuleNotFoundError: app.domain.economic_taxonomy`.
 
-- [ ] **Step 3: Implement exact enums and immutable value objects**
+- [ ] **Step 3: Implement the exact shared enums and immutable keys**
 
 ```python
 class AuthorityMode(StrEnum):
@@ -140,220 +168,245 @@ class AuthorityMode(StrEnum):
     DUAL = "dual"
     ECONOMIC = "economic"
 
-class ResolutionOutcome(StrEnum):
-    EQUIVALENT = "equivalent"
-    SPECIALIZATION = "specialization"
-    BROADER = "broader"
-    RELATED = "related"
-    DISTINCT = "distinct"
-    AMBIGUOUS = "ambiguous"
+class EvidenceChannel(StrEnum):
+    TECHNICAL = "technical"
+    FUNDAMENTAL = "fundamental"
+    NARRATIVE = "narrative"
 
-class FailureCode(StrEnum):
-    UNSUPPORTED_EXPOSURE = "unsupported_exposure"
-    UNSUPPORTED_COMPOSITION = "unsupported_composition"
-    UNRESOLVED_SPECIFICITY = "unresolved_specificity"
-    AMBIGUOUS_IDENTITY = "ambiguous_identity"
-    CANDIDATE_DIMENSION = "candidate_dimension"
-    SPLIT_REVIEW_REQUIRED = "split_review_required"
-    RESOLVER_UNAVAILABLE = "resolver_unavailable"
-    CLAIM_REVIEW_UNAVAILABLE = "claim_review_unavailable"
-    AUTHORITY_EPOCH_CHANGED = "authority_epoch_changed"
-    SOURCE_REVISION_CHANGED = "source_revision_changed"
-    STALE_REVIEW_PREVIEW = "stale_review_preview"
-    PUBLICATION_VALIDATION_FAILED = "publication_validation_failed"
+class RankingView(StrEnum):
+    TECHNICAL_ATTENTION = "technical_attention"
+    FUNDAMENTAL_MOMENTUM = "fundamental_momentum"
+    NARRATIVE_ATTENTION = "narrative_attention"
+    EMERGING = "emerging"
+    BROAD_CONFIRMATION = "broad_confirmation"
 
-@dataclass(frozen=True)
-class LensEligibility:
-    lens: Literal["technical", "fundamental", "narrative"]
-    provenance_kind: Literal["content_eligibility", "social_work"]
-    provenance_id: int
+class ExposureSupport(StrEnum):
+    DIRECT = "direct"
+    INFERRED = "inferred"
+    UNSUPPORTED = "unsupported"
+    UNRESOLVED = "unresolved"
 
-@dataclass(frozen=True)
-class SourceRevision:
-    source_kind: Literal["content_item", "social_work"]
-    source_id: int
-    revision: str
-    source_family_key: str
-    observed_at: datetime
-    title: str
-    text: str
-    evidence: tuple[EvidenceRef, ...]
-    lens_eligibility: tuple[LensEligibility, ...]
+class DevelopmentSupport(StrEnum):
+    PRESENT = "present"
+    ABSENT = "absent"
+    UNRESOLVED = "unresolved"
 ```
 
-Implement `validate_candidate`, `choose_specificity`, `requires_structural_review`, `evaluate_lifecycle`, and `derive_targets` as pure functions. Export support states `direct|inferred|unsupported|unresolved`, observation kinds `primary|derived`, lenses `technical|fundamental|narrative`, and lifecycle states `provisional|established|dormant|reactivated|retired`.
+Add failure codes `invalid_schema`, `unsupported_composition`, `unknown_dimension`, `requires_naming_review`, `ambiguous_identity`, `stale_processing_head`, `stale_authority_epoch`, `budget_exhausted`, `conflict_review_required`, `compatibility_pending`, `reader_not_ready`, `manifest_changed`, `publication_validation_failed`, `rollback_recovery_required`, `provider_retryable`, and `provider_terminal`. Define the logical outbox key from source logical ID, ordered source revision, projection kind/version, and target representation; do not include epoch as a key field.
 
-- [ ] **Step 4: Run the policy test**
+- [ ] **Step 4: Implement the pure selection, direction, mapping, and decision rules**
 
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_policy.py -q`
+`choose_interpretation()` accepts only completed candidates; completed-empty is valid. `validate_split_allocations()` requires every current claim to have exactly one destination or reviewed exclusion. `reconcile_social_decisions()` returns conflict for mixed administrator accept/reject decisions. `relationship_from_proposed()` returns `broader` for proposed Copper against Copper Miners.
 
-Expected: PASS.
+- [ ] **Step 5: Run the contract tests**
 
-- [ ] **Step 5: Commit the semantic kernel**
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_contracts.py -q`
+
+Expected: PASS with all named counterexamples collected.
+
+- [ ] **Step 6: Commit the contract kernel**
 
 ```bash
-git add backend/app/domain/economic_taxonomy backend/tests/unit/test_economic_taxonomy_policy.py
-git commit -m "feat: define economic taxonomy domain policy"
+git add backend/app/domain/economic_taxonomy backend/tests/unit/test_economic_taxonomy_contracts.py backend/tests/fixtures/economic_taxonomy/contract_cases.json
+git commit -m "test: freeze economic taxonomy contracts"
 ```
 
-### Task 2: Add stable identity and complete immutable snapshot persistence
+### Task 1: Add stable identity and sealed semantic snapshots
 
 **Files:**
 - Create: `backend/app/models/economic_taxonomy.py`
 - Modify: `backend/app/models/__init__.py`
+- Create: `backend/app/infra/db/repositories/economic_taxonomy_repo.py`
 - Create: `backend/alembic/versions/20260921_0046_economic_taxonomy_core.py`
-- Test: `backend/tests/unit/test_economic_taxonomy_models.py`
-- Test: `backend/tests/integration/test_economic_taxonomy_core_migration.py`
+- Test: `backend/tests/unit/test_economic_taxonomy_snapshots.py`
+- Test: `backend/tests/integration/test_economic_taxonomy_core_postgres.py`
 
 **Interfaces:**
-- Consumes: enums from Task 1.
-- Produces: `TaxonomyVersion`, `EconomicTheme`, `EconomicThemeRevision`, `EconomicThemeAlias`, `FacetDimension`, `FacetValue`, `ThemeFacetAssignment`, `ThemeRelationshipAssertion`, and `TaxonomyAuthority`.
+- Consumes: Task 0 enums.
+- Produces: `TaxonomyVersion`, `EconomicTheme`, version-owned semantic rows, `EconomicTaxonomyRepository.clone_draft()`, `seal_draft()`, `load_snapshot()`, and `semantic_hash()`.
 
-- [ ] **Step 1: Write failing model tests for identity and snapshot constraints**
-
-```python
-def test_identity_has_no_mutable_semantic_fields():
-    assert set(EconomicTheme.__table__.columns.keys()) == {"id", "semantic_key", "created_at"}
-
-def test_relationship_rejects_self_edge(db_session, sealed_version, theme):
-    db_session.add(ThemeRelationshipAssertion(
-        taxonomy_version_id=sealed_version.id,
-        source_theme_id=theme.id,
-        target_theme_id=theme.id,
-        relationship_type="related",
-        canonical_pair_low_id=theme.id,
-        canonical_pair_high_id=theme.id,
-    ))
-    with pytest.raises(IntegrityError):
-        db_session.flush()
-```
-
-- [ ] **Step 2: Run model tests and confirm the models are absent**
-
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_models.py -q`
-
-Expected: FAIL on import.
-
-- [ ] **Step 3: Implement the core models and constraints**
+- [ ] **Step 1: Write failing snapshot, graph, and hash tests**
 
 ```python
-class EconomicTheme(Base):
-    __tablename__ = "economic_themes"
-    id = Column(Integer, primary_key=True)
-    semantic_key = Column(String(36), nullable=False, unique=True, default=lambda: str(uuid4()))
-    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+def test_semantic_clone_hash_ignores_row_and_version_ids(repo, sealed_version):
+    clone = repo.clone_draft(sealed_version.id, actor="test", reason="clone")
+    assert repo.semantic_hash(clone) == repo.semantic_hash(sealed_version.id)
 
-class TaxonomyAuthority(Base):
-    __tablename__ = "taxonomy_authority"
-    id = Column(Integer, primary_key=True)
-    mode = Column(String(16), nullable=False, default="legacy")
-    active_version_id = Column(Integer, ForeignKey("taxonomy_versions.id", ondelete="RESTRICT"))
-    authority_epoch = Column(Integer, nullable=False, default=1)
-    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    actor = Column(String(120), nullable=False)
-    reason = Column(Text, nullable=False)
+def test_sealed_snapshot_cannot_reopen(repo, sealed_version):
+    with pytest.raises(ImmutableSnapshot):
+        repo.set_status(sealed_version.id, "draft")
+
+def test_specialization_cycle_is_rejected(repo, draft_with_a_to_b):
+    repo.add_specialization(draft_with_a_to_b.id, narrower="b", broader="a")
+    with pytest.raises(GraphInvariantViolation, match="specialization_cycle"):
+        repo.seal_draft(draft_with_a_to_b.id)
 ```
 
-Add composite primary or unique keys that include `taxonomy_version_id` for every revision, alias, dimension, value, assignment, and relationship row. Store only `specializes`; canonicalize `related` and `distinct` pairs with `canonical_pair_low_id < canonical_pair_high_id`. Constrain version status to `draft|sealed|published|superseded`. Seed singleton authority row `id=1, mode='legacy', authority_epoch=1` in the migration.
+- [ ] **Step 2: Run the tests and confirm missing models**
 
-Create database triggers for every semantic snapshot table that reject inserts, updates, and deletes when the referenced taxonomy version is `sealed`, `published`, or `superseded`. Use PostgreSQL trigger functions in production and equivalent SQLite triggers in the test migration.
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_snapshots.py -q`
 
-- [ ] **Step 4: Implement upgrade and downgrade migration tests**
+Expected: FAIL on model import.
 
-The SQLite test must assert all tables, the singleton row, and raw-SQL mutation rejection for a sealed version. The PostgreSQL variant must assert JSONB columns, check constraints, foreign keys, unique indexes, trigger protection, and that a self-edge fails.
+- [ ] **Step 3: Implement models, same-snapshot foreign keys, and immutable triggers**
 
-Run: `cd backend && ./venv/bin/pytest tests/integration/test_economic_taxonomy_core_migration.py -q`
+Create stable UUID theme identity and complete version-owned revision, alias, facet, relationship, lifecycle, and policy rows. Use composite foreign keys containing `taxonomy_version_id` so references cannot cross snapshots. PostgreSQL triggers reject insert/update/delete against a sealed version and reject changing a row's version ID.
 
-Expected: PASS on SQLite; PostgreSQL case passes when `STOCKSCANNER_TEST_ALLOW_POSTGRES=1`.
+- [ ] **Step 4: Implement canonical hash and seal validation**
 
-- [ ] **Step 5: Run model registration and migration-head checks**
+```python
+SEMANTIC_HASH_FIELDS = {
+    "theme": ("semantic_key", "display_name", "definition", "mechanism", "lifecycle"),
+    "alias": ("theme_semantic_key", "normalized_alias"),
+    "facet": ("theme_semantic_key", "dimension_key", "normalized_value"),
+    "relationship": ("source_semantic_key", "target_semantic_key", "kind"),
+}
+```
 
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_models.py tests/unit/test_main_migrations.py -q`
+Sort normalized payloads and exclude database IDs, version IDs, timestamps, actors, and comments. Seal while holding a version-scoped lock; validate no cycle and no active `distinct` contradiction with equivalence, redirects, or specialization.
 
-Expected: PASS and Alembic head `20260921_0046`.
+- [ ] **Step 5: Run SQLite and PostgreSQL sealing races**
 
-- [ ] **Step 6: Commit the core schema**
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_snapshots.py -q`
+
+Run: `cd backend && STOCKSCANNER_TEST_ALLOW_POSTGRES=1 DATABASE_URL=postgresql://ci:ci@localhost:5432/ci ./venv/bin/pytest tests/integration/test_economic_taxonomy_core_postgres.py -q`
+
+Expected: concurrent mutation cannot pass sealing; cross-version references, row moves, cycles, and contradictory assertions fail.
+
+- [ ] **Step 6: Commit sealed snapshots**
 
 ```bash
-git add backend/app/models/economic_taxonomy.py backend/app/models/__init__.py backend/alembic/versions/20260921_0046_economic_taxonomy_core.py backend/tests/unit/test_economic_taxonomy_models.py backend/tests/integration/test_economic_taxonomy_core_migration.py
-git commit -m "feat: add immutable economic taxonomy schema"
+git add backend/app/models/economic_taxonomy.py backend/app/models/__init__.py backend/app/infra/db/repositories/economic_taxonomy_repo.py backend/alembic/versions/20260921_0046_economic_taxonomy_core.py backend/tests/unit/test_economic_taxonomy_snapshots.py backend/tests/integration/test_economic_taxonomy_core_postgres.py
+git commit -m "feat: add sealed economic taxonomy snapshots"
 ```
 
-### Task 3: Implement snapshot loading, cloning, sealing, and authority transitions
+### Task 2: Persist frozen evidence, classification history, and interpretations
 
 **Files:**
-- Create: `backend/app/infra/db/repositories/economic_taxonomy_repo.py`
-- Create: `backend/app/services/economic_taxonomy_authority.py`
-- Test: `backend/tests/unit/test_economic_taxonomy_authority.py`
-- Test: `backend/tests/integration/test_economic_taxonomy_authority_postgres.py`
+- Create: `backend/app/models/economic_taxonomy_runtime.py`
+- Modify: `backend/app/models/__init__.py`
+- Create: `backend/alembic/versions/20260921_0047_economic_taxonomy_interpretations.py`
+- Test: `backend/tests/unit/test_economic_taxonomy_interpretation_models.py`
+- Test: `backend/tests/integration/test_economic_taxonomy_interpretation_migration.py`
 
 **Interfaces:**
-- Consumes: Task 2 models.
-- Produces: `TaxonomySnapshot`, `TaxonomyAuthorityState`, `EconomicTaxonomyRepository.load_snapshot()`, `clone_draft()`, `seal_draft()`, `publish_version()`, and `transition_mode()`.
+- Consumes: Task 0 contracts and Task 1 theme/version IDs.
+- Produces: `SourceFamily`, `EvidencePacket`, `LensEligibilityRevision`, `ClassificationRun`, `ClaimAssignment`, `InterpretationSet`, `InterpretationSelection`, `ThemeObservation`, `ThemeConstituentExposure`, `ThemeSignalObservation`, `MetricsRevision`, and `ThemeMetric`.
 
-- [ ] **Step 1: Write failing snapshot and immutability tests**
+- [ ] **Step 1: Write failing uniqueness and immutability tests**
 
 ```python
-def test_clone_draft_copies_complete_parent(repo, published_version):
-    draft_id = repo.clone_draft(published_version.id, actor="test", reason="rename")
-    assert repo.snapshot_hash(draft_id) == repo.snapshot_hash(published_version.id)
+def test_policy_reclassification_can_store_two_runs(db, packet, taxonomy):
+    first = classification_run(packet, taxonomy, resolver="v1")
+    second = classification_run(packet, taxonomy, resolver="v2")
+    db.add_all([first, second])
+    db.flush()
+    assert first.id != second.id
 
-def test_published_revision_cannot_be_updated(db_session, published_revision):
-    published_revision.display_name = "mutated"
-    with pytest.raises(ValueError, match="published_taxonomy_immutable"):
-        db_session.flush()
+def test_observation_identity_comes_from_assignment(db, assignment):
+    db.add(ThemeObservation(claim_assignment_id=assignment.id, observation_kind="primary"))
+    db.flush()
 ```
 
-- [ ] **Step 2: Run the unit tests and confirm repository imports fail**
+- [ ] **Step 2: Run tests and confirm models are absent**
 
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_authority.py -q`
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_interpretation_models.py -q`
 
 Expected: FAIL on import.
 
-- [ ] **Step 3: Implement repository contracts**
+- [ ] **Step 3: Implement immutable evidence and run tables**
 
-```python
-@dataclass(frozen=True)
-class TaxonomyAuthorityState:
-    mode: AuthorityMode
-    active_version_id: int | None
-    authority_epoch: int
+`EvidencePacket` stores source family, source lineage, evidence revision, packet hash, original/translated text references, admitted attachments, grounding snapshot, preparation version, and observed times. `ClassificationRun` is unique by packet, extraction/resolver/naming/derivation policies, and input processing taxonomy version. `ClaimAssignment` references its run and stable theme identity.
 
-snapshot: TaxonomySnapshot = repo.load_snapshot(version_id)
-draft_id: int = repo.clone_draft(parent_version_id, actor=actor, reason=reason)
-content_hash: str = repo.seal_draft(draft_id)
-published: TaxonomyAuthorityState = repo.publish_version(
-    draft_id, expected_version_id=parent_version_id,
-    expected_epoch=expected_epoch, actor=actor, reason=reason,
-)
-transitioned: TaxonomyAuthorityState = repo.transition_mode(
-    target_mode, expected_epoch=published.authority_epoch,
-    actor=actor, reason=reason,
-)
-```
+- [ ] **Step 4: Implement interpretation and derived-fact tables**
 
-Use `SELECT ... FOR UPDATE` on the singleton authority row and `SELECT pg_advisory_xact_lock(78124017)` on PostgreSQL. SQLite tests use the row lock path without executing PostgreSQL SQL. Hash a canonical, sorted JSON representation of the complete snapshot.
+`InterpretationSelection` is unique by `(interpretation_set_id, source_lineage_key)` and references a completed run. A completed run may have zero assignments. Observation, constituent, and signal uniqueness includes immutable assignment identity; no uniqueness rule attempts to overwrite a prior policy's row. Add immutable `MetricsRevision` and child `ThemeMetric` rows so serving generations created by Task 3 can reference a defined metrics table before Task 10 supplies calculations.
 
-- [ ] **Step 4: Add ORM and bulk-update guards for sealed semantic rows**
+- [ ] **Step 5: Run migration and model tests**
 
-Register `Session.before_flush` and `Session.do_orm_execute` guards covering every semantic snapshot class. Both paths raise `published_taxonomy_immutable` when the referenced version is sealed or published.
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_interpretation_models.py tests/integration/test_economic_taxonomy_interpretation_migration.py tests/unit/test_main_migrations.py -q`
 
-- [ ] **Step 5: Run SQLite and PostgreSQL concurrency tests**
+Expected: PASS and Alembic head `20260921_0047`.
 
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_authority.py -q`
-
-Run: `cd backend && STOCKSCANNER_TEST_ALLOW_POSTGRES=1 DATABASE_URL=postgresql://ci:ci@localhost:5432/ci ./venv/bin/pytest tests/integration/test_economic_taxonomy_authority_postgres.py -q`
-
-Expected: one concurrent publisher succeeds, one receives `authority_epoch_changed`, and the active version is complete.
-
-- [ ] **Step 6: Commit authority and immutable publication**
+- [ ] **Step 6: Commit interpretation persistence**
 
 ```bash
-git add backend/app/infra/db/repositories/economic_taxonomy_repo.py backend/app/services/economic_taxonomy_authority.py backend/tests/unit/test_economic_taxonomy_authority.py backend/tests/integration/test_economic_taxonomy_authority_postgres.py
-git commit -m "feat: publish immutable taxonomy snapshots"
+git add backend/app/models/economic_taxonomy_runtime.py backend/app/models/__init__.py backend/alembic/versions/20260921_0047_economic_taxonomy_interpretations.py backend/tests/unit/test_economic_taxonomy_interpretation_models.py backend/tests/integration/test_economic_taxonomy_interpretation_migration.py
+git commit -m "feat: persist taxonomy interpretation history"
 ```
 
-### Task 4: Seed governed facets and deterministic naming
+### Task 3: Add serving generations, manifests, and the shared writer fence
+
+**Files:**
+- Modify: `backend/app/models/economic_taxonomy_runtime.py`
+- Create: `backend/app/services/economic_taxonomy_fence.py`
+- Create: `backend/app/infra/db/repositories/economic_taxonomy_publication_repo.py`
+- Create: `backend/alembic/versions/20260921_0048_economic_taxonomy_publication.py`
+- Test: `backend/tests/unit/test_economic_taxonomy_publication_models.py`
+- Test: `backend/tests/integration/test_economic_taxonomy_fence_postgres.py`
+
+**Interfaces:**
+- Consumes: sealed versions and interpretation sets.
+- Produces: `TaxonomyAuthority`, `TaxonomySourceRevisionLog`, `EvidenceManifest`, `ServingGeneration`, `ReaderSnapshotBundle`, `ReaderCapabilityManifest`, `producer_write()`, and `exclusive_publication()`.
+
+- [ ] **Step 1: Write failing authority and fence tests**
+
+```python
+def test_processing_head_is_not_serving_pointer(authority):
+    authority.processing_taxonomy_version_id = 22
+    assert authority.serving_generation_id != 22
+
+def test_old_writer_cannot_commit_after_exclusive_switch(pg_sessions, fence):
+    old_writer, publisher = pg_sessions
+    fence.start_shared(old_writer, expected_epoch=7)
+    fence.start_exclusive(publisher)
+    old_writer.commit()
+    publisher.switch_epoch(8)
+    assert fence.begin_shared(expected_epoch=7).error == "stale_authority_epoch"
+```
+
+- [ ] **Step 2: Run tests and confirm missing publication models**
+
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_publication_models.py -q`
+
+Expected: FAIL on import.
+
+- [ ] **Step 3: Implement authority, generation, capability, and exact-manifest rows**
+
+Authority contains mode, processing version/revision, serving generation, epoch, write-fence state, and rollback state. A serving generation contains sealed taxonomy, interpretation set, metrics revision, evidence manifest, reader snapshot bundle, capability manifest, and immutable status. Create the immutable `ReaderSnapshotBundle` identity here; Task 14 fills its generation-scoped payload rows and adds the legacy UI pointer columns. Evidence manifests store sorted `(producer_kind, logical_source_key, committed_revision, content_hash)` tuples and their hash. This migration adds nullable `evidence_manifest_id` foreign keys to `interpretation_sets`, `metrics_revisions`, and `reader_snapshot_bundles`; preparation must fill them before a generation can enter `prepared`.
+
+- [ ] **Step 4: Implement the lock-order helper**
+
+```python
+@contextmanager
+def producer_write(session, *, expected_epoch: int, allowed_modes: set[AuthorityMode]):
+    session.execute(text("SELECT pg_advisory_xact_lock_shared(:key)"), {"key": 78124017})
+    authority = publication_repo.lock_authority(session)
+    assert_write_allowed(authority, expected_epoch, allowed_modes)
+    yield authority
+
+@contextmanager
+def exclusive_publication(session):
+    session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": 78124017})
+    yield publication_repo.lock_authority(session)
+```
+
+SQLite substitutes a deterministic process lock for unit tests. Enforce lock order: fence, authority, producer registry/grouping, source/work/domain, outbox.
+
+- [ ] **Step 5: Prove the late-lower-ID race is closed**
+
+Run: `cd backend && STOCKSCANNER_TEST_ALLOW_POSTGRES=1 DATABASE_URL=postgresql://ci:ci@localhost:5432/ci ./venv/bin/pytest tests/integration/test_economic_taxonomy_fence_postgres.py -q`
+
+Expected: exclusive acquisition waits for existing shared writers, blocks new writers, and sees the committed revision from a transaction whose sequence ID was allocated earlier.
+
+- [ ] **Step 6: Commit publication primitives**
+
+```bash
+git add backend/app/models/economic_taxonomy_runtime.py backend/app/services/economic_taxonomy_fence.py backend/app/infra/db/repositories/economic_taxonomy_publication_repo.py backend/alembic/versions/20260921_0048_economic_taxonomy_publication.py backend/tests/unit/test_economic_taxonomy_publication_models.py backend/tests/integration/test_economic_taxonomy_fence_postgres.py
+git commit -m "feat: add taxonomy serving generations and writer fence"
+```
+
+### Task 4: Govern facet normalization, extraction results, and naming
 
 **Files:**
 - Create: `backend/app/services/economic_taxonomy_seed.py`
@@ -362,54 +415,38 @@ git commit -m "feat: publish immutable taxonomy snapshots"
 - Test: `backend/tests/unit/test_economic_theme_naming.py`
 
 **Interfaces:**
-- Consumes: Task 1 facets and Task 3 draft repository.
-- Produces: `INITIAL_DIMENSIONS`, `seed_initial_dimensions(repo, draft_id)`, `bootstrap_economic_taxonomy(repo)`, and `name_candidate(candidate, snapshot) -> NamingResult`.
+- Consumes: Task 0 candidates and Task 1 draft repository.
+- Produces: `INITIAL_DIMENSIONS`, `normalize_facet()`, `seed_initial_dimensions()`, and `name_candidate()`.
 
-- [ ] **Step 1: Write failing seed and naming tests**
+- [ ] **Step 1: Write failing normalization and review tests**
 
 ```python
-def test_ai_memory_name_requires_both_supported_facets(snapshot):
-    result = name_candidate(candidate(facets={"technology": "AI", "product": "Memory"}), snapshot)
+def test_ai_memory_uses_end_market_and_industry(snapshot):
+    result = name_candidate(facets={
+        "end_market": "AI", "industry": "Memory", "product": None,
+    }, snapshot=snapshot)
     assert result.display_name == "AI Memory"
-    assert result.requires_review is False
 
-def test_unknown_dimension_is_not_activated(snapshot):
-    result = name_candidate(candidate(facets={"moon_phase": "Waxing"}), snapshot)
-    assert result.error_code == "candidate_dimension"
-    assert result.requires_review is True
+def test_unknown_dimension_preserves_candidate_and_opens_proposal(snapshot):
+    result = name_candidate(facets={"moon_phase": "waxing"}, snapshot=snapshot)
+    assert result.candidate is not None
+    assert result.failure_code == "unknown_dimension"
+    assert result.proposal.dimension_key == "moon_phase"
 ```
 
-- [ ] **Step 2: Run tests and confirm missing implementations**
+- [ ] **Step 2: Run tests and confirm services are absent**
 
 Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_seed.py tests/unit/test_economic_theme_naming.py -q`
 
 Expected: FAIL on import.
 
-- [ ] **Step 3: Implement the exact approved dimensions and scopes**
+- [ ] **Step 3: Seed the exact V1 dimensions and canonical values**
 
-```python
-INITIAL_DIMENSIONS = {
-    "industry": "theme", "product": "theme", "technology": "theme",
-    "end_market": "theme", "commodity": "theme", "customer": "both",
-    "value_chain_role": "both", "shipping_segment": "theme",
-    "vessel_class": "theme", "geography": "both", "policy_driver": "theme",
-    "macro_driver": "theme", "infrastructure_layer": "both",
-}
-```
+Seed `industry, technology, product, commodity, end_market, customer, supply_chain, geography, policy, regulation, macro, infrastructure`. Normalize AI demand to `end_market=artificial_intelligence`, memory economics to `industry=memory_semiconductors`, and HBM to `product=hbm`; reserve `technology=artificial_intelligence` for AI as the defining mechanism.
 
-Seed only into a draft and make repeated calls idempotent. `bootstrap_economic_taxonomy()` creates and publishes the initial complete snapshot while leaving authority mode `legacy`; a repeated call returns the seeded version without advancing the epoch. Implement deterministic rules for AI Memory, AI HBM, Copper Miners, Crude Tankers, and Product Tankers.
+- [ ] **Step 4: Implement deterministic naming and guarded provider naming**
 
-- [ ] **Step 4: Implement constrained semantic naming after resolution**
-
-`name_candidate()` accepts an optional naming provider only after identity resolution. The prompt contains the validated mechanism, approved facet dimensions/values, and forbidden signal/development terms. It returns a name of 2-80 characters or `requires_naming_review`; it may not add a facet or alter the resolved identity.
-
-```python
-def test_semantic_namer_cannot_add_unsupported_hbm(snapshot, naming_provider):
-    naming_provider.response = {"display_name": "AI HBM"}
-    result = name_candidate(ai_memory_candidate(), snapshot, generate=naming_provider)
-    assert result.display_name is None
-    assert result.error_code == "requires_naming_review"
-```
+Provider naming receives only validated mechanism and approved normalized facets, cannot introduce a facet, and returns `requires_naming_review` when its name implies unsupported specificity.
 
 - [ ] **Step 5: Run tests and commit**
 
@@ -419,441 +456,290 @@ Expected: PASS.
 
 ```bash
 git add backend/app/services/economic_taxonomy_seed.py backend/app/services/economic_theme_naming.py backend/tests/unit/test_economic_taxonomy_seed.py backend/tests/unit/test_economic_theme_naming.py
-git commit -m "feat: govern economic facets and names"
+git commit -m "feat: govern economic taxonomy facets and names"
 ```
 
-### Task 5: Add durable work, evidence, governance, migration, and outbox persistence
+### Task 5: Admit frozen evidence and lease idempotent processing work
 
 **Files:**
-- Create: `backend/app/models/economic_taxonomy_runtime.py`
-- Modify: `backend/app/models/__init__.py`
-- Create: `backend/alembic/versions/20260921_0047_economic_taxonomy_runtime.py`
-- Test: `backend/tests/unit/test_economic_taxonomy_runtime_models.py`
-- Test: `backend/tests/integration/test_economic_taxonomy_runtime_migration.py`
-
-**Interfaces:**
-- Consumes: Task 2 identity and version foreign keys.
-- Produces: `EconomicTaxonomyWork`, `EconomicExposureCandidateRow`, `EconomicThemeEmbedding`, `ThemeObservation`, `ThemeObservationLens`, `EconomicThemeDevelopmentLink`, `ThemeConstituentExposure`, `ThemePipelineMetric`, `ThemeLifecycleEvent`, `TaxonomyProposal`, `TaxonomyOperation`, `TaxonomyMigrationRun`, `TaxonomyMigrationDisposition`, `LegacyThemeMapping`, and `TaxonomyWriteOutbox`.
-
-- [ ] **Step 1: Write failing constraint and idempotency tests**
-
-```python
-def test_work_identity_is_source_and_policy_version_scoped(db_session):
-    insert_work(db_session, source_kind="content_item", source_id=7, source_revision="r1")
-    with pytest.raises(IntegrityError):
-        insert_work(db_session, source_kind="content_item", source_id=7, source_revision="r1")
-
-def test_derived_observation_requires_root(db_session, economic_theme):
-    db_session.add(observation(theme=economic_theme, kind="derived", root_id=None))
-    with pytest.raises(IntegrityError):
-        db_session.flush()
-```
-
-- [ ] **Step 2: Run tests and confirm runtime models are absent**
-
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_runtime_models.py -q`
-
-Expected: FAIL on import.
-
-- [ ] **Step 3: Implement the runtime models with named constraints**
-
-```python
-class EconomicTaxonomyWork(Base):
-    __tablename__ = "economic_taxonomy_work"
-    __table_args__ = (UniqueConstraint(
-        "source_kind", "source_id", "source_revision",
-        "extraction_policy_version", "resolver_policy_version",
-        name="uq_economic_taxonomy_work_identity",
-    ),)
-    eligibility_json = Column(JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=False)
-
-class TaxonomyWriteOutbox(Base):
-    __tablename__ = "taxonomy_write_outbox"
-    event_key = Column(String(64), nullable=False, unique=True)
-    target_representation = Column(String(16), nullable=False)
-    payload_json = Column(JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=False)
-    claimed_authority_epoch = Column(Integer, nullable=False)
-```
-
-Use explicit status checks from the spec. `eligibility_json` stores the technical, fundamental, and narrative eligibility records that produced the source-level work. `LegacyThemeMapping` is keyed by `(taxonomy_version_id, legacy_theme_cluster_id)` and stores the accepted `economic_theme_id` plus disposition. `ThemeConstituentExposure.security_id` references `stock_universe.id`. Observation uniqueness is `(economic_theme_id, source_kind, source_id, source_revision, claim_fingerprint, observation_kind, derivation_policy_version)`.
-
-- [ ] **Step 4: Implement and run migration round-trip tests**
-
-Run: `cd backend && ./venv/bin/pytest tests/integration/test_economic_taxonomy_runtime_migration.py -q`
-
-Expected: SQLite upgrade/downgrade preserves the core tables from Task 2; PostgreSQL verifies JSONB, partial work indexes, foreign keys, and named checks.
-
-- [ ] **Step 5: Run model registration tests**
-
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_runtime_models.py tests/unit/test_main_migrations.py -q`
-
-Expected: PASS and Alembic head `20260921_0047`.
-
-- [ ] **Step 6: Commit runtime persistence**
-
-```bash
-git add backend/app/models/economic_taxonomy_runtime.py backend/app/models/__init__.py backend/alembic/versions/20260921_0047_economic_taxonomy_runtime.py backend/tests/unit/test_economic_taxonomy_runtime_models.py backend/tests/integration/test_economic_taxonomy_runtime_migration.py
-git commit -m "feat: persist economic taxonomy runtime state"
-```
-
-### Task 6: Build source revisions, leased work, retries, and epoch fencing
-
-**Files:**
-- Create: `backend/app/services/economic_source_revision.py`
+- Create: `backend/app/services/economic_source_admission.py`
 - Create: `backend/app/infra/db/repositories/economic_taxonomy_work_repo.py`
-- Test: `backend/tests/unit/test_economic_source_revision.py`
+- Modify: `backend/app/models/economic_taxonomy_runtime.py`
+- Create: `backend/alembic/versions/20260921_0049_economic_taxonomy_work.py`
+- Test: `backend/tests/unit/test_economic_source_admission.py`
 - Test: `backend/tests/unit/test_economic_taxonomy_work_repo.py`
 - Test: `backend/tests/integration/test_economic_taxonomy_work_postgres.py`
 
 **Interfaces:**
-- Consumes: `SourceRevision` from Task 1, content/attachment data, Social work snapshots, authority from Task 3, and work models from Task 5.
-- Produces: `build_content_source_revision()`, `build_social_source_revision()`, `enqueue()`, `claim_next()`, `complete()`, `retry()`, and `assert_epoch()`.
+- Consumes: source content, attachments, translation, grounding, provenance routes, Task 3 fence.
+- Produces: `admit_content()`, `admit_social_work()`, `revise_lens_eligibility()`, `enqueue_run()`, `claim_next()`, `retry()`, and `complete()`.
 
-- [ ] **Step 1: Write failing source-hash and lease tests**
+- [ ] **Step 1: Write failing source-family, packet, and eligibility tests**
 
 ```python
-def test_content_revision_changes_when_attachment_revision_changes(content_item):
-    before = build_content_source_revision(content_item, attachment_revision="a")
-    after = build_content_source_revision(content_item, attachment_revision="b")
-    assert before.revision != after.revision
-    assert before.source_family_key == after.source_family_key
+def test_same_provider_post_from_legacy_and_social_shares_family(admission, post):
+    legacy = admission.admit_content(post.as_content_item())
+    social = admission.admit_social_work(post.as_saved_work())
+    assert legacy.source_family_id == social.source_family_id
 
-def test_worker_aborts_when_authority_epoch_changes(repo, claimed_work):
-    repo.bump_authority_epoch()
-    with pytest.raises(AuthorityEpochChanged):
-        repo.complete(claimed_work.id, claimed_work.lease_token)
+def test_adding_lens_does_not_create_packet_or_work(admission, admitted):
+    revised = admission.revise_lens_eligibility(admitted.packet_id, add="fundamental")
+    assert revised.packet_id == admitted.packet_id
+    assert revised.enqueued_run_id is None
 ```
 
-- [ ] **Step 2: Run tests and confirm missing functions**
+- [ ] **Step 2: Run tests and confirm services are absent**
 
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_source_revision.py tests/unit/test_economic_taxonomy_work_repo.py -q`
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_source_admission.py tests/unit/test_economic_taxonomy_work_repo.py -q`
 
 Expected: FAIL on import.
 
-- [ ] **Step 3: Implement canonical revision hashing**
+- [ ] **Step 3: Implement family resolution and packet hashing**
 
-```python
-def build_content_source_revision(item, *, attachments, preparation_metadata, eligibility_rows) -> SourceRevision:
-    payload = {
-        "content_item_id": item.id,
-        "title": item.title or "",
-        "content": item.content or "",
-        "attachment_revision": item.attachment_revision,
-        "attachments": sorted(attachments, key=lambda row: row["reference_key"]),
-        "preparation_metadata": preparation_metadata,
-        "lens_eligibility": sorted(
-            (row.pipeline, row.id, row.channel, row.originating_source_id, row.observed_at.isoformat())
-            for row in eligibility_rows
-        ),
-    }
-    return source_revision("content_item", item.id, payload, observed_at=item.published_at)
-```
+Packet hashes include selected original/translated text, translation version, admitted attachments, grounding snapshot, preparation version, and source metadata. They exclude lens eligibility. Canonical provider post ID wins over route-specific database IDs for the source-family key. The same family may contain multiple packets when admitted text, translation, attachments, grounding, or preparation changes; those packets remain independently reproducible while current selection is still per source lineage.
 
-Social revisions hash `SocialExtractionWork.input_snapshot_json`, `input_hash`, prompt/schema/model identity, saved result identity, and the narrative eligibility provenance. Source-family keys use the admitted content identity, not the extraction policy version. When technical or fundamental eligibility changes, the new content revision supersedes the prior work so the processor still extracts once while attaching every currently eligible lens.
+- [ ] **Step 4: Implement work identity and leases**
 
-- [ ] **Step 4: Implement leased work operations and lock order**
+Work identity is the `ClassificationRunKey` from Task 0. Persist durable candidate and dimension/naming proposal rows beside work. Claim with `FOR UPDATE SKIP LOCKED`, UUID lease token, five-minute expiry, input processing-head revision, and observed authority epoch. Complete inside `producer_write()`; stale head returns `stale_processing_head`, stale authority returns `stale_authority_epoch`, and neither writes assignments.
 
-`claim_next()` locks work rows using `FOR UPDATE SKIP LOCKED`, records a UUID lease token, a five-minute lease, and current authority epoch. `complete()` locks authority first, then work; it rejects changed epochs or source revisions, marks the old work retryable, and enqueues the new revision. Three lease expiries become `failed_terminal`; provider quota, rate, and timeout outcomes remain `failed_retryable` with exponential backoff.
+- [ ] **Step 5: Run reproducibility and concurrency tests**
 
-- [ ] **Step 5: Run concurrency and stale-revision tests**
-
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_source_revision.py tests/unit/test_economic_taxonomy_work_repo.py -q`
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_source_admission.py tests/unit/test_economic_taxonomy_work_repo.py -q`
 
 Run: `cd backend && STOCKSCANNER_TEST_ALLOW_POSTGRES=1 DATABASE_URL=postgresql://ci:ci@localhost:5432/ci ./venv/bin/pytest tests/integration/test_economic_taxonomy_work_postgres.py -q`
 
-Expected: two workers never claim the same row; stale epoch and source revision commits persist no candidate or observation rows.
+Expected: one claimant per row, old packets retain frozen translation/grounding, and lens-only changes do not enqueue extraction.
 
-- [ ] **Step 6: Commit durable work processing**
+- [ ] **Step 6: Commit admission and work**
 
 ```bash
-git add backend/app/services/economic_source_revision.py backend/app/infra/db/repositories/economic_taxonomy_work_repo.py backend/tests/unit/test_economic_source_revision.py backend/tests/unit/test_economic_taxonomy_work_repo.py backend/tests/integration/test_economic_taxonomy_work_postgres.py
-git commit -m "feat: add fenced economic taxonomy work queue"
+git add backend/app/services/economic_source_admission.py backend/app/infra/db/repositories/economic_taxonomy_work_repo.py backend/app/models/economic_taxonomy_runtime.py backend/alembic/versions/20260921_0049_economic_taxonomy_work.py backend/tests/unit/test_economic_source_admission.py backend/tests/unit/test_economic_taxonomy_work_repo.py backend/tests/integration/test_economic_taxonomy_work_postgres.py
+git commit -m "feat: admit frozen taxonomy evidence"
 ```
 
-### Task 7: Extract and review structured economic exposures
+### Task 6: Extract and review structured exposure candidates
 
 **Files:**
 - Create: `backend/app/services/economic_exposure_extraction.py`
 - Create: `backend/app/services/economic_exposure_claim_review.py`
 - Test: `backend/tests/unit/test_economic_exposure_extraction.py`
 - Test: `backend/tests/unit/test_economic_exposure_claim_review.py`
-- Modify: `backend/app/services/theme_claim_evidence.py`
 
 **Interfaces:**
-- Consumes: `SourceRevision`, Task 1 contracts, the existing LLM service, grounding context, and admitted evidence sources.
-- Produces: `EconomicExposureExtractor.extract(source) -> tuple[ExposureCandidate, ...]` and `review_exposure_candidates(candidates, source, generate) -> ReviewedBatch`.
+- Consumes: frozen `EvidencePacket`, approved facet catalog, optional provider reservation.
+- Produces: `extract_exposures(packet) -> ExtractionResult` and `review_claims(packet, result) -> ClaimReviewResult`.
 
-- [ ] **Step 1: Write failing structured-output and composition tests**
+- [ ] **Step 1: Write failing composition, empty, unknown-dimension, and support-state tests**
 
 ```python
-def test_independent_ai_and_memory_sentences_reject_compound(review):
-    source = "AI server shipments accelerated. Separately, memory prices rose."
-    result = review(source, extracted_candidate("AI Memory", compound=True))
-    assert result.accepted == ()
-    assert result.decisions[0].error_code == "unsupported_composition"
+def test_ai_and_memory_cooccurrence_without_link_is_not_ai_memory(extractor):
+    result = extractor.extract(packet("AI spending rose. Memory pricing rose independently."))
+    assert "AI Memory" not in result.accepted_names
 
-def test_supported_theme_survives_unsupported_development(review):
-    result = review("Memory suppliers discussed pricing.", candidate_with_development())
-    assert result.accepted[0].display_name_hint == "Memory"
-    assert result.accepted[0].development_candidate is None
+def test_unknown_dimension_is_review_required_not_parse_failure(extractor):
+    result = extractor.extract(packet_with_dimension("deployment_model", "edge"))
+    assert result.status == "review_required"
+    assert result.candidates[0].raw_facets["deployment_model"] == "edge"
+
+def test_successful_empty_is_distinct_from_failure(extractor):
+    assert extractor.extract(packet("No investable exposure.")).status == "successful_empty"
 ```
 
-- [ ] **Step 2: Run tests and confirm extraction modules are absent**
+- [ ] **Step 2: Run tests and confirm services are absent**
 
 Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_exposure_extraction.py tests/unit/test_economic_exposure_claim_review.py -q`
 
 Expected: FAIL on import.
 
-- [ ] **Step 3: Implement a strict extraction schema and prompt**
+- [ ] **Step 3: Implement schema-constrained extraction**
 
-The provider response is a JSON array whose items contain exactly these keys:
+Return `accepted_candidates|successful_empty|review_required|failed`. Preserve raw candidates for unknown dimensions and naming review. Separate exposure support from development support and require quoted evidence spans for compound relationships.
 
-```json
-{
-  "display_name_hint": "AI Memory",
-  "economic_mechanism": "AI accelerator demand increases memory demand",
-  "compound": true,
-  "plausibly_multi_security": true,
-  "facet_claims": [{"dimension": "technology", "value": "AI"}, {"dimension": "product", "value": "Memory"}],
-  "composition_support": {"status": "direct", "evidence_refs": ["primary:42-96"]},
-  "constituent_claims": [],
-  "development_candidate": null,
-  "resolved_specificity": ["AI", "Memory"],
-  "unresolved_narrower_candidates": [["AI", "HBM"]],
-  "evidence_refs": ["primary:42-96"]
-}
-```
+- [ ] **Step 4: Implement claim review outside persistence locks**
 
-Reject extra keys, more than 30 candidates, malformed evidence references, unapproved dimension keys, and technical signals as identities.
+Reject technical setups as themes, enforce narrowest supported specificity, validate security grounding, and retain provider response hashes. Provider quota/timeout is retryable; schema/composition failure is durable review or terminal according to Task 0 codes.
 
-- [ ] **Step 4: Implement claim review without weakening existing authorities**
+- [ ] **Step 5: Run tests and commit**
 
-Map `supported -> direct`, `inferred -> inferred`, `unsupported -> unsupported`, development-only `absent -> absent`, and provider/coverage failure to `unresolved`. Composition and every defining facet are reviewed independently. Reuse evidence normalization from `theme_claim_evidence.py`; do not change the legacy reviewer response contract.
-
-- [ ] **Step 5: Run new and existing claim-review tests**
-
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_exposure_extraction.py tests/unit/test_economic_exposure_claim_review.py tests/unit/test_theme_claim_review.py tests/unit/test_theme_grounding_context.py -q`
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_exposure_extraction.py tests/unit/test_economic_exposure_claim_review.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit structured extraction**
-
 ```bash
-git add backend/app/services/economic_exposure_extraction.py backend/app/services/economic_exposure_claim_review.py backend/app/services/theme_claim_evidence.py backend/tests/unit/test_economic_exposure_extraction.py backend/tests/unit/test_economic_exposure_claim_review.py
+git add backend/app/services/economic_exposure_extraction.py backend/app/services/economic_exposure_claim_review.py backend/tests/unit/test_economic_exposure_extraction.py backend/tests/unit/test_economic_exposure_claim_review.py
 git commit -m "feat: extract reviewed economic exposures"
 ```
 
-### Task 8: Retrieve candidates and resolve semantic identity
+### Task 7: Resolve identities and advance the processing head atomically
 
 **Files:**
 - Create: `backend/app/services/economic_theme_candidate_retrieval.py`
 - Create: `backend/app/services/economic_theme_resolution.py`
+- Create: `backend/app/services/economic_taxonomy_processor.py`
 - Test: `backend/tests/unit/test_economic_theme_candidate_retrieval.py`
 - Test: `backend/tests/unit/test_economic_theme_resolution.py`
-- Test: `backend/tests/unit/test_economic_theme_contrast_cases.py`
-
-**Interfaces:**
-- Consumes: reviewed candidates from Task 7, snapshots from Task 3, and embedding generation from `backend/app/services/theme_embedding_service.py`.
-- Produces: `retrieve_candidates(candidate, snapshot, limit=12) -> tuple[ResolutionCandidate, ...]` and `resolve_identity(candidate, retrieved, generate) -> ResolutionDecision`.
-
-- [ ] **Step 1: Write failing retrieval-versus-decision tests**
-
-```python
-def test_high_embedding_similarity_only_retrieves(snapshot, embedder):
-    rows = retrieve_candidates(exposure("AI Memory"), snapshot, embedder=embedder)
-    assert rows[0].theme_id == snapshot.theme_id("Memory")
-    assert not hasattr(rows[0], "outcome")
-
-def test_provider_failure_never_falls_back_to_auto_merge(resolver):
-    with pytest.raises(ResolverUnavailable):
-        resolver.resolve(exposure("Artificial Intelligence Memory"), provider=failed_provider)
-```
-
-- [ ] **Step 2: Run tests and confirm missing modules**
-
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_theme_candidate_retrieval.py tests/unit/test_economic_theme_resolution.py -q`
-
-Expected: FAIL on import.
-
-- [ ] **Step 3: Implement bounded retrieval with explicit reasons**
-
-```python
-@dataclass(frozen=True)
-class ResolutionCandidate:
-    theme_id: int
-    lexical_score: float
-    embedding_score: float | None
-    compatible_facets: tuple[str, ...]
-    conflicting_facets: tuple[str, ...]
-    constituent_overlap: float | None
-    retrieval_reasons: tuple[str, ...]
-```
-
-Retrieve exact aliases first, then lexical keys, compatible facets, fresh embeddings, relationships, and constituent overlap. Exclude stale embeddings whose semantic content hash differs from the active revision. Return at most 12 candidates in deterministic order.
-
-- [ ] **Step 4: Implement constrained semantic resolution and post-validation**
-
-The provider may emit only `equivalent|specialization|broader|related|distinct|ambiguous`, selected theme ID, differentiating facet, confidence, and rationale. Deterministic validation changes an incompatible `equivalent` result to `ambiguous`; it never upgrades another outcome to `equivalent`.
-
-- [ ] **Step 5: Pin the contrast cases**
-
-```python
-@pytest.mark.parametrize(("left", "right", "allowed"), [
-    ("AI Memory", "Memory", {"specialization"}),
-    ("Artificial Intelligence Memory", "AI Memory", {"equivalent"}),
-    ("AI-Powered Cybersecurity", "AI Security", {"distinct", "ambiguous"}),
-    ("Crude Tankers", "Product Tankers", {"distinct", "related"}),
-    ("Copper", "Copper Miners", {"specialization"}),
-])
-def test_contrast(left, right, allowed, resolver):
-    assert resolver(left, right).outcome in allowed
-```
-
-- [ ] **Step 6: Run resolution tests and commit**
-
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_theme_candidate_retrieval.py tests/unit/test_economic_theme_resolution.py tests/unit/test_economic_theme_contrast_cases.py -q`
-
-Expected: PASS.
-
-```bash
-git add backend/app/services/economic_theme_candidate_retrieval.py backend/app/services/economic_theme_resolution.py backend/tests/unit/test_economic_theme_candidate_retrieval.py backend/tests/unit/test_economic_theme_resolution.py backend/tests/unit/test_economic_theme_contrast_cases.py
-git commit -m "feat: resolve economic theme identity"
-```
-
-### Task 9: Orchestrate source processing and provisional identity publication
-
-**Files:**
-- Create: `backend/app/services/economic_taxonomy_processor.py`
 - Test: `backend/tests/unit/test_economic_taxonomy_processor.py`
-- Test: `backend/tests/integration/test_economic_provisional_publication_postgres.py`
+- Test: `backend/tests/integration/test_economic_processing_publication_postgres.py`
 
 **Interfaces:**
-- Consumes: Tasks 3-8.
-- Produces: `EconomicTaxonomyProcessor.process(source_revision, work_id, lease_token) -> ProcessingResult`.
+- Consumes: reviewed candidates, processing snapshot, work lease, naming service, fence.
+- Produces: `retrieve_candidates()`, `resolve_candidate()`, and `EconomicTaxonomyProcessor.process(work_id, lease_token)`.
 
-- [ ] **Step 1: Write failing outcome tests**
+- [ ] **Step 1: Write failing direction and crash-idempotency tests**
 
 ```python
-def test_ambiguous_candidate_creates_proposal_not_identity(processor, ambiguous_source):
-    result = processor.process(ambiguous_source, work_id=1, lease_token="lease")
-    assert result.status == "review_required"
-    assert result.proposal_type == "ambiguous_identity"
-    assert result.theme_ids == ()
+def test_proposed_copper_is_broader_than_existing_copper_miners(resolver):
+    assert resolver.resolve(proposed=copper(), existing=copper_miners()).outcome == "broader"
 
-def test_distinct_candidate_publishes_one_provisional_identity(processor, distinct_source):
-    first = processor.process(distinct_source, work_id=1, lease_token="a")
-    second = processor.process(distinct_source, work_id=1, lease_token="b")
-    assert first.theme_ids == second.theme_ids
-    assert first.published_version_id == second.published_version_id
+def test_retry_after_processing_head_crash_reuses_identity(processor, fault, work):
+    fault.raise_after("processing_head_commit")
+    with pytest.raises(InjectedCrash):
+        processor.process(work.id, work.lease_token)
+    result = processor.process(work.id, work.lease_token)
+    assert result.created_identity_count == 0
+    assert result.classification_run_count == 1
 ```
 
-- [ ] **Step 2: Run tests and confirm processor is absent**
+- [ ] **Step 2: Run tests and confirm services are absent**
 
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_processor.py -q`
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_theme_candidate_retrieval.py tests/unit/test_economic_theme_resolution.py tests/unit/test_economic_taxonomy_processor.py -q`
 
 Expected: FAIL on import.
 
-- [ ] **Step 3: Implement processing order and persisted audits**
+- [ ] **Step 3: Implement bounded retrieval and semantic resolution**
 
-```python
-def process(self, source_revision: SourceRevision, work_id: int, lease_token: str) -> ProcessingResult:
-    extracted = self.extractor.extract(source_revision)
-    reviewed = self.claim_reviewer.review(extracted, source_revision)
-    decisions = tuple(self.resolve(candidate) for candidate in reviewed.accepted)
-    return self.persist_with_epoch_fence(work_id, lease_token, reviewed, decisions)
-```
+Retrieval returns at most 20 candidates from aliases, normalized facets, lexical search, embeddings, constituents, and graph neighbors. Resolution expresses proposed relative to existing and validates that provider output is one allowed outcome with referenced candidate IDs.
 
-Persist every extracted candidate and review result before returning. `equivalent` reuses the existing identity; `specialization|broader|related|distinct` create a new provisional identity plus the supported relationship; `ambiguous` creates a proposal. Unsupported candidates remain audit rows and create no identity.
+- [ ] **Step 4: Implement one processing-head transaction per source run**
 
-- [ ] **Step 4: Implement minimal-draft provisional publication**
+Perform provider calls before the write transaction. Under `producer_write()`, lock authority/work, verify processing revision, clone one draft, apply every new provisional identity/edge from the run, seal once, persist the completed classification run and all assignments, append one source revision, update processing head/revision, and complete work. An empty run advances no taxonomy snapshot.
 
-Clone the active version, add one identity/revision/aliases/facets/relationship, recompute snapshot hash, lock authority, verify base version, candidate fingerprint, source revision, lease token, and epoch, then seal and publish. A stale base retries retrieval and resolution once against the new snapshot. The observation transaction starts only after successful publication.
+- [ ] **Step 5: Implement stale-head re-resolution**
 
-- [ ] **Step 5: Run unit and concurrent publication tests**
+If the processing head changed, release the transaction, retrieve/resolve again against the new head, and retry persistence with the same run idempotency key. Never loop provider work under a database lock.
 
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_processor.py -q`
+- [ ] **Step 6: Run unit and PostgreSQL crash/race tests**
 
-Run: `cd backend && STOCKSCANNER_TEST_ALLOW_POSTGRES=1 DATABASE_URL=postgresql://ci:ci@localhost:5432/ci ./venv/bin/pytest tests/integration/test_economic_provisional_publication_postgres.py -q`
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_theme_candidate_retrieval.py tests/unit/test_economic_theme_resolution.py tests/unit/test_economic_taxonomy_processor.py -q`
 
-Expected: concurrent identical distinct candidates create one identity; concurrent different candidates create two complete sequential versions.
+Run: `cd backend && STOCKSCANNER_TEST_ALLOW_POSTGRES=1 DATABASE_URL=postgresql://ci:ci@localhost:5432/ci ./venv/bin/pytest tests/integration/test_economic_processing_publication_postgres.py -q`
 
-- [ ] **Step 6: Commit the processor**
+Expected: several themes from one source create one sealed processing version; retry creates no duplicate identity, run, assignment, or logical mirror event.
+
+- [ ] **Step 7: Commit processing-head orchestration**
 
 ```bash
-git add backend/app/services/economic_taxonomy_processor.py backend/tests/unit/test_economic_taxonomy_processor.py backend/tests/integration/test_economic_provisional_publication_postgres.py
-git commit -m "feat: process economic taxonomy work"
+git add backend/app/services/economic_theme_candidate_retrieval.py backend/app/services/economic_theme_resolution.py backend/app/services/economic_taxonomy_processor.py backend/tests/unit/test_economic_theme_candidate_retrieval.py backend/tests/unit/test_economic_theme_resolution.py backend/tests/unit/test_economic_taxonomy_processor.py backend/tests/integration/test_economic_processing_publication_postgres.py
+git commit -m "feat: resolve themes into the processing taxonomy"
 ```
 
-### Task 10: Record primary and derived observations, lenses, constituents, and developments
+### Task 8: Build accepted interpretations and assignment-derived facts
 
 **Files:**
+- Create: `backend/app/services/economic_taxonomy_interpretations.py`
 - Create: `backend/app/services/economic_theme_observation_service.py`
-- Modify: `backend/app/services/theme_development_service.py`
+- Test: `backend/tests/unit/test_economic_taxonomy_interpretations.py`
 - Test: `backend/tests/unit/test_economic_theme_observations.py`
-- Test: `backend/tests/unit/test_economic_theme_constituents.py`
-- Test: `backend/tests/unit/test_economic_theme_development_links.py`
 
 **Interfaces:**
-- Consumes: resolved identities from Task 9, relationships from the active snapshot, SecurityMaster, and `ThemeDevelopmentObservation`.
-- Produces: `record_claim()`, `derive_observations()`, `attach_lenses()`, `record_constituents()`, and `link_developments()`.
+- Consumes: evidence manifest, completed runs, assignments, reviewed constituent decisions.
+- Produces: `build_interpretation_set()`, `materialize_assignment_facts()`, and generation-scoped observation/constituent/signal queries.
 
-- [ ] **Step 1: Write failing source-family and root tests**
+- [ ] **Step 1: Write failing correction and historical-read tests**
 
 ```python
-def test_two_primary_claims_share_family_but_not_root(service, source):
-    rows = service.record_claims(source, claims=(claim("AI Memory"), claim("Crude Tankers")))
-    assert len({row.root_observation_id for row in rows if row.kind == "primary"}) == 2
-    assert len({row.source_family_key for row in rows}) == 1
+def test_corrected_to_empty_removes_current_facts(builder, old_run, empty_run):
+    first = builder.build({old_run.source_lineage: old_run})
+    second = builder.build({empty_run.source_lineage: empty_run})
+    assert builder.current_observations(second.id) == []
+    assert len(builder.current_observations(first.id)) == 1
 
-def test_derived_rows_do_not_become_new_roots(service, ai_hbm_claim):
-    rows = service.record_claim(ai_hbm_claim)
-    primary = next(row for row in rows if row.kind == "primary")
-    assert all(row.root_observation_id == primary.id for row in rows)
+def test_failed_run_cannot_replace_selected_run(builder, accepted, failed):
+    with pytest.raises(InvalidInterpretation, match="run_not_completed"):
+        builder.build({accepted.source_lineage: failed})
 ```
 
-- [ ] **Step 2: Run tests and confirm service is absent**
+- [ ] **Step 2: Run tests and confirm services are absent**
 
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_theme_observations.py tests/unit/test_economic_theme_constituents.py tests/unit/test_economic_theme_development_links.py -q`
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_interpretations.py tests/unit/test_economic_theme_observations.py -q`
 
 Expected: FAIL on import.
 
-- [ ] **Step 3: Implement primary, derived, and lens persistence**
+- [ ] **Step 3: Implement immutable selection and fact materialization**
 
-Create one primary root per distinct claim fingerprint. Derive one semantic hop plus explicit compound/component paths. Store relationship assertion IDs and a derivation-policy version. Attach `technical`, `fundamental`, and `narrative` lens rows from `SourceRevision.lens_eligibility`, including the eligibility record or Social work ID that justified each lens.
+Select zero or one completed run per source lineage in the manifest. The default policy chooses the newest admissible completed evidence revision and policy run; a reviewed override may choose an older completed run. Failed, partial, and review-only runs are ineligible. Materialize primary observations, one-hop derived observations sharing root/source family, constituent exposures, and structured signals from assignments. Current queries always join the requested interpretation set.
 
-- [ ] **Step 4: Resolve constituents to persistent stock identities**
+- [ ] **Step 4: Pin independence and signal persistence**
 
-```python
-def resolve_security_id(db, claim: ConstituentClaim) -> int | None:
-    identity = security_master_resolver.resolve_identity(
-        symbol=claim.symbol, market=claim.market, exchange=claim.exchange
-    )
-    return db.scalar(select(StockUniverse.id).where(
-        StockUniverse.symbol == identity.canonical_symbol,
-        StockUniverse.market == identity.market,
-    ))
-```
+One source family counts once per theme/channel/day even when admitted through two routes. Derived facts never increment direct/root counts. Store signal type, normalized payload, security, detected/effective times, source family, assignment, and detector policy.
 
-Persist roles only for admitted evidence. Unresolved identities stay in the candidate audit. Price strength and ticker co-occurrence never establish exposure.
+- [ ] **Step 5: Run tests and commit**
 
-- [ ] **Step 5: Link rather than duplicate development history**
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_interpretations.py tests/unit/test_economic_theme_observations.py -q`
 
-After `record_developments()` returns authoritative `ThemeDevelopmentObservation` rows, create `EconomicThemeDevelopmentLink` rows from the corresponding primary Economic Theme observation. Do not copy development facts into Economic Taxonomy tables.
-
-- [ ] **Step 6: Run new and existing authority tests**
-
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_theme_observations.py tests/unit/test_economic_theme_constituents.py tests/unit/test_economic_theme_development_links.py tests/unit/test_theme_development.py tests/unit/test_theme_state_authorities.py -q`
-
-Expected: PASS.
-
-- [ ] **Step 7: Commit evidence persistence**
+Expected: PASS for old/new reproducibility, successful empty correction, failed reprocessing, and source-family deduplication.
 
 ```bash
-git add backend/app/services/economic_theme_observation_service.py backend/app/services/theme_development_service.py backend/tests/unit/test_economic_theme_observations.py backend/tests/unit/test_economic_theme_constituents.py backend/tests/unit/test_economic_theme_development_links.py
-git commit -m "feat: preserve economic theme evidence provenance"
+git add backend/app/services/economic_taxonomy_interpretations.py backend/app/services/economic_theme_observation_service.py backend/tests/unit/test_economic_taxonomy_interpretations.py backend/tests/unit/test_economic_theme_observations.py
+git commit -m "feat: select taxonomy interpretations"
 ```
 
-### Task 11: Publish lifecycle transitions and analytical-lens metrics
+### Task 9: Add cardinality-safe mappings and reviewed operations
+
+**Files:**
+- Modify: `backend/app/models/economic_taxonomy.py`
+- Modify: `backend/app/models/economic_taxonomy_runtime.py`
+- Create: `backend/app/services/economic_taxonomy_operations.py`
+- Create: `backend/alembic/versions/20260921_0050_economic_taxonomy_mappings.py`
+- Test: `backend/tests/unit/test_economic_taxonomy_mappings.py`
+- Test: `backend/tests/unit/test_economic_taxonomy_operations.py`
+
+**Interfaces:**
+- Consumes: draft repository, claim assignments, reviewer identity/reason.
+- Produces: `LegacyIdentityDisposition`, `LegacyDestinationMapping`, `LegacyClaimAllocation`, `EconomicThemeRedirect`, `preview_operation()`, and `apply_operation()`.
+
+- [ ] **Step 1: Write failing split, merge, exclusion, and version-copy tests**
+
+```python
+def test_refining_split_allocates_each_claim(service, refining):
+    result = service.split(refining.id, allocations={
+        refining.petroleum_claim: "petroleum-refining",
+        refining.metals_claim: "metals-refining",
+    })
+    assert result.destination_count == 2
+    assert result.unallocated_claim_ids == ()
+
+def test_not_a_theme_has_no_destination(service, legacy_signal_cluster):
+    result = service.exclude(legacy_signal_cluster.id, disposition="not_a_theme")
+    assert result.destinations == ()
+```
+
+- [ ] **Step 2: Run tests and confirm models/services are absent**
+
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_mappings.py tests/unit/test_economic_taxonomy_operations.py -q`
+
+Expected: FAIL on import.
+
+- [ ] **Step 3: Implement version-owned mapping rows**
+
+One disposition per `(taxonomy_version_id, legacy_theme_cluster_id)`; zero-to-many destinations; claim/source allocation to a destination or reviewed exclusion; version-owned economic redirects for merges. Clone all four mapping kinds with the semantic snapshot. Extend Task 1's immutability triggers, canonical semantic hash, same-snapshot validation, and contradictory-graph checks to these rows.
+
+- [ ] **Step 4: Implement reviewed preview/apply**
+
+Preview returns before/after semantic hash, affected identities, assignments, mappings, compatibility events, and validation errors. Apply requires unchanged preview hash, reviewer, and reason; under `producer_write()` it creates and seals a new processing version, appends a structural source-revision-log row, and never changes serving authority directly.
+
+- [ ] **Step 5: Run tests and commit**
+
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_mappings.py tests/unit/test_economic_taxonomy_operations.py -q`
+
+Expected: PASS; historical legacy interpretation remains reproducible after split and later version publication.
+
+```bash
+git add backend/app/models/economic_taxonomy.py backend/app/models/economic_taxonomy_runtime.py backend/app/services/economic_taxonomy_operations.py backend/alembic/versions/20260921_0050_economic_taxonomy_mappings.py backend/tests/unit/test_economic_taxonomy_mappings.py backend/tests/unit/test_economic_taxonomy_operations.py
+git commit -m "feat: add reviewed taxonomy mappings and operations"
+```
+
+### Task 10: Implement lifecycle proposals and executable ranking views
 
 **Files:**
 - Create: `backend/app/services/economic_theme_lifecycle_service.py`
@@ -862,565 +748,442 @@ git commit -m "feat: preserve economic theme evidence provenance"
 - Test: `backend/tests/unit/test_economic_theme_metrics.py`
 
 **Interfaces:**
-- Consumes: observations and constituents from Task 10, Task 1 lifecycle policy, and Task 3 immutable publication.
-- Produces: `evaluate_theme_lifecycle()`, `publish_lifecycle_transitions()`, and `calculate_lens_metrics()`.
+- Consumes: sealed processing snapshot, interpretation set, selected observations/signals, as-of time.
+- Produces: `propose_lifecycle_snapshot()` and `calculate_metrics() -> MetricsRevision`.
 
-- [ ] **Step 1: Write failing lifecycle threshold tests**
-
-```python
-def test_establishment_requires_independent_breadth(service, provisional_theme):
-    evidence = lifecycle_evidence(source_families=2, dates=2, securities=2)
-    assert service.evaluate(provisional_theme, evidence).target == "established"
-
-def test_two_revisions_of_one_source_do_not_establish(service, provisional_theme):
-    evidence = lifecycle_evidence(source_families=1, dates=2, securities=2)
-    assert service.evaluate(provisional_theme, evidence).target is None
-
-def test_dormancy_uses_direct_root_observations_only(service, established_theme):
-    evidence = lifecycle_evidence(last_direct_root_days=31, last_derived_days=1)
-    assert service.evaluate(established_theme, evidence).target == "dormant"
-```
-
-- [ ] **Step 2: Write failing metric-count tests**
+- [ ] **Step 1: Write failing availability and formula tests**
 
 ```python
-def test_metrics_keep_evidence_counts_separate(service, observations):
-    row = service.calculate(observations, lens="technical")
-    assert row.direct_observation_count == 2
-    assert row.derived_observation_count == 3
-    assert row.unique_root_count == 2
-    assert row.unique_source_family_count == 1
+def test_eligibility_without_support_is_unavailable(metrics):
+    result = metrics.calculate(theme=eligible_but_unobserved(), as_of=NOW)
+    assert result.technical_attention.availability == "unavailable"
+
+def test_broad_confirmation_requires_two_channels(metrics):
+    result = metrics.calculate(theme=technical_only_theme(), as_of=NOW)
+    assert result.broad_confirmation.availability == "unavailable"
 ```
 
-- [ ] **Step 3: Run tests and confirm services are absent**
+- [ ] **Step 2: Run tests and confirm services are absent**
 
 Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_theme_lifecycle.py tests/unit/test_economic_theme_metrics.py -q`
 
 Expected: FAIL on import.
 
-- [ ] **Step 4: Implement lifecycle publication**
+- [ ] **Step 3: Implement exact V1 calculations**
 
-Automatic establishment requires two source families, two observation dates, and two supported `StockUniverse` identities or an explicit reviewed breadth override. Thirty days without a direct root produces dormant; a new direct root produces reactivated. Each change appends `ThemeLifecycleEvent`, clones the active snapshot, updates the revision, and publishes with the expected epoch. Only a reviewed operation may retire.
+Technical uses direct roots over 30 days with seven-day half-life plus accepted signals with five-day half-life. Fundamental uses 90 days/30-day half-life. Narrative uses 14 days/three-day half-life. Emerging uses `families_7d - families_prior_21d / 3` and requires two families on two dates. Broad confirmation is the arithmetic mean of available channel percentiles and requires two channels and two source families. Ties share a percentile; missing is `unavailable`, never imputed zero.
 
-- [ ] **Step 5: Implement metrics without semantic side effects**
+- [ ] **Step 4: Implement lifecycle as processing proposals**
 
-Compute `technical_attention`, `fundamental_momentum`, `narrative_attention`, `emerging`, and `broad_confirmation` from observation lenses and existing pure calculations in `theme_discovery_service.py`. Key rows by `(economic_theme_id, lens, date, taxonomy_version_id)`. A VCP or breakout may change Technical Attention but cannot create a theme or facet.
+Apply the exact thresholds from design section 10 using distinct source families. Under `producer_write()`, create a sealed processing snapshot through Task 9 operation machinery and append a lifecycle source-revision-log row; do not update serving pointers.
 
-- [ ] **Step 6: Run lifecycle, metric, and legacy regression tests**
+- [ ] **Step 5: Run tests and commit**
 
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_theme_lifecycle.py tests/unit/test_economic_theme_metrics.py tests/unit/test_theme_lifecycle_policies.py tests/unit/test_theme_lifecycle_service.py -q`
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_theme_lifecycle.py tests/unit/test_economic_theme_metrics.py -q`
 
-Expected: PASS.
-
-- [ ] **Step 7: Commit lifecycle and metrics**
+Expected: PASS with deterministic as-of results and policy/version provenance.
 
 ```bash
 git add backend/app/services/economic_theme_lifecycle_service.py backend/app/services/economic_theme_metrics_service.py backend/tests/unit/test_economic_theme_lifecycle.py backend/tests/unit/test_economic_theme_metrics.py
-git commit -m "feat: publish economic theme lifecycle and lenses"
+git commit -m "feat: calculate economic taxonomy lifecycle and metrics"
 ```
 
-### Task 12: Add reviewed proposals and structural operations
+### Task 11: Add ordered outbox delivery and fence legacy producers
 
 **Files:**
-- Create: `backend/app/services/economic_taxonomy_operations.py`
-- Create: `backend/app/schemas/economic_taxonomy.py`
-- Test: `backend/tests/unit/test_economic_taxonomy_operations.py`
-
-**Interfaces:**
-- Consumes: snapshot repository and proposal models.
-- Produces: `preview(operation, base_version_id) -> ProposalPreview` and `apply(proposal_id, preview_hash, actor, reason) -> AppliedOperation`.
-
-- [ ] **Step 1: Write failing review and staleness tests**
-
-```python
-def test_structural_apply_requires_actor_and_reason(service, proposal):
-    with pytest.raises(ValueError, match="actor_and_reason_required"):
-        service.apply(proposal.id, proposal.preview_hash, actor="", reason="")
-
-def test_stale_preview_cannot_apply(service, proposal, publish_another_version):
-    publish_another_version()
-    with pytest.raises(StaleReviewPreview):
-        service.apply(proposal.id, proposal.preview_hash, actor="admin", reason="reviewed")
-```
-
-- [ ] **Step 2: Run tests and confirm operations service is absent**
-
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_operations.py -q`
-
-Expected: FAIL on import.
-
-- [ ] **Step 3: Implement preview hashes and exact operation types**
-
-```python
-STRUCTURAL_OPERATIONS = {
-    "rename", "facet_correction", "relationship_correction",
-    "merge_equivalent", "split", "mechanism_correction",
-    "approve_dimension", "reject_dimension", "retire", "retain",
-}
-```
-
-Preview contains base version, before/after canonical JSON, affected identity IDs, observation and migration counts, and SHA-256 preview hash. Apply verifies proposal status, base version, preview hash, actor, reason, and evidence references under the publication lock.
-
-- [ ] **Step 4: Implement each operation as a complete new snapshot**
-
-Merge keeps one stable identity, adds aliases and `LegacyThemeMapping` rows, and never stores an equivalence edge. Split creates reviewed identities and explicit observation/migration reassignment. Rename retains the prior display name as an alias unless the proposal rejects it. Dimension approval creates a governed dimension only in the result version. Retirement sets lifecycle state and timestamp; it does not delete history.
-
-- [ ] **Step 5: Run operation tests and commit**
-
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_operations.py tests/unit/test_economic_taxonomy_authority.py -q`
-
-Expected: PASS; the parent snapshot hash remains unchanged after every operation.
-
-```bash
-git add backend/app/services/economic_taxonomy_operations.py backend/app/schemas/economic_taxonomy.py backend/tests/unit/test_economic_taxonomy_operations.py
-git commit -m "feat: govern economic taxonomy operations"
-```
-
-### Task 13: Integrate legacy content producers with shadow and dual modes
-
-**Files:**
+- Modify: `backend/app/models/economic_taxonomy_runtime.py`
 - Create: `backend/app/services/economic_taxonomy_runtime.py`
+- Modify: `backend/app/services/theme_discovery_service.py`
 - Modify: `backend/app/tasks/theme_discovery_tasks.py`
-- Modify: `backend/app/services/theme_extraction_service.py`
+- Create: `backend/alembic/versions/20260921_0051_economic_taxonomy_outbox.py`
+- Test: `backend/tests/unit/test_economic_taxonomy_outbox.py`
 - Test: `backend/tests/unit/test_economic_taxonomy_legacy_adapter.py`
-- Test: `backend/tests/integration/test_economic_taxonomy_dual_write.py`
+- Test: `backend/tests/integration/test_economic_taxonomy_outbox_postgres.py`
 
 **Interfaces:**
-- Consumes: authority mode, source revisions, work repository, and outbox.
-- Produces: `EconomicTaxonomyRuntime.after_legacy_content_commit()` and `EconomicTaxonomyRuntime.write_economic_then_compatibility()`.
+- Consumes: Task 3 fence, logical event key, legacy discovery writes.
+- Produces: `emit_projection_event()`, `claim_deliveries()`, `apply_delivery()`, and `ProjectionCheckpoint`.
 
-- [ ] **Step 1: Write failing mode-matrix tests**
+- [ ] **Step 1: Write failing epoch-retry, ordering, recursion, and writer-race tests**
 
 ```python
-@pytest.mark.parametrize(("mode", "legacy", "economic", "required"), [
-    ("legacy", True, False, False),
-    ("shadow", True, True, False),
-    ("dual", True, True, True),
-    ("economic", True, True, True),
-])
-def test_content_write_matrix(mode, legacy, economic, required, runtime):
-    result = runtime.route_content_write(mode=mode)
-    assert result.write_legacy is legacy
-    assert result.write_economic is economic
-    assert result.economic_completion_required is required
+def test_retry_after_epoch_change_reuses_logical_event(outbox):
+    first = outbox.emit(source="post:1", revision=2, epoch=10)
+    retry = outbox.emit(source="post:1", revision=2, epoch=11)
+    assert retry.id == first.id
+
+def test_older_delivery_cannot_restore_state(target):
+    target.apply(revision=2, payload={"name": "new"})
+    target.apply(revision=1, payload={"name": "old"})
+    assert target.name == "new"
 ```
 
-- [ ] **Step 2: Run tests and confirm runtime adapter is absent**
+- [ ] **Step 2: Run tests and confirm outbox service is absent**
 
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_legacy_adapter.py -q`
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_outbox.py tests/unit/test_economic_taxonomy_legacy_adapter.py -q`
 
 Expected: FAIL on import.
 
-- [ ] **Step 3: Implement shadow enqueue and reconciliation**
+- [ ] **Step 3: Implement logical events, attempts, and target checkpoints**
 
-After a successful legacy extraction commit, shadow mode idempotently enqueues `EconomicTaxonomyWork`; failure is logged with source revision and does not change the legacy result. Add `reconcile_shadow_content(limit=500)` to scan admitted `ContentItem` revisions without matching work and repair missed enqueues.
+Unique logical key excludes epoch. Each attempt records claimed epoch, lease, outcome, and error. Target compare-and-set applies only revisions newer than its checkpoint. Payloads contain `origin_representation`; applying a mirror suppresses reverse event generation.
 
-- [ ] **Step 4: Implement dual and economic outbox semantics**
+- [ ] **Step 4: Route legacy producers through the shared fence**
 
-In dual mode, insert a required `target_representation='economic'` outbox event in the same transaction as the legacy result. In economic mode, commit the Economic Taxonomy result first and insert `target_representation='legacy'` compatibility work in that transaction. `event_key` is SHA-256 of target, source kind, source ID, revision, and authority epoch. Deliveries are idempotent and terminal failures block cutover health.
+Provider work remains outside transactions. Every legacy theme mutation starts with `producer_write()`, locks existing registry/grouping rows only after authority, writes its source revision and domain change atomically, and emits the appropriate shadow/dual compatibility event.
 
-- [ ] **Step 5: Run adapter, legacy extraction, and transaction tests**
+- [ ] **Step 5: Run PostgreSQL ordering and cutover-race tests**
 
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_legacy_adapter.py tests/unit/test_theme_reprocessing.py tests/unit/test_theme_pipeline_state_service.py -q`
+Run: `cd backend && STOCKSCANNER_TEST_ALLOW_POSTGRES=1 DATABASE_URL=postgresql://ci:ci@localhost:5432/ci ./venv/bin/pytest tests/integration/test_economic_taxonomy_outbox_postgres.py -q`
 
-Run: `cd backend && STOCKSCANNER_TEST_ALLOW_POSTGRES=1 DATABASE_URL=postgresql://ci:ci@localhost:5432/ci ./venv/bin/pytest tests/integration/test_economic_taxonomy_dual_write.py -q`
+Expected: out-of-order delivery is harmless, recursive emission is absent, and an old-mode writer cannot commit after epoch switch.
 
-Expected: legacy mode creates no economic work; shadow failure preserves legacy success; dual mode leaves a durable outbox event; economic mode leaves a durable legacy compatibility event.
-
-- [ ] **Step 6: Commit the legacy producer adapter**
+- [ ] **Step 6: Commit fenced compatibility delivery**
 
 ```bash
-git add backend/app/services/economic_taxonomy_runtime.py backend/app/tasks/theme_discovery_tasks.py backend/app/services/theme_extraction_service.py backend/tests/unit/test_economic_taxonomy_legacy_adapter.py backend/tests/integration/test_economic_taxonomy_dual_write.py
-git commit -m "feat: adapt legacy theme producers to taxonomy modes"
+git add backend/app/models/economic_taxonomy_runtime.py backend/app/services/economic_taxonomy_runtime.py backend/app/services/theme_discovery_service.py backend/app/tasks/theme_discovery_tasks.py backend/alembic/versions/20260921_0051_economic_taxonomy_outbox.py backend/tests/unit/test_economic_taxonomy_outbox.py backend/tests/unit/test_economic_taxonomy_legacy_adapter.py backend/tests/integration/test_economic_taxonomy_outbox_postgres.py
+git commit -m "feat: fence and order taxonomy compatibility writes"
 ```
 
-### Task 14: Integrate the Social producer and preserve administrator authority
+### Task 12: Integrate Social admission, budgeting, and decision reconciliation
 
 **Files:**
 - Modify: `backend/app/infra/db/models/social_analysis.py`
 - Modify: `backend/app/services/social_theme_projection_service.py`
+- Modify: `backend/app/services/social_llm_budget_service.py`
 - Modify: `backend/app/services/social_theme_market_service.py`
-- Create: `backend/alembic/versions/20260921_0048_economic_taxonomy_social_adapter.py`
+- Create: `backend/alembic/versions/20260921_0052_economic_taxonomy_social.py`
 - Test: `backend/tests/unit/test_economic_taxonomy_social_adapter.py`
-- Test: `backend/tests/integration/test_economic_taxonomy_social_modes.py`
-- Modify: `backend/tests/integration/test_social_theme_projection.py`
+- Test: `backend/tests/integration/test_economic_taxonomy_social_postgres.py`
+- Test: `backend/tests/unit/services/test_social_llm_budget.py`
 
 **Interfaces:**
-- Consumes: saved `SocialExtractionWork`, source revision builder, runtime adapter, and existing Social decision history.
-- Produces: nullable `SocialThemeAssociation.economic_theme_id` and mode-aware Social projection.
+- Consumes: existing Social work/association/decision rows, Task 5 admission, Task 11 outbox, Social budget reservation API.
+- Produces: `EconomicSocialAssociation`, `EconomicSocialAssociationSource`, live-admission/reconciliation service, and pending legacy mirror state.
 
-- [ ] **Step 1: Write failing Social state-preservation tests**
+- [ ] **Step 1: Write failing consolidation, conflict, admission, and budget tests**
 
 ```python
-def test_dual_projection_preserves_admin_decision_and_evidence(service, accepted_association):
-    before = (accepted_association.state, accepted_association.decision_owner,
-              tuple(accepted_association.evidence_work_ids))
-    service.project_saved_work(accepted_association.evidence_work_ids[0])
-    assert (accepted_association.state, accepted_association.decision_owner,
-            tuple(accepted_association.evidence_work_ids)) == before
-    assert accepted_association.economic_theme_id is not None
+def test_two_legacy_associations_can_bridge_one_global_membership(adapter):
+    result = adapter.project(legacy_associations=[accepted_a(), accepted_b()])
+    assert result.global_association_count == 1
+    assert result.bridge_count == 2
+
+def test_admin_conflict_is_not_live(adapter):
+    result = adapter.project(legacy_associations=[accepted_a(), rejected_b()])
+    assert result.state == "conflict_review_required"
+    assert result.live is False
+
+def test_exhausted_budget_makes_no_provider_call(adapter, exhausted_budget, provider):
+    adapter.process(saved_social_work())
+    provider.assert_not_called()
 ```
 
-- [ ] **Step 2: Run tests and confirm the new column is absent**
+- [ ] **Step 2: Run tests and confirm global projection is absent**
 
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_social_adapter.py -q`
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_social_adapter.py tests/unit/services/test_social_llm_budget.py -q`
 
-Expected: FAIL because `economic_theme_id` is absent.
+Expected: FAIL on global projection import.
 
-- [ ] **Step 3: Add the nullable mapping and migration constraints**
+- [ ] **Step 3: Implement separate global association and many-to-many bridge**
 
-Add `economic_theme_id` as a `RESTRICT` foreign key and unique `(economic_theme_id, market, canonical_symbol)` constraint. Retain non-null `theme_cluster_id`, its uniqueness, `state`, `decision_owner`, `evidence_work_ids`, version, and append-only decisions for rollback compatibility.
+Do not add economic uniqueness to `SocialThemeAssociation`. Global association is unique by economic theme and `stock_universe.id`; bridge every contributing legacy association/evidence work row. Mixed administrator accept/reject becomes `conflict_review_required` and remains out of accepted membership.
 
-- [ ] **Step 4: Route saved Social claims through the common processor**
+- [ ] **Step 4: Implement live admission and compatibility mirroring**
 
-Build a `social_work` source revision from the saved input/result, attach the `narrative` lens, and invoke the same retrieval/resolution path as content. Shadow continues legacy projection and best-effort Economic Taxonomy enqueue. Dual requires the economic outbox event. Economic mode writes the global association and emits legacy compatibility work.
+Only published, succeeded, policy-admitted saved work contributes narrative evidence. Proposed, rejected, unpublished, and exploratory work stays review-only. New global membership begins `pending_legacy_mirror`; an ordered event creates/reuses the legacy compatibility cluster and association, then acknowledgement permits live acceptance.
 
-- [ ] **Step 5: Run Social migration and mode tests**
+- [ ] **Step 5: Reserve/reconcile every additional provider call outside projection locks**
 
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_social_adapter.py tests/integration/test_social_theme_projection.py tests/unit/test_theme_social_source_admin_boundary.py -q`
+Use stable Social LLM attempt keys containing evidence packet and operation kind. Reserve before the call, reconcile success/failure afterward, and only then enter the short fenced projection transaction.
 
-Run: `cd backend && STOCKSCANNER_TEST_ALLOW_POSTGRES=1 DATABASE_URL=postgresql://ci:ci@localhost:5432/ci ./venv/bin/pytest tests/integration/test_economic_taxonomy_social_modes.py -q`
+- [ ] **Step 6: Run unit and PostgreSQL Social tests**
 
-Expected: Social administrator decisions are byte-for-byte stable across all modes; accepted associations have both IDs after dual convergence.
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_social_adapter.py tests/unit/services/test_social_llm_budget.py -q`
 
-- [ ] **Step 6: Commit Social integration and adapter migration**
+Run: `cd backend && STOCKSCANNER_TEST_ALLOW_POSTGRES=1 DATABASE_URL=postgresql://ci:ci@localhost:5432/ci ./venv/bin/pytest tests/integration/test_economic_taxonomy_social_postgres.py tests/integration/test_social_theme_projection.py -q`
+
+Expected: historical rows/decisions remain unchanged; identical decisions consolidate; conflicts and unpublished work remain non-live.
+
+- [ ] **Step 7: Commit Social integration**
 
 ```bash
-git add backend/app/infra/db/models/social_analysis.py backend/app/services/social_theme_projection_service.py backend/app/services/social_theme_market_service.py backend/alembic/versions/20260921_0048_economic_taxonomy_social_adapter.py backend/tests/unit/test_economic_taxonomy_social_adapter.py backend/tests/integration/test_economic_taxonomy_social_modes.py backend/tests/integration/test_social_theme_projection.py
-git commit -m "feat: integrate social economic taxonomy writes"
+git add backend/app/infra/db/models/social_analysis.py backend/app/services/social_theme_projection_service.py backend/app/services/social_llm_budget_service.py backend/app/services/social_theme_market_service.py backend/alembic/versions/20260921_0052_economic_taxonomy_social.py backend/tests/unit/test_economic_taxonomy_social_adapter.py backend/tests/integration/test_economic_taxonomy_social_postgres.py backend/tests/unit/services/test_social_llm_budget.py
+git commit -m "feat: integrate Social with economic taxonomy"
 ```
 
-### Task 15: Expose global APIs and authority-versioned UI snapshots
+### Task 13: Extend development authority with narrative provenance
 
 **Files:**
-- Create: `backend/app/schemas/economic_theme.py`
+- Modify: `backend/app/models/theme_intelligence.py`
+- Modify: `backend/app/services/theme_development_facts.py`
+- Modify: `backend/app/services/theme_development_service.py`
+- Modify: `backend/app/services/theme_development_worker.py`
+- Create: `backend/alembic/versions/20260921_0053_economic_taxonomy_developments.py`
+- Test: `backend/tests/unit/test_economic_taxonomy_developments.py`
+- Test: `backend/tests/unit/test_theme_development.py`
+
+**Interfaces:**
+- Consumes: existing `record_developments()`, canonical source-family keys, Economic Theme assignments, writer fence.
+- Produces: narrative `analysis_channel`, economic development links, and one event identity across dual routes.
+
+- [ ] **Step 1: Write failing Social-native and deduplication tests**
+
+```python
+def test_social_native_development_has_narrative_provenance(service):
+    row = service.record(source=social_packet(), channel="narrative", themes=[theme_id])
+    assert row.analysis_channel == "narrative"
+    assert row.economic_theme_links[0].economic_theme_id == theme_id
+
+def test_dual_route_creates_one_event(service, same_post_legacy_and_social):
+    rows = service.record_both_routes(same_post_legacy_and_social)
+    assert len({row.event_id for row in rows}) == 1
+```
+
+- [ ] **Step 2: Run tests and confirm narrative is rejected**
+
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_developments.py tests/unit/test_theme_development.py -q`
+
+Expected: FAIL because existing `record_developments()` accepts only technical/fundamental.
+
+- [ ] **Step 3: Migrate and extend the existing event authority**
+
+Move channel provenance to development observations with `analysis_channel=technical|fundamental|narrative`, backfilled from the existing pipeline value. Make `ThemeDevelopmentEvent.event_key` canonical across channels: migrate duplicate `(pipeline, event_key)` events onto one event, repoint observations/links, then enforce unique `event_key`. Add Economic Theme link rows; compatibility delivery creates legacy links without creating a second event.
+
+- [ ] **Step 4: Fence development writes and use separate support states**
+
+Normalize provider work before the transaction, then persist event/observations/links and source revision under `producer_write()`. Accept development support `present|absent|unresolved`; never pass `absent` as exposure support.
+
+- [ ] **Step 5: Run tests and commit**
+
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_developments.py tests/unit/test_theme_development.py tests/unit/test_theme_developments.py -q`
+
+Expected: PASS; Social-native development appears once and legacy technical/fundamental behavior is unchanged.
+
+```bash
+git add backend/app/models/theme_intelligence.py backend/app/services/theme_development_facts.py backend/app/services/theme_development_service.py backend/app/services/theme_development_worker.py backend/alembic/versions/20260921_0053_economic_taxonomy_developments.py backend/tests/unit/test_economic_taxonomy_developments.py backend/tests/unit/test_theme_development.py
+git commit -m "feat: add narrative economic theme developments"
+```
+
+### Task 14: Expose generation-scoped APIs and reader snapshots
+
+**Files:**
 - Create: `backend/app/api/v1/economic_themes.py`
 - Create: `backend/app/api/v1/economic_taxonomy.py`
 - Modify: `backend/app/api/v1/router.py`
-- Modify: `backend/app/models/ui_view_snapshot.py`
-- Modify: `backend/app/schemas/ui_view_snapshot.py`
 - Modify: `backend/app/services/ui_snapshot_service.py`
-- Create: `backend/alembic/versions/20260921_0049_economic_taxonomy_ui_snapshot.py`
+- Create: `backend/alembic/versions/20260921_0054_economic_taxonomy_reader_snapshots.py`
 - Test: `backend/tests/unit/test_economic_theme_api.py`
 - Test: `backend/tests/unit/test_economic_taxonomy_api.py`
 - Test: `backend/tests/unit/test_economic_theme_ui_snapshot.py`
 
 **Interfaces:**
-- Consumes: active snapshot, observations, metrics, proposals, and operations.
-- Produces: `/api/v1/economic-themes`, `/api/v1/economic-taxonomy`, and theme snapshot envelopes carrying `authority_epoch` and `taxonomy_version_id`.
+- Consumes: generation, interpretation, metrics, Social reconciliation, operations.
+- Produces: read endpoints, review endpoints, and `build_snapshot_bundle(generation_inputs)`.
 
-- [ ] **Step 1: Write failing API and cache-coherence tests**
+- [ ] **Step 1: Write failing coherence and historical-read tests**
 
 ```python
-def test_theme_list_uses_one_identity_across_lenses(client, seeded_taxonomy):
-    technical = client.get("/api/v1/economic-themes", params={"lens": "technical"}).json()
-    fundamental = client.get("/api/v1/economic-themes", params={"lens": "fundamental"}).json()
-    assert technical["items"][0]["semantic_key"] == fundamental["items"][0]["semantic_key"]
+def test_snapshot_bundle_uses_one_generation(client, prepared_generation):
+    payload = client.get("/api/v1/economic-themes").json()
+    assert payload["taxonomy_version_id"] == payload["generation"]["taxonomy_version_id"]
+    assert payload["evidence_manifest_hash"] == payload["generation"]["evidence_manifest_hash"]
 
-def test_snapshot_rejects_mismatched_epoch(client, snapshot_with_old_epoch):
-    response = client.get("/api/v1/economic-themes/bootstrap")
-    assert response.status_code == 409
-    assert response.json()["detail"] == "theme_snapshot_authority_mismatch"
+def test_historical_generation_is_reproducible(client, old_generation):
+    response = client.get(f"/api/v1/economic-themes?generation_id={old_generation.id}")
+    assert response.json()["generation_id"] == old_generation.id
 ```
 
-- [ ] **Step 2: Run API tests and confirm routes are absent**
+- [ ] **Step 2: Run tests and confirm routers are absent**
 
 Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_theme_api.py tests/unit/test_economic_taxonomy_api.py tests/unit/test_economic_theme_ui_snapshot.py -q`
 
-Expected: FAIL with route/import errors.
+Expected: FAIL on import or 404.
 
-- [ ] **Step 3: Implement read and review contracts**
+- [ ] **Step 3: Implement generation-scoped schemas and read endpoints**
 
-The list accepts `lens`, lifecycle, source type, date, offset, and limit. Detail returns stable identity, active revision, facets, relationships, direct and derived evidence, development links, constituent roles, and lens history. Review endpoints expose proposal queue, preview, apply, migration dispositions, and authority health; every mutating route uses `require_admin`.
+Return generation, taxonomy version, interpretation set, manifest hash, metrics revision, availability states, direct/derived counts, signals, constituents, developments, relationships, mappings, and reconciliation state. Default reads resolve one serving generation at request start; explicit historical reads require a generation ID.
 
-- [ ] **Step 4: Version theme UI snapshots**
+- [ ] **Step 4: Build immutable snapshot bundles without switching pointers**
 
-Add nullable `authority_epoch` and `taxonomy_version_id` to `UIViewSnapshot`; non-theme views leave them null. Economic theme snapshots require both values. Build the target snapshot before publication. The cutover transaction updates `taxonomy_authority` and the relevant `UIViewSnapshotPointer` rows together; retrieval rejects a pointer whose epoch or version differs from authority.
+`build_snapshot_bundle()` takes explicit taxonomy/interpretation/manifest/metrics inputs and writes immutable API/UI payloads. It validates every referenced theme/facet exists in the same snapshot. Pointer switching is reserved for Task 16.
 
-- [ ] **Step 5: Inject snapshot publication failure**
+- [ ] **Step 5: Run tests and commit**
 
-Add a test hook that raises after target snapshot creation but before pointer switch. Assert the old pointer and old authority remain active and the target snapshot remains an unreferenced audit artifact.
-
-- [ ] **Step 6: Run API and existing snapshot regressions**
-
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_theme_api.py tests/unit/test_economic_taxonomy_api.py tests/unit/test_economic_theme_ui_snapshot.py tests/unit/test_ui_snapshot_service.py tests/unit/test_theme_endpoints_contract.py -q`
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_theme_api.py tests/unit/test_economic_taxonomy_api.py tests/unit/test_economic_theme_ui_snapshot.py tests/unit/test_ui_snapshot_service.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit APIs and versioned snapshots**
-
 ```bash
-git add backend/app/schemas/economic_theme.py backend/app/schemas/economic_taxonomy.py backend/app/api/v1/economic_themes.py backend/app/api/v1/economic_taxonomy.py backend/app/api/v1/router.py backend/app/models/ui_view_snapshot.py backend/app/schemas/ui_view_snapshot.py backend/app/services/ui_snapshot_service.py backend/alembic/versions/20260921_0049_economic_taxonomy_ui_snapshot.py backend/tests/unit/test_economic_theme_api.py backend/tests/unit/test_economic_taxonomy_api.py backend/tests/unit/test_economic_theme_ui_snapshot.py
-git commit -m "feat: expose versioned economic theme APIs"
+git add backend/app/api/v1/economic_themes.py backend/app/api/v1/economic_taxonomy.py backend/app/api/v1/router.py backend/app/services/ui_snapshot_service.py backend/alembic/versions/20260921_0054_economic_taxonomy_reader_snapshots.py backend/tests/unit/test_economic_theme_api.py backend/tests/unit/test_economic_taxonomy_api.py backend/tests/unit/test_economic_theme_ui_snapshot.py
+git commit -m "feat: expose generation-scoped economic themes"
 ```
 
-### Task 16: Build reviewed legacy migration and the contrast benchmark
+### Task 15: Build reviewed migration, exact replay inputs, and contrast benchmark
 
 **Files:**
 - Create: `backend/app/services/economic_taxonomy_migration.py`
-- Create: `backend/scripts/build_economic_taxonomy_migration.py`
-- Create: `backend/scripts/evaluate_economic_taxonomy.py`
-- Create: `backend/tests/fixtures/economic_taxonomy/contrast_cases.json`
+- Create: `backend/scripts/run_economic_taxonomy_benchmark.py`
+- Expand: `backend/tests/fixtures/economic_taxonomy/contract_cases.json`
 - Test: `backend/tests/unit/test_economic_taxonomy_migration.py`
 - Test: `backend/tests/unit/test_economic_taxonomy_benchmark.py`
-- Test: `backend/tests/integration/test_economic_taxonomy_migration_run.py`
 
 **Interfaces:**
-- Consumes: active legacy themes, aliases, mentions, constituents, Social associations, developments, and the shadow Economic Taxonomy.
-- Produces: `build_migration_run()`, `review_disposition()`, `materialize_legacy_mappings()`, and `evaluate_contrast_cases()`.
+- Consumes: legacy themes/mentions/associations/developments, mapping operations, source revision log.
+- Produces: `build_migration()`, `review_disposition()`, `replay_manifest()`, and benchmark report bound to taxonomy and policy hashes.
 
-- [ ] **Step 1: Write failing completeness and no-cutover tests**
+- [ ] **Step 1: Write failing coverage and split-allocation tests**
 
 ```python
-def test_every_active_legacy_theme_has_one_disposition(service, active_legacy_ids):
-    run = service.build_migration_run()
-    assert {row.legacy_theme_cluster_id for row in run.dispositions} == set(active_legacy_ids)
-    assert len(run.dispositions) == len(active_legacy_ids)
+def test_complete_coverage_means_disposition_plus_split_allocations(migration, refining):
+    run = migration.build(refining.dataset)
+    assert run.coverage_complete is False
+    migration.review_split(run.id, refining.id, refining.allocations)
+    assert migration.get(run.id).coverage_complete is True
 
-def test_build_does_not_change_authority(service, authority):
-    before = authority.state()
-    service.build_migration_run()
-    assert authority.state() == before
+def test_max_source_id_is_not_used_as_replay_barrier(migration):
+    manifest = migration.replay_manifest()
+    assert manifest.entries == tuple(sorted(committed_revision_tuples()))
 ```
 
-- [ ] **Step 2: Run migration tests and confirm service is absent**
+- [ ] **Step 2: Run tests and confirm migration service is absent**
 
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_migration.py -q`
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_migration.py tests/unit/test_economic_taxonomy_benchmark.py -q`
 
 Expected: FAIL on import.
 
-- [ ] **Step 3: Implement exact dispositions and high-watermarks**
+- [ ] **Step 3: Implement resumable migration and reviewed coverage**
 
-```python
-MIGRATION_DISPOSITIONS = {
-    "retain_as_global_theme", "equivalent_to", "split_required",
-    "not_a_theme", "insufficient_evidence",
-}
-```
+Persist run inputs, source hashes, taxonomy/policy hashes, dispositions, destinations, allocations, exclusions, reviewer, and reason. Many-to-one merges reuse one global identity; one-to-many splits stay incomplete until every current claim is allocated. Backfill and replay commits use `producer_write()` and append migration revision-log rows so the final manifest covers migration state.
 
-Capture high-watermarks for `content_items`, `social_extraction_work`, `theme_development_work`, and taxonomy operations. Persist one disposition per active legacy identity with proposed theme IDs, before/after JSON, evidence, reason, and review state. Materialize `LegacyThemeMapping` only for reviewed retain/equivalent results.
+- [ ] **Step 4: Implement exact manifest replay and benchmark fixtures**
 
-- [ ] **Step 4: Create the version-bound contrast fixture**
+Replay sorted committed revision-log tuples, not sequence maxima. Include AI/Memory co-occurrence, AI Memory/HBM specificity, AI Security mechanism contrast, Copper direction, Refining split, Social consolidation/conflict, successful empty correction, and duplicate-route independence.
 
-The JSON fixture contains positive, negative, ambiguous, and insufficient-specificity cases for:
+- [ ] **Step 5: Run tests and commit**
 
-```text
-Memory / HBM / AI Memory / AI HBM
-AI-Powered Cybersecurity / AI Security
-petroleum refining / metals refining
-Crude Tankers / Product Tankers
-Copper / Copper Miners / downstream copper consumers
-VCP / breakout / relative-strength leadership pseudo-themes
-Rate-Cut Beneficiaries
-```
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_migration.py tests/unit/test_economic_taxonomy_benchmark.py -q`
 
-Each case specifies source text, expected accepted themes, forbidden themes, allowed resolution outcomes, and expected error code. The evaluator records taxonomy content hash plus extraction, resolver, naming, and derivation policy versions.
-
-- [ ] **Step 5: Implement separate benchmark error classes**
-
-Report `false_equivalence`, `false_specialization`, `unsupported_compound`, `over_specific`, `missed_valid_theme`, and `pseudo_theme_creation` counts. Exit non-zero if any configured threshold regresses from the checked-in baseline.
-
-- [ ] **Step 6: Run migration and benchmark tests**
-
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_migration.py tests/unit/test_economic_taxonomy_benchmark.py tests/integration/test_economic_taxonomy_migration_run.py -q`
-
-Expected: PASS; dry run changes no authority or UI pointer.
-
-- [ ] **Step 7: Commit migration and benchmark tools**
+Expected: PASS and benchmark report includes fixture version, taxonomy hash, policy bundle, and per-case outcome.
 
 ```bash
-git add backend/app/services/economic_taxonomy_migration.py backend/scripts/build_economic_taxonomy_migration.py backend/scripts/evaluate_economic_taxonomy.py backend/tests/fixtures/economic_taxonomy/contrast_cases.json backend/tests/unit/test_economic_taxonomy_migration.py backend/tests/unit/test_economic_taxonomy_benchmark.py backend/tests/integration/test_economic_taxonomy_migration_run.py
-git commit -m "feat: build reviewed taxonomy migration"
+git add backend/app/services/economic_taxonomy_migration.py backend/scripts/run_economic_taxonomy_benchmark.py backend/tests/fixtures/economic_taxonomy/contract_cases.json backend/tests/unit/test_economic_taxonomy_migration.py backend/tests/unit/test_economic_taxonomy_benchmark.py
+git commit -m "feat: migrate and benchmark economic taxonomy"
 ```
 
-### Task 17: Implement delta replay, atomic cutover, and rollback
+### Task 16: Implement the publication coordinator, cutover, and rollback recovery
 
 **Files:**
-- Create: `backend/app/services/economic_taxonomy_cutover.py`
+- Create: `backend/app/services/economic_taxonomy_publication.py`
 - Create: `backend/scripts/publish_economic_taxonomy.py`
-- Test: `backend/tests/unit/test_economic_taxonomy_cutover.py`
-- Test: `backend/tests/integration/test_economic_taxonomy_cutover_postgres.py`
+- Test: `backend/tests/unit/test_economic_taxonomy_publication.py`
+- Test: `backend/tests/integration/test_economic_taxonomy_publication_postgres.py`
 
 **Interfaces:**
-- Consumes: migration run, outbox health, authority repository, UI target snapshots, and benchmark report.
-- Produces: `prepare_cutover()`, `replay_delta()`, `publish_cutover()`, and `rollback_cutover()`.
+- Consumes: processing head, interpretation builder, metrics, snapshot builder, manifest, capability, compatibility checkpoints, exclusive fence.
+- Produces: `prepare_generation()`, `publish_generation()`, `prepare_cutover()`, `publish_cutover()`, and `rollback()`.
 
-- [ ] **Step 1: Write failing readiness and rollback tests**
+- [ ] **Step 1: Write failing preparation, manifest-change, and rollback tests**
 
 ```python
-def test_prepare_rejects_pending_outbox(cutover, migration_run):
-    with pytest.raises(PublicationValidationFailed, match="outbox_not_drained"):
-        cutover.prepare_cutover(migration_run.id)
+def test_prepare_builds_all_artifacts_from_one_manifest(coordinator):
+    generation = coordinator.prepare_generation()
+    assert generation.interpretation_set.evidence_manifest_id == generation.evidence_manifest_id
+    assert generation.metrics.evidence_manifest_id == generation.evidence_manifest_id
+    assert generation.snapshot_bundle.evidence_manifest_id == generation.evidence_manifest_id
 
-def test_failure_before_pointer_switch_keeps_legacy_authority(cutover, fault_injector):
-    fault_injector.raise_at("before_authority_switch")
-    with pytest.raises(RuntimeError):
-        cutover.publish_cutover()
-    assert cutover.authority().mode == "dual"
-    assert cutover.ui_pointer().authority_epoch == cutover.authority().authority_epoch
+def test_manifest_change_aborts_without_switch(coordinator, new_revision):
+    prepared = coordinator.prepare_generation()
+    new_revision.commit()
+    with pytest.raises(ManifestChanged):
+        coordinator.publish_generation(prepared.id)
+    assert coordinator.authority().serving_generation_id != prepared.id
 ```
 
-- [ ] **Step 2: Run cutover tests and confirm service is absent**
+- [ ] **Step 2: Run tests and confirm coordinator is absent**
 
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_cutover.py -q`
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_publication.py -q`
 
 Expected: FAIL on import.
 
-- [ ] **Step 3: Implement readiness gates**
+- [ ] **Step 3: Implement preparation outside the exclusive lock**
 
-`prepare_cutover()` requires: authority mode `dual`; reviewed migration dispositions; complete legacy mappings; zero pending, leased, or terminal outbox events; no active old-epoch work; passing version-bound benchmark; built target UI snapshots; and matching source high-watermarks.
+Choose a sealed processing version; build exact manifest, interpretation set, metrics, snapshots, compatibility validation, benchmark validation, and reader capability; persist `prepared`. No authority pointer changes here.
 
-- [ ] **Step 4: Implement final replay and fenced switch**
+- [ ] **Step 4: Implement the short final barrier**
 
-Under advisory lock `78124017`, record fresh high-watermarks, replay every content, Social, development, and structural revision after the migration snapshot, drain required outbox work, verify high-watermarks again, lock authority, and atomically switch mode to `economic`, active version, epoch, and theme UI pointers. A changed high-watermark aborts before the switch.
+Under `exclusive_publication()`, reread the committed manifest after shared writers drain. Verify manifest hash, processing revision, compatibility checkpoints, outbox requirements, capability, and snapshot hashes. If any differ, roll back immediately. Otherwise switch serving generation and all UI/API pointers, optionally mode, increment epoch, and mark published in one transaction.
 
-- [ ] **Step 5: Implement rollback without deleting artifacts**
+- [ ] **Step 5: Implement catch-up and rollback recovery outside the barrier**
 
-`rollback_cutover()` verifies legacy compatibility outbox health, builds legacy UI snapshots, then atomically switches mode to `legacy` and matching pointers while incrementing epoch. It retains Economic Taxonomy versions, candidates, observations, migration runs, and mappings.
+Replay and drain outside publication. If compatibility is unhealthy, set durable `rollback_recovery`, restrict authoritative writes, rebuild ordered legacy projections from the current interpretation, verify checkpoints, prepare a legacy generation, then use the normal final barrier.
 
-- [ ] **Step 6: Run PostgreSQL race and failure tests**
+- [ ] **Step 6: Run PostgreSQL race matrix**
 
-Run: `cd backend && STOCKSCANNER_TEST_ALLOW_POSTGRES=1 DATABASE_URL=postgresql://ci:ci@localhost:5432/ci ./venv/bin/pytest tests/integration/test_economic_taxonomy_cutover_postgres.py -q`
+Run: `cd backend && STOCKSCANNER_TEST_ALLOW_POSTGRES=1 DATABASE_URL=postgresql://ci:ci@localhost:5432/ci ./venv/bin/pytest tests/integration/test_economic_taxonomy_publication_postgres.py -q`
 
-Expected: a source arriving during replay is included or publication aborts; an old worker cannot commit after the epoch change; every injected failure leaves one coherent authority and pointer set.
+Expected: existing source change, late lower-ID commit, blocked outbox, evidence after snapshot build, old writer race, injected crash, and unhealthy rollback all end with one coherent old or new generation and no deadlock.
 
 - [ ] **Step 7: Run unit tests and commit**
 
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_cutover.py -q`
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_publication.py -q`
 
 Expected: PASS.
 
 ```bash
-git add backend/app/services/economic_taxonomy_cutover.py backend/scripts/publish_economic_taxonomy.py backend/tests/unit/test_economic_taxonomy_cutover.py backend/tests/integration/test_economic_taxonomy_cutover_postgres.py
-git commit -m "feat: add atomic taxonomy cutover and rollback"
+git add backend/app/services/economic_taxonomy_publication.py backend/scripts/publish_economic_taxonomy.py backend/tests/unit/test_economic_taxonomy_publication.py backend/tests/integration/test_economic_taxonomy_publication_postgres.py
+git commit -m "feat: coordinate economic taxonomy publication"
 ```
 
-### Task 18: Schedule shadow processing, outbox delivery, lifecycle, and metrics
+### Task 17: Schedule bounded processing, delivery, preparation, lifecycle, and metrics
 
 **Files:**
 - Create: `backend/app/tasks/economic_taxonomy_tasks.py`
 - Modify: `backend/app/celery_app.py`
-- Modify: `backend/app/tasks/theme_discovery_tasks.py`
 - Test: `backend/tests/unit/test_economic_taxonomy_tasks.py`
 - Test: `backend/tests/unit/test_economic_taxonomy_celery_contract.py`
 
 **Interfaces:**
-- Consumes: work processor, runtime reconciliation, outbox, lifecycle, and metrics services.
-- Produces: Celery tasks `discover_economic_taxonomy_work`, `process_economic_taxonomy_work`, `deliver_taxonomy_outbox`, `apply_economic_theme_lifecycle`, and `calculate_economic_theme_metrics`.
+- Consumes: Tasks 5-16 services.
+- Produces: Celery tasks `discover_economic_taxonomy_work`, `process_economic_taxonomy_work`, `deliver_taxonomy_outbox`, `prepare_taxonomy_generation`, `apply_economic_theme_lifecycle`, and `calculate_economic_theme_metrics`.
 
-- [ ] **Step 1: Write failing task-mode and retry tests**
+- [ ] **Step 1: Write failing mode, budget, and bounded-batch tests**
 
 ```python
-def test_legacy_mode_discovery_is_noop(task, authority):
+def test_legacy_mode_processing_is_noop(task, authority):
     authority.mode = "legacy"
     assert task.run(limit=50) == {"status": "skipped", "reason": "legacy_mode"}
 
-def test_provider_quota_keeps_work_retryable(task, quota_failure):
-    result = task.run(limit=1)
-    assert result["failed_retryable"] == 1
-    assert result["failed_terminal"] == 0
+def test_batch_never_exceeds_limit(task, queued_work):
+    assert task.run(limit=10)["claimed"] <= 10
 ```
 
 - [ ] **Step 2: Run tests and confirm tasks are absent**
 
 Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_tasks.py tests/unit/test_economic_taxonomy_celery_contract.py -q`
 
-Expected: FAIL on import or missing Celery registration.
+Expected: FAIL on task import/registration.
 
-- [ ] **Step 3: Implement bounded task entry points**
+- [ ] **Step 3: Implement bounded entry points**
 
-Every task opens short database transactions, processes bounded batches, reports counts by stable outcome, and does no work in legacy mode. Work and outbox tasks use leases from Task 6; lifecycle and metrics use the active snapshot captured at task start and abort on epoch change.
+Provider work uses no publication lock; persistence uses the shared fence. Discovery/processing runs in shadow, dual, and economic modes. Delivery retries ordered logical events. Lifecycle and metrics target explicit processing/interpretation inputs. Generation preparation never publishes automatically.
 
-- [ ] **Step 4: Register queues and schedules**
+- [ ] **Step 4: Register existing queues and schedules**
 
-Include `app.tasks.economic_taxonomy_tasks` in Celery. Route source processing and outbox delivery to the existing `celery` queue. Schedule discovery every 5 minutes, outbox delivery every minute, lifecycle daily at 02:10 in configured Celery timezone, and metrics after existing theme metric calculation. Do not add a new worker process.
+Use the existing `celery` queue: discovery every five minutes, delivery every minute, lifecycle daily at 02:10 configured timezone, metrics after current theme metrics, and preparation only by explicit operator command or reviewed release workflow. Add no worker process.
 
-- [ ] **Step 5: Run task and existing worker-contract tests**
+- [ ] **Step 5: Run task contracts and commit**
 
 Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_tasks.py tests/unit/test_economic_taxonomy_celery_contract.py tests/unit/test_theme_discovery_ingestion_tasks.py tests/unit/test_social_worker_compose_contract.py -q`
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit scheduled operation**
-
 ```bash
-git add backend/app/tasks/economic_taxonomy_tasks.py backend/app/celery_app.py backend/app/tasks/theme_discovery_tasks.py backend/tests/unit/test_economic_taxonomy_tasks.py backend/tests/unit/test_economic_taxonomy_celery_contract.py
+git add backend/app/tasks/economic_taxonomy_tasks.py backend/app/celery_app.py backend/tests/unit/test_economic_taxonomy_tasks.py backend/tests/unit/test_economic_taxonomy_celery_contract.py
 git commit -m "feat: schedule economic taxonomy processing"
 ```
 
-### Task 19: Add the global theme and taxonomy review experience
-
-**Files:**
-- Create: `frontend/src/api/economicThemes.js`
-- Create: `frontend/src/api/economicThemes.test.js`
-- Create: `frontend/src/features/themes/components/EconomicThemeDetailModal.jsx`
-- Create: `frontend/src/features/themes/components/EconomicThemeDetailModal.test.jsx`
-- Create: `frontend/src/components/Themes/EconomicTaxonomyReview.jsx`
-- Create: `frontend/src/components/Themes/EconomicTaxonomyReview.test.jsx`
-- Modify: `frontend/src/features/themes/pages/ThemesPageContainer.jsx`
-- Modify: `frontend/src/pages/ThemesPage.test.jsx`
-
-**Interfaces:**
-- Consumes: Task 15 APIs and the runtime authority response.
-- Produces: one global list with lens selection, stable identity details, and reviewed migration/operation workflows.
-
-- [ ] **Step 1: Write failing API adapter and stable-ID tests**
-
-```javascript
-it('keeps one identity while changing lenses', async () => {
-  const technical = await getEconomicThemes({ lens: 'technical' });
-  const fundamental = await getEconomicThemes({ lens: 'fundamental' });
-  expect(technical.items[0].semanticKey).toBe(fundamental.items[0].semanticKey);
-});
-```
-
-- [ ] **Step 2: Write failing review-workflow tests**
-
-```javascript
-it('requires reviewer reason and rejects stale previews', async () => {
-  render(<EconomicTaxonomyReview proposal={proposal} />);
-  await user.click(screen.getByRole('button', { name: /apply/i }));
-  expect(screen.getByText(/reason is required/i)).toBeVisible();
-  server.use(stalePreviewResponse());
-  await submitReason('mechanism verified');
-  expect(screen.getByText(/preview changed; refresh before applying/i)).toBeVisible();
-});
-```
-
-- [ ] **Step 3: Run frontend tests and confirm modules are absent**
-
-Run: `cd frontend && npm run test:run -- src/api/economicThemes.test.js src/features/themes/components/EconomicThemeDetailModal.test.jsx src/components/Themes/EconomicTaxonomyReview.test.jsx`
-
-Expected: FAIL on imports.
-
-- [ ] **Step 4: Implement the global list and detail view**
-
-Replace pipeline identity tabs with lens choices: Technical Attention, Fundamental Momentum, Narrative Attention, Emerging, and Broad Confirmation. Detail renders definition, mechanism, defining facets, aliases, narrower/broader/related identities, direct/derived evidence counts, source-family count, developments, constituents, and roles. Render VCP and breakout under signals, never as theme names.
-
-- [ ] **Step 5: Implement migration and structural review**
-
-Render queues for `split_required`, `not_a_theme`, `insufficient_evidence`, `ambiguous_identity`, `candidate_dimension`, merge, mechanism correction, and retirement. Show before/after JSON as labeled fields, affected identities and observations, evidence links, preview hash, reviewer, and required reason. Refresh on `stale_review_preview`.
-
-- [ ] **Step 6: Keep legacy UI selectable until economic authority**
-
-Read authority state on page load. In legacy, shadow, and dual modes render the existing production page plus an admin-only Economic Taxonomy preview. In economic mode render the global page. Do not remove legacy components in this task.
-
-- [ ] **Step 7: Run focused tests and production build**
-
-Run: `cd frontend && npm run test:run -- src/api/economicThemes.test.js src/features/themes/components/EconomicThemeDetailModal.test.jsx src/components/Themes/EconomicTaxonomyReview.test.jsx src/pages/ThemesPage.test.jsx`
-
-Run: `cd frontend && npm run build`
-
-Expected: tests PASS and Vite build exits 0.
-
-- [ ] **Step 8: Commit the product experience**
-
-```bash
-git add frontend/src/api/economicThemes.js frontend/src/api/economicThemes.test.js frontend/src/features/themes/components/EconomicThemeDetailModal.jsx frontend/src/features/themes/components/EconomicThemeDetailModal.test.jsx frontend/src/components/Themes/EconomicTaxonomyReview.jsx frontend/src/components/Themes/EconomicTaxonomyReview.test.jsx frontend/src/features/themes/pages/ThemesPageContainer.jsx frontend/src/pages/ThemesPage.test.jsx
-git commit -m "feat: add global economic theme experience"
-```
-
-### Task 20: Cut downstream readers over through one authority-aware facade
+### Task 18: Cut all readers over and register reader capability
 
 **Files:**
 - Create: `backend/app/services/economic_theme_read_service.py`
@@ -1432,144 +1195,176 @@ git commit -m "feat: add global economic theme experience"
 - Modify: `backend/app/services/social_theme_market_service.py`
 - Modify: `backend/app/interfaces/mcp/market_copilot.py`
 - Modify: `backend/app/services/ui_snapshot_service.py`
+- Create: `frontend/src/api/economicThemes.js`
+- Create: `frontend/src/features/themes/components/EconomicThemeDetailModal.jsx`
+- Create: `frontend/src/components/Themes/EconomicTaxonomyReview.jsx`
+- Modify: `frontend/src/features/themes/pages/ThemesPageContainer.jsx`
 - Test: `backend/tests/unit/test_economic_theme_read_service.py`
 - Test: `backend/tests/unit/test_economic_theme_consumer_cutover.py`
+- Test: `frontend/src/api/economicThemes.test.js`
+- Test: `frontend/src/features/themes/components/EconomicThemeDetailModal.test.jsx`
+- Test: `frontend/src/components/Themes/EconomicTaxonomyReview.test.jsx`
 
 **Interfaces:**
-- Consumes: authority state, global APIs, legacy models, and `LegacyThemeMapping`.
-- Produces: `EconomicThemeReadService.list_themes()`, `get_theme()`, `themes_for_security()`, `latest_metrics()`, and `resolve_name()`.
+- Consumes: one serving generation resolved at request/job start.
+- Produces: authority-aware backend facade, generation-aware UI, and a signed/tested `ReaderCapabilityManifest` input.
 
-- [ ] **Step 1: Write failing facade mode tests**
+- [ ] **Step 1: Write failing backend bypass and generation-consistency tests**
 
 ```python
-@pytest.mark.parametrize(("mode", "expected_source"), [
-    ("legacy", "legacy"), ("shadow", "legacy"), ("dual", "legacy"), ("economic", "economic"),
+@pytest.mark.parametrize(("mode", "source"), [
+    ("legacy", "legacy"), ("shadow", "legacy"),
+    ("dual", "legacy"), ("economic", "economic"),
 ])
-def test_read_source_follows_authority(mode, expected_source, service):
-    assert service.for_mode(mode).source_name == expected_source
+def test_reader_follows_authority(mode, source, reader):
+    assert reader.for_mode(mode).source_name == source
+
+def test_economic_request_uses_one_generation(reader, query_spy):
+    reader.list_themes()
+    assert query_spy.resolved_generation_count == 1
 ```
 
-- [ ] **Step 2: Inventory and pin current consumers**
+- [ ] **Step 2: Inventory consumers and make bypass detection executable**
 
 Run: `rg -l 'ThemeCluster|ThemeMention|ThemeMetrics|ThemeConstituent|parent_cluster_id|is_l1|taxonomy_level' backend/app --glob '*.py'`
 
-Add assertions for themes rankings/detail/history/mentions, stock themes, digest themes, Social confirmation, Social market baskets, MCP theme detail/rankings, and UI snapshots. The test fails if a production consumer bypasses `EconomicThemeReadService` while mode is economic.
+Encode the allowed legacy adapter modules in `test_economic_theme_consumer_cutover.py`; fail if any economic-mode consumer directly reads legacy semantic tables.
 
-- [ ] **Step 3: Implement the facade and legacy adapter**
+- [ ] **Step 3: Implement the backend facade and route every listed consumer**
 
-Legacy, shadow, and dual implementations preserve existing responses. Economic implementation reads the active snapshot, observations, constituents, and lens metrics. When a legacy response field is unavoidable, translate using reviewed `LegacyThemeMapping`; never infer a mapping by display name.
+Resolve generation once and read its taxonomy, interpretation, metrics, mappings, Social state, and snapshots. Legacy/shadow/dual preserve existing outputs. Economic legacy-shaped responses use reviewed mappings/redirects only, never display-name inference.
 
-- [ ] **Step 4: Replace production reads and retire L1/L2 authority**
+- [ ] **Step 4: Write and run failing frontend identity, availability, and conflict tests**
 
-Route listed consumers through the facade. In economic mode, `/themes/taxonomy/l1` returns `410 Gone` with `economic_taxonomy_replaces_l1_l2`; relationships are served by the Economic Theme endpoints. Keep legacy mutation endpoints admin-disabled unless authority is legacy or rollback is active.
+Run: `cd frontend && npm run test:run -- src/api/economicThemes.test.js src/features/themes/components/EconomicThemeDetailModal.test.jsx src/components/Themes/EconomicTaxonomyReview.test.jsx`
 
-- [ ] **Step 5: Run consumer and legacy compatibility tests**
+Expected: FAIL on missing modules.
 
-Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_theme_read_service.py tests/unit/test_economic_theme_consumer_cutover.py tests/unit/test_theme_endpoints_contract.py tests/unit/test_theme_content_browser_api.py tests/unit/test_ui_snapshot_service.py -q`
+- [ ] **Step 5: Implement the global UI and review workflow**
 
-Expected: PASS in all four modes; economic-mode tests issue no `theme_clusters` semantic read outside the facade.
+Show five ranking views with explicit unavailable states; stable identity details; facets/relationships; direct versus derived evidence; source-family counts; structured signals; developments; constituents; split allocations; Social decision conflicts; preview hash; reviewer reason; and stale-preview refresh. Legacy/shadow/dual show existing production UI plus admin preview; economic shows the global UI.
 
-- [ ] **Step 6: Commit reader cutover**
+- [ ] **Step 6: Register reader capability only after contract tests pass**
+
+Build `ReaderCapabilityManifest(backend_contract=1, frontend_contract=1, migration_version="0054", consumer_test_hash=<test inventory hash>)`. The release command persists it only after backend consumer tests, frontend tests, and build succeed.
+
+- [ ] **Step 7: Run backend/frontend verification and commit**
+
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_theme_read_service.py tests/unit/test_economic_theme_consumer_cutover.py tests/unit/test_theme_endpoints_contract.py tests/unit/test_ui_snapshot_service.py -q`
+
+Run: `cd frontend && npm run test:run -- src/api/economicThemes.test.js src/features/themes/components/EconomicThemeDetailModal.test.jsx src/components/Themes/EconomicTaxonomyReview.test.jsx src/pages/ThemesPage.test.jsx`
+
+Run: `cd frontend && npm run build`
+
+Expected: PASS; economic consumers use no unapproved legacy semantic read.
 
 ```bash
-git add backend/app/services/economic_theme_read_service.py backend/app/api/v1/themes_queries.py backend/app/api/v1/themes_taxonomy.py backend/app/api/v1/stocks.py backend/app/services/digest_service.py backend/app/services/social_confirmation_reader.py backend/app/services/social_theme_market_service.py backend/app/interfaces/mcp/market_copilot.py backend/app/services/ui_snapshot_service.py backend/tests/unit/test_economic_theme_read_service.py backend/tests/unit/test_economic_theme_consumer_cutover.py
-git commit -m "refactor: route theme reads through taxonomy authority"
+git add backend/app/services/economic_theme_read_service.py backend/app/api/v1/themes_queries.py backend/app/api/v1/themes_taxonomy.py backend/app/api/v1/stocks.py backend/app/services/digest_service.py backend/app/services/social_confirmation_reader.py backend/app/services/social_theme_market_service.py backend/app/interfaces/mcp/market_copilot.py backend/app/services/ui_snapshot_service.py backend/tests/unit/test_economic_theme_read_service.py backend/tests/unit/test_economic_theme_consumer_cutover.py frontend/src/api/economicThemes.js frontend/src/api/economicThemes.test.js frontend/src/features/themes/components/EconomicThemeDetailModal.jsx frontend/src/features/themes/components/EconomicThemeDetailModal.test.jsx frontend/src/components/Themes/EconomicTaxonomyReview.jsx frontend/src/components/Themes/EconomicTaxonomyReview.test.jsx frontend/src/features/themes/pages/ThemesPageContainer.jsx
+git commit -m "feat: cut readers over to serving generations"
 ```
 
-### Task 21: Enforce release gates and write the operator runbook
+### Task 19: Enforce zero-skip release gates and write the operator runbook
 
 **Files:**
+- Create: `backend/tests/required_economic_taxonomy_postgres.txt`
+- Create: `backend/scripts/run_required_economic_taxonomy_postgres.py`
 - Modify: `.github/workflows/ci.yml`
 - Create: `docs/runbooks/economic-taxonomy-cutover.md`
 - Modify: `docs/superpowers/specs/2026-09-20-economic-taxonomy-design.md`
+- Test: `backend/tests/unit/test_required_economic_taxonomy_postgres.py`
 - Test: `backend/tests/unit/test_economic_taxonomy_runbook.py`
 
 **Interfaces:**
 - Consumes: every prior task.
-- Produces: non-skippable PostgreSQL CI coverage and exact operator procedures.
+- Produces: exact PostgreSQL gate, reader-ready release artifact, and catch-up/barrier/recovery procedures.
 
-- [ ] **Step 1: Write a failing runbook contract test**
+- [ ] **Step 1: Write failing gate and runbook contract tests**
 
 ```python
-def test_runbook_names_every_transition_and_gate():
+def test_required_gate_rejects_skipped_node(tmp_path, fake_pytest):
+    result = run_required_tests(manifest_with("test_cutover_race"), fake_pytest.skip_it())
+    assert result.exit_code != 0
+
+def test_runbook_names_catchup_barrier_and_recovery():
     text = RUNBOOK.read_text()
     for phrase in (
-        "legacy -> shadow", "shadow -> dual", "dual -> economic",
-        "delta replay", "outbox drain", "authority epoch",
-        "benchmark", "rollback", "verify UI snapshot pointers",
+        "catch-up outside the publication transaction",
+        "exclusive writer fence", "exact evidence manifest",
+        "reader capability", "rollback_recovery",
     ):
         assert phrase in text
 ```
 
-- [ ] **Step 2: Add the non-skippable PostgreSQL gate**
+- [ ] **Step 2: Run tests and confirm gate/runbook are absent**
 
-Add a CI step under the existing PostgreSQL-backed `backend` job:
+Run: `cd backend && ./venv/bin/pytest tests/unit/test_required_economic_taxonomy_postgres.py tests/unit/test_economic_taxonomy_runbook.py -q`
+
+Expected: FAIL on missing script/runbook.
+
+- [ ] **Step 3: Implement the exact-node PostgreSQL runner**
+
+Read non-comment node IDs, run `pytest --collect-only`, fail if any ID is absent, then execute with a plugin that counts pass/fail/skip/xfail/xpass. Exit nonzero unless every listed node passed and PostgreSQL identity was verified. Include snapshot sealing, fence, work, processing publication, outbox, Social, and publication race suites.
+
+- [ ] **Step 4: Add the CI gate**
 
 ```yaml
-- name: Economic taxonomy authority and cutover concurrency
+- name: Required economic taxonomy PostgreSQL contracts
   env:
     DATABASE_URL: postgresql://ci:ci@localhost:5432/ci
     STOCKSCANNER_TEST_ALLOW_POSTGRES: "1"
-  run: >-
-    cd backend && python -m pytest -q
-    tests/integration/test_economic_taxonomy_authority_postgres.py
-    tests/integration/test_economic_taxonomy_work_postgres.py
-    tests/integration/test_economic_provisional_publication_postgres.py
-    tests/integration/test_economic_taxonomy_social_modes.py
-    tests/integration/test_economic_taxonomy_cutover_postgres.py
+  run: cd backend && ./venv/bin/python scripts/run_required_economic_taxonomy_postgres.py
 ```
 
-- [ ] **Step 3: Write exact runbook commands and stop conditions**
+- [ ] **Step 5: Write exact operator commands and stop conditions**
 
-Document migration upgrade, facet seed, shadow transition, shadow health query, benchmark command, migration build, disposition review, dual transition, outbox drain, target snapshot build, cutover dry run, publish, verification queries, and rollback. Every command records migration-run ID, taxonomy version, authority epoch, source high-watermarks, content hash, and benchmark report path. Stop on unresolved split/retirement/dimension proposals, failed benchmark thresholds, pending outbox, stale UI pointers, or changed high-watermarks.
+Document migration, seed, shadow, benchmark, reviewed dispositions/allocations, dual mode, catch-up, outbox drain, generation preparation, reader-capability verification, final barrier, publication verification, normal rollback, and `rollback_recovery`. Stop on unresolved allocations/conflicts, changed manifest, pending required delivery, stale snapshot hash, missing reader capability, benchmark failure, or any skipped required PostgreSQL node.
 
-- [ ] **Step 4: Run focused backend verification**
+- [ ] **Step 6: Run focused backend and legacy regressions**
 
-Run: `cd backend && ./venv/bin/pytest -q tests/unit/test_economic_taxonomy_policy.py tests/unit/test_economic_taxonomy_models.py tests/unit/test_economic_taxonomy_authority.py tests/unit/test_economic_taxonomy_runtime_models.py tests/unit/test_economic_source_revision.py tests/unit/test_economic_taxonomy_work_repo.py tests/unit/test_economic_exposure_extraction.py tests/unit/test_economic_exposure_claim_review.py tests/unit/test_economic_theme_candidate_retrieval.py tests/unit/test_economic_theme_resolution.py tests/unit/test_economic_taxonomy_processor.py tests/unit/test_economic_theme_observations.py tests/unit/test_economic_theme_lifecycle.py tests/unit/test_economic_theme_metrics.py tests/unit/test_economic_taxonomy_operations.py tests/unit/test_economic_taxonomy_legacy_adapter.py tests/unit/test_economic_taxonomy_social_adapter.py tests/unit/test_economic_theme_api.py tests/unit/test_economic_taxonomy_api.py tests/unit/test_economic_theme_ui_snapshot.py tests/unit/test_economic_taxonomy_migration.py tests/unit/test_economic_taxonomy_benchmark.py tests/unit/test_economic_taxonomy_cutover.py tests/unit/test_economic_taxonomy_tasks.py tests/unit/test_economic_theme_read_service.py tests/unit/test_economic_theme_consumer_cutover.py tests/unit/test_economic_taxonomy_runbook.py`
+Run: `cd backend && ./venv/bin/pytest -q tests/unit/test_economic_taxonomy_contracts.py tests/unit/test_economic_taxonomy_snapshots.py tests/unit/test_economic_taxonomy_interpretations.py tests/unit/test_economic_taxonomy_mappings.py tests/unit/test_economic_taxonomy_outbox.py tests/unit/test_economic_taxonomy_social_adapter.py tests/unit/test_economic_taxonomy_developments.py tests/unit/test_economic_taxonomy_publication.py tests/unit/test_economic_theme_read_service.py tests/unit/test_economic_theme_consumer_cutover.py tests/unit/test_required_economic_taxonomy_postgres.py tests/unit/test_economic_taxonomy_runbook.py tests/unit/test_theme_claim_review.py tests/unit/test_theme_state_authorities.py tests/unit/test_theme_development.py tests/integration/test_social_theme_projection.py`
 
-Expected: all listed tests PASS with zero skips.
+Expected: PASS with zero skips in this focused set.
 
-- [ ] **Step 5: Run existing theme, Social, migration, and authority regressions**
+- [ ] **Step 7: Run the required PostgreSQL gate and full frontend verification**
 
-Run: `cd backend && ./venv/bin/pytest -q tests/unit/test_theme_claim_review.py tests/unit/test_theme_state_authorities.py tests/unit/test_theme_identity_invariants_ci.py tests/unit/test_theme_pipeline_state_service.py tests/unit/test_theme_development.py tests/unit/test_social_signals_api.py tests/integration/test_social_theme_projection.py tests/integration/test_theme_state_authorities_migration.py`
-
-Expected: PASS; PostgreSQL-marked tests run with the CI environment rather than skip.
-
-- [ ] **Step 6: Run frontend verification**
+Run: `cd backend && DATABASE_URL=postgresql://ci:ci@localhost:5432/ci STOCKSCANNER_TEST_ALLOW_POSTGRES=1 ./venv/bin/python scripts/run_required_economic_taxonomy_postgres.py`
 
 Run: `cd frontend && npm run test:run`
 
 Run: `cd frontend && npm run build`
 
-Expected: full Vitest suite PASS and production build exits 0.
+Expected: every manifest node passes with zero skips/xfails; full Vitest and production build pass.
 
-- [ ] **Step 7: Rehearse migration and rollback in disposable PostgreSQL**
+- [ ] **Step 8: Rehearse cutover and rollback recovery in disposable PostgreSQL**
 
-Run the exact runbook sequence against a disposable database containing representative legacy, Social, development, and UI snapshot data. Record the old and new authority rows, snapshot pointers, content hashes, outbox counts, benchmark result, and post-rollback equivalence. Expected: economic publication and rollback both preserve one coherent authority and no accepted Social decision changes.
+Seed representative legacy themes, a Refining split, duplicate/conflicting Social associations, Social-native development, corrected-to-empty source, UI snapshots, and an out-of-order compatibility event. Run the exact runbook and record generation IDs, taxonomy/interpretation/manifest hashes, checkpoints, epoch, capability manifest, and post-rollback reader equivalence.
 
-- [ ] **Step 8: Confirm documentation links and commit release gates**
+- [ ] **Step 9: Mark the design/plan release gate and commit**
 
-Verify the approved spec links to this plan and the runbook links back to both documents.
+Update the design status only after the rehearsal artifact is attached. Link the runbook to the design, ADR, and this plan.
 
 ```bash
-git add .github/workflows/ci.yml docs/runbooks/economic-taxonomy-cutover.md docs/superpowers/specs/2026-09-20-economic-taxonomy-design.md backend/tests/unit/test_economic_taxonomy_runbook.py
-git commit -m "docs: gate economic taxonomy cutover"
+git add backend/tests/required_economic_taxonomy_postgres.txt backend/scripts/run_required_economic_taxonomy_postgres.py .github/workflows/ci.yml docs/runbooks/economic-taxonomy-cutover.md docs/superpowers/specs/2026-09-20-economic-taxonomy-design.md backend/tests/unit/test_required_economic_taxonomy_postgres.py backend/tests/unit/test_economic_taxonomy_runbook.py
+git commit -m "docs: gate economic taxonomy publication"
 ```
 
 ---
 
 ## Dependency Order
 
-1. Tasks 1-4 establish contracts, immutable semantics, authority, and governed naming.
-2. Tasks 5-9 establish durable source processing and global identity resolution.
-3. Tasks 10-12 establish evidence truth, analytical views, lifecycle, and reviewed restructuring.
-4. Tasks 13-15 integrate all producers and expose shadow validation without changing production reads.
-5. Tasks 16-18 prove migration quality, dual-write convergence, atomic cutover, rollback, and scheduled operation.
-6. Tasks 19-20 switch the product and downstream consumers only after the dual-mode gates pass.
-7. Task 21 is the production release gate and cannot be waived by passing SQLite tests.
+1. Task 0 is mandatory before any migration or schema implementation.
+2. Tasks 1-3 establish sealed semantics, append-only interpretation history, serving generations, and the fence used by every writer.
+3. Tasks 4-8 establish governed extraction, frozen admission, processing-head updates, and current interpretation selection.
+4. Tasks 9-10 establish cardinality-safe governance, lifecycle, signals, and metrics.
+5. Tasks 11-13 integrate every producer through the shared fence and ordered compatibility protocol.
+6. Tasks 14-15 build coherent reader artifacts and migration inputs without changing production authority.
+7. Task 16 is the only implementation allowed to change serving generation or mode.
+8. Task 17 schedules bounded work but cannot publish automatically.
+9. Task 18 completes the authority-aware reader/frontend capability required by cutover.
+10. Task 19 is the production release gate and cannot be waived by SQLite, manual spot checks, or unverified test collection.
 
-Do not enter `dual` before Tasks 13-16 pass. Do not enter `economic` before Tasks 17-18 pass in PostgreSQL and the benchmark is reviewed. Do not remove legacy writes or tables in this project.
+Do not enter `dual` before Tasks 11-15 pass. Do not enter `economic` before Tasks 16-19 pass, the exact PostgreSQL gate reports zero skips/xfails, the benchmark is reviewed, and the reader capability manifest is ready. Do not remove legacy records or compatibility writes in this project.
 
 ## Recommended Execution
 
-Use **subagent-driven development**. The twenty-one tasks cross immutable schema design, concurrent publication, LLM semantics, two producer families, migration, UI snapshots, APIs, frontend behavior, and rollback; each task has a reviewable boundary, while an identity or cutover defect can silently corrupt historical meaning. Require a fresh review after every task and a whole-branch review before the Task 21 rehearsal.
+Use **subagent-driven development**. The twenty tasks have crisp review boundaries, while mistakes in identity, interpretation selection, split allocation, Social decision preservation, fencing, or publication can silently corrupt historical meaning. Require a fresh implementation review after every task and a whole-branch review before the Task 19 rehearsal.
