@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "name": "late_archive_after_corrected_empty",
+      "kind": "precedence",
+      "accepted": {
+        "packet_id": "p5",
+        "evidence_content_fingerprint": "corrected-empty",
+        "provider_revision_id": "5",
+        "provider_revision_order": 5,
+        "attachment_hashes": []
+      },
+      "candidate": {
+        "packet_id": "p6",
+        "evidence_content_fingerprint": "older-archive",
+        "captured_from": "late_archive",
+        "attachment_hashes": []
+      },
+      "expected": "hold_review"
+    },
+    {
+      "name": "partial_recapture_missing_attachment",
+      "kind": "precedence",
+      "accepted": {
+        "packet_id": "p5",
+        "evidence_content_fingerprint": "complete",
+        "provider_revision_id": "5",
+        "provider_revision_order": 5,
+        "attachment_hashes": ["a1"]
+      },
+      "candidate": {
+        "packet_id": "p6",
+        "evidence_content_fingerprint": "partial",
+        "attachment_hashes": []
+      },
+      "expected": "hold_review"
+    },
+    {
+      "name": "provider_revision_advance",
+      "kind": "precedence",
+      "accepted": {
+        "packet_id": "p4",
+        "evidence_content_fingerprint": "v4",
+        "provider_revision_id": "4",
+        "provider_revision_order": 4
+      },
+      "candidate": {
+        "packet_id": "p5",
+        "evidence_content_fingerprint": "v5",
+        "provider_revision_id": "5",
+        "provider_revision_order": 5
+      },
+      "expected": "advance"
+    },
+    {
+      "name": "route_equivalent_content",
+      "kind": "precedence",
+      "accepted": {
+        "packet_id": "legacy-packet",
+        "evidence_content_fingerprint": "content-sha256",
+        "captured_from": "legacy"
+      },
+      "candidate": {
+        "packet_id": "social-packet",
+        "evidence_content_fingerprint": "content-sha256",
+        "captured_from": "social"
+      },
+      "expected": "reuse_equivalent"
+    },
+    {
+      "name": "social_accept_reject_conflict",
+      "kind": "social_decision",
+      "decisions": ["accepted", "rejected"],
+      "expected": "conflict_review_required"
+    },
+    {
+      "name": "proposed_copper_is_broader",
+      "kind": "relationship",
+      "proposed": "Copper",
+      "existing": "Copper Miners",
+      "expected": "broader"
+    }
+  ]
+}
