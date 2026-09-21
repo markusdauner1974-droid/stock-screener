@@ -81,6 +81,17 @@ from .theme_intelligence import (
     ThemeDevelopmentWork,
     ThemeEquivalenceOperation,
 )
+from .economic_taxonomy import (
+    EconomicTheme,
+    EconomicThemeAlias,
+    EconomicThemeFacet,
+    EconomicThemeRelationship,
+    EconomicThemeRevision,
+    FacetDimension,
+    FacetValue,
+    TaxonomyPolicy,
+    TaxonomyVersion,
+)
 
 __all__ = [
     "ThemeDevelopmentEvent",
@@ -180,4 +191,13 @@ __all__ = [
     "CotWeeklyPosition",
     "CotImportRun",
     "CotPublicationPointer",
+    "TaxonomyVersion",
+    "EconomicTheme",
+    "EconomicThemeRevision",
+    "EconomicThemeAlias",
+    "FacetDimension",
+    "FacetValue",
+    "EconomicThemeFacet",
+    "EconomicThemeRelationship",
+    "TaxonomyPolicy",
 ]
