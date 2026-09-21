@@ -107,9 +107,13 @@ class EconomicTaxonomyPublicationRepository:
         return row
 
     def capture_manifest(
-        self, *, actor: str, selections: list[dict]
+        self,
+        *,
+        actor: str,
+        selections: list[dict],
+        authority: TaxonomyAuthority | None = None,
     ) -> GenerationInputManifest:
-        authority = self.lock_authority()
+        authority = authority or self.lock_authority()
         revisions = self.session.execute(
             select(TaxonomySourceRevisionLog).order_by(
                 TaxonomySourceRevisionLog.producer_kind,
@@ -202,6 +206,7 @@ class EconomicTaxonomyPublicationRepository:
         semantic_hash: str,
         artifact_integrity_hash: str,
         actor: str,
+        prepared_details: dict | None = None,
     ) -> ServingGeneration:
         taxonomy = self.session.get(TaxonomyVersion, taxonomy_version_id)
         interpretation = self.session.get(InterpretationSet, interpretation_set_id)
@@ -254,7 +259,7 @@ class EconomicTaxonomyPublicationRepository:
                 sequence_number=1,
                 event_type="prepared",
                 actor=actor,
-                details={},
+                details=dict(prepared_details or {}),
             )
         )
         self.session.add(generation)
