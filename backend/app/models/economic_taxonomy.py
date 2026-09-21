@@ -5,12 +5,13 @@ from __future__ import annotations
 from uuid import uuid4
 
 from sqlalchemy import (
+    DDL,
     CheckConstraint,
     Column,
     DateTime,
-    DDL,
     ForeignKey,
     ForeignKeyConstraint,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -309,6 +310,167 @@ class TaxonomyPolicy(Base):
     )
 
 
+class LegacyIdentityDisposition(Base):
+    __tablename__ = "economic_legacy_identity_dispositions"
+
+    taxonomy_version_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_taxonomy_versions.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    legacy_theme_cluster_id = Column(Integer, primary_key=True)
+    logical_row_id = Column(Uuid(as_uuid=True), nullable=False, default=uuid4)
+    disposition = Column(String(40), nullable=False)
+    created_by = Column(String(200), nullable=False)
+    review_comment = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint(
+            "disposition IN ('mapped','split_required','merged_equivalent',"
+            "'not_a_theme','deferred')",
+            name="ck_economic_legacy_identity_disposition",
+        ),
+        UniqueConstraint(
+            "taxonomy_version_id",
+            "logical_row_id",
+            name="uq_economic_legacy_disposition_logical_row",
+        ),
+    )
+
+
+class LegacyDestinationMapping(Base):
+    __tablename__ = "economic_legacy_destination_mappings"
+
+    taxonomy_version_id = Column(Uuid(as_uuid=True), primary_key=True)
+    legacy_theme_cluster_id = Column(Integer, primary_key=True)
+    destination_theme_id = Column(Uuid(as_uuid=True), primary_key=True)
+    logical_row_id = Column(Uuid(as_uuid=True), nullable=False, default=uuid4)
+    created_by = Column(String(200), nullable=False)
+    review_comment = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ("taxonomy_version_id", "legacy_theme_cluster_id"),
+            (
+                "economic_legacy_identity_dispositions.taxonomy_version_id",
+                "economic_legacy_identity_dispositions.legacy_theme_cluster_id",
+            ),
+            ondelete="CASCADE",
+            name="fk_economic_legacy_destination_disposition",
+        ),
+        ForeignKeyConstraint(
+            ("taxonomy_version_id", "destination_theme_id"),
+            (
+                "economic_theme_revisions.taxonomy_version_id",
+                "economic_theme_revisions.theme_id",
+            ),
+            ondelete="CASCADE",
+            name="fk_economic_legacy_destination_same_snapshot_theme",
+        ),
+        UniqueConstraint(
+            "taxonomy_version_id",
+            "logical_row_id",
+            name="uq_economic_legacy_destination_logical_row",
+        ),
+    )
+
+
+class LegacyClaimAllocation(Base):
+    __tablename__ = "economic_legacy_claim_allocations"
+
+    taxonomy_version_id = Column(Uuid(as_uuid=True), primary_key=True)
+    legacy_theme_cluster_id = Column(Integer, primary_key=True)
+    allocation_kind = Column(String(40), primary_key=True)
+    allocation_key = Column(String(500), primary_key=True)
+    logical_row_id = Column(Uuid(as_uuid=True), nullable=False, default=uuid4)
+    destination_theme_id = Column(Uuid(as_uuid=True))
+    reviewed_exclusion = Column(String(80))
+    created_by = Column(String(200), nullable=False)
+    review_comment = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ("taxonomy_version_id", "legacy_theme_cluster_id"),
+            (
+                "economic_legacy_identity_dispositions.taxonomy_version_id",
+                "economic_legacy_identity_dispositions.legacy_theme_cluster_id",
+            ),
+            ondelete="CASCADE",
+            name="fk_economic_legacy_allocation_disposition",
+        ),
+        ForeignKeyConstraint(
+            (
+                "taxonomy_version_id",
+                "legacy_theme_cluster_id",
+                "destination_theme_id",
+            ),
+            (
+                "economic_legacy_destination_mappings.taxonomy_version_id",
+                "economic_legacy_destination_mappings.legacy_theme_cluster_id",
+                "economic_legacy_destination_mappings.destination_theme_id",
+            ),
+            ondelete="CASCADE",
+            name="fk_economic_legacy_allocation_destination",
+        ),
+        CheckConstraint(
+            "(destination_theme_id IS NOT NULL AND reviewed_exclusion IS NULL) OR "
+            "(destination_theme_id IS NULL AND reviewed_exclusion IS NOT NULL)",
+            name="ck_economic_legacy_allocation_resolution",
+        ),
+        UniqueConstraint(
+            "taxonomy_version_id",
+            "logical_row_id",
+            name="uq_economic_legacy_allocation_logical_row",
+        ),
+    )
+
+
+class EconomicThemeRedirect(Base):
+    __tablename__ = "economic_theme_redirects"
+
+    taxonomy_version_id = Column(Uuid(as_uuid=True), primary_key=True)
+    source_theme_id = Column(Uuid(as_uuid=True), primary_key=True)
+    target_theme_id = Column(Uuid(as_uuid=True), nullable=False)
+    logical_row_id = Column(Uuid(as_uuid=True), nullable=False, default=uuid4)
+    reason = Column(Text, nullable=False)
+    created_by = Column(String(200), nullable=False)
+    review_comment = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ("taxonomy_version_id", "source_theme_id"),
+            (
+                "economic_theme_revisions.taxonomy_version_id",
+                "economic_theme_revisions.theme_id",
+            ),
+            ondelete="CASCADE",
+            name="fk_economic_redirect_same_snapshot_source",
+        ),
+        ForeignKeyConstraint(
+            ("taxonomy_version_id", "target_theme_id"),
+            (
+                "economic_theme_revisions.taxonomy_version_id",
+                "economic_theme_revisions.theme_id",
+            ),
+            ondelete="CASCADE",
+            name="fk_economic_redirect_same_snapshot_target",
+        ),
+        CheckConstraint(
+            "source_theme_id <> target_theme_id",
+            name="ck_economic_redirect_distinct_endpoints",
+        ),
+        UniqueConstraint(
+            "taxonomy_version_id",
+            "logical_row_id",
+            name="uq_economic_redirect_logical_row",
+        ),
+    )
+
+
 ECONOMIC_VERSION_OWNED_MODELS = (
     EconomicThemeRevision,
     EconomicThemeAlias,
@@ -317,6 +479,10 @@ ECONOMIC_VERSION_OWNED_MODELS = (
     EconomicThemeFacet,
     EconomicThemeRelationship,
     TaxonomyPolicy,
+    LegacyIdentityDisposition,
+    LegacyDestinationMapping,
+    LegacyClaimAllocation,
+    EconomicThemeRedirect,
 )
 
 ECONOMIC_TAXONOMY_TABLES = [
@@ -329,6 +495,10 @@ ECONOMIC_TAXONOMY_TABLES = [
     EconomicThemeFacet.__table__,
     EconomicThemeRelationship.__table__,
     TaxonomyPolicy.__table__,
+    LegacyIdentityDisposition.__table__,
+    LegacyDestinationMapping.__table__,
+    LegacyClaimAllocation.__table__,
+    EconomicThemeRedirect.__table__,
 ]
 
 

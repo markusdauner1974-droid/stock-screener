@@ -1073,6 +1073,121 @@ class ServingGenerationEvent(Base):
     )
 
 
+class TaxonomyOperationRequest(Base):
+    __tablename__ = "economic_taxonomy_operation_requests"
+
+    id = _uuid_pk()
+    operation_kind = Column(String(80), nullable=False)
+    base_taxonomy_version_id = Column(
+        Uuid(as_uuid=True), ForeignKey("economic_taxonomy_versions.id"), nullable=False
+    )
+    request_payload = Column(JSON, nullable=False)
+    request_hash = Column(String(128), nullable=False, unique=True)
+    actor_subject = Column(String(200), nullable=False)
+    auth_method = Column(String(80), nullable=False)
+    created_at = _created_at()
+
+
+class TaxonomyOperationPreview(Base):
+    __tablename__ = "economic_taxonomy_operation_previews"
+
+    id = _uuid_pk()
+    operation_request_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_taxonomy_operation_requests.id"),
+        nullable=False,
+        unique=True,
+    )
+    candidate_taxonomy_version_id = Column(
+        Uuid(as_uuid=True), ForeignKey("economic_taxonomy_versions.id"), nullable=False
+    )
+    preview_hash = Column(String(128), nullable=False, unique=True)
+    before_semantic_hash = Column(String(128), nullable=False)
+    before_artifact_integrity_hash = Column(String(128), nullable=False)
+    after_semantic_hash = Column(String(128), nullable=False)
+    after_artifact_integrity_hash = Column(String(128), nullable=False)
+    affected_identities = Column(JSON, nullable=False)
+    assignments = Column(JSON, nullable=False)
+    mappings = Column(JSON, nullable=False)
+    compatibility_intents = Column(JSON, nullable=False)
+    validation_errors = Column(JSON, nullable=False)
+    incompatible_with_prepared_generation = Column(
+        Boolean, nullable=False, default=False
+    )
+    created_at = _created_at()
+
+
+class TaxonomyOperationEvent(Base):
+    __tablename__ = "economic_taxonomy_operation_events"
+
+    id = _uuid_pk()
+    operation_request_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_taxonomy_operation_requests.id"),
+        nullable=False,
+    )
+    sequence_number = Column(Integer, nullable=False)
+    event_type = Column(String(40), nullable=False)
+    actor_subject = Column(String(200), nullable=False)
+    reason = Column(Text, nullable=False)
+    event_payload = Column(JSON, nullable=False, default=dict)
+    created_at = _created_at()
+
+    __table_args__ = (
+        CheckConstraint(
+            "event_type IN ('previewed','reviewed','applied','failed')",
+            name="ck_economic_taxonomy_operation_event_type",
+        ),
+        UniqueConstraint(
+            "operation_request_id",
+            "sequence_number",
+            name="uq_economic_taxonomy_operation_event_sequence",
+        ),
+    )
+
+
+class TaxonomyProposalEvent(Base):
+    __tablename__ = "economic_taxonomy_proposal_events"
+
+    id = _uuid_pk()
+    proposal_identity = Column(Uuid(as_uuid=True), nullable=False)
+    sequence_number = Column(Integer, nullable=False)
+    event_type = Column(String(40), nullable=False)
+    actor_subject = Column(String(200), nullable=False)
+    reason = Column(Text, nullable=False)
+    event_payload = Column(JSON, nullable=False, default=dict)
+    created_at = _created_at()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "proposal_identity",
+            "sequence_number",
+            name="uq_economic_taxonomy_proposal_event_sequence",
+        ),
+    )
+
+
+class TaxonomyOverrideEvent(Base):
+    __tablename__ = "economic_taxonomy_override_events"
+
+    id = _uuid_pk()
+    override_identity = Column(Uuid(as_uuid=True), nullable=False)
+    sequence_number = Column(Integer, nullable=False)
+    event_type = Column(String(40), nullable=False)
+    actor_subject = Column(String(200), nullable=False)
+    reason = Column(Text, nullable=False)
+    event_payload = Column(JSON, nullable=False, default=dict)
+    created_at = _created_at()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "override_identity",
+            "sequence_number",
+            name="uq_economic_taxonomy_override_event_sequence",
+        ),
+    )
+
+
 class TaxonomyAuthority(Base):
     __tablename__ = "taxonomy_authority"
 
@@ -1137,6 +1252,11 @@ APPEND_ONLY_RUNTIME_MODELS = (
     ReaderCapabilityManifest,
     ServingGeneration,
     ServingGenerationEvent,
+    TaxonomyOperationRequest,
+    TaxonomyOperationPreview,
+    TaxonomyOperationEvent,
+    TaxonomyProposalEvent,
+    TaxonomyOverrideEvent,
 )
 
 SEALED_RUNTIME_MODELS = (
@@ -1184,6 +1304,11 @@ ECONOMIC_TAXONOMY_RUNTIME_TABLES = [
     ReaderSnapshotBundle.__table__,
     ServingGeneration.__table__,
     ServingGenerationEvent.__table__,
+    TaxonomyOperationRequest.__table__,
+    TaxonomyOperationPreview.__table__,
+    TaxonomyOperationEvent.__table__,
+    TaxonomyProposalEvent.__table__,
+    TaxonomyOverrideEvent.__table__,
     TaxonomyAuthority.__table__,
 ]
 

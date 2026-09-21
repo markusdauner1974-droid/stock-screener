@@ -16,11 +16,15 @@ from app.models.economic_taxonomy import (
     EconomicTheme,
     EconomicThemeAlias,
     EconomicThemeFacet,
+    EconomicThemeRedirect,
     EconomicThemeRelationship,
     EconomicThemeRevision,
     FacetDimension,
     FacetValue,
     ImmutableSnapshot,
+    LegacyClaimAllocation,
+    LegacyDestinationMapping,
+    LegacyIdentityDisposition,
     TaxonomyPolicy,
     TaxonomyVersion,
 )
@@ -389,6 +393,137 @@ class EconomicTaxonomyRepository:
         self._session.flush()
         return row
 
+    def set_legacy_disposition(
+        self,
+        taxonomy_version_id: UUID,
+        legacy_theme_cluster_id: int,
+        *,
+        disposition: str,
+        actor: str,
+        review_comment: str | None = None,
+    ) -> LegacyIdentityDisposition:
+        self._assert_draft(taxonomy_version_id)
+        self._require_text(disposition, "disposition")
+        self._require_text(actor, "actor")
+        row = self._session.get(
+            LegacyIdentityDisposition,
+            (taxonomy_version_id, legacy_theme_cluster_id),
+        )
+        if row is None:
+            row = LegacyIdentityDisposition(
+                taxonomy_version_id=taxonomy_version_id,
+                legacy_theme_cluster_id=legacy_theme_cluster_id,
+                disposition=disposition,
+                created_by=actor,
+                review_comment=review_comment,
+            )
+            self._session.add(row)
+        else:
+            row.disposition = disposition
+            row.created_by = actor
+            row.review_comment = review_comment
+        self._session.flush()
+        return row
+
+    def add_legacy_destination(
+        self,
+        taxonomy_version_id: UUID,
+        legacy_theme_cluster_id: int,
+        destination_theme_id: UUID,
+        *,
+        actor: str,
+        review_comment: str | None = None,
+    ) -> LegacyDestinationMapping:
+        self._assert_draft(taxonomy_version_id)
+        if self._session.get(
+            LegacyIdentityDisposition,
+            (taxonomy_version_id, legacy_theme_cluster_id),
+        ) is None:
+            raise SnapshotValidationError("legacy_disposition_missing")
+        self._require_theme_revision(taxonomy_version_id, destination_theme_id)
+        row = LegacyDestinationMapping(
+            taxonomy_version_id=taxonomy_version_id,
+            legacy_theme_cluster_id=legacy_theme_cluster_id,
+            destination_theme_id=destination_theme_id,
+            created_by=actor,
+            review_comment=review_comment,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return row
+
+    def allocate_legacy_claim(
+        self,
+        taxonomy_version_id: UUID,
+        legacy_theme_cluster_id: int,
+        *,
+        allocation_kind: str,
+        allocation_key: str,
+        actor: str,
+        destination_theme_id: UUID | None = None,
+        reviewed_exclusion: str | None = None,
+        review_comment: str | None = None,
+    ) -> LegacyClaimAllocation:
+        self._assert_draft(taxonomy_version_id)
+        self._require_text(allocation_kind, "allocation_kind")
+        self._require_text(allocation_key, "allocation_key")
+        self._require_text(actor, "actor")
+        if (destination_theme_id is None) == (reviewed_exclusion is None):
+            raise ValueError("allocation_requires_one_resolution")
+        if destination_theme_id is not None:
+            destination = self._session.get(
+                LegacyDestinationMapping,
+                (
+                    taxonomy_version_id,
+                    legacy_theme_cluster_id,
+                    destination_theme_id,
+                ),
+            )
+            if destination is None:
+                raise SnapshotValidationError("legacy_destination_missing")
+        else:
+            self._require_text(reviewed_exclusion or "", "reviewed_exclusion")
+        row = LegacyClaimAllocation(
+            taxonomy_version_id=taxonomy_version_id,
+            legacy_theme_cluster_id=legacy_theme_cluster_id,
+            allocation_kind=allocation_kind,
+            allocation_key=allocation_key,
+            destination_theme_id=destination_theme_id,
+            reviewed_exclusion=reviewed_exclusion,
+            created_by=actor,
+            review_comment=review_comment,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return row
+
+    def add_theme_redirect(
+        self,
+        taxonomy_version_id: UUID,
+        *,
+        source_theme_id: UUID,
+        target_theme_id: UUID,
+        actor: str,
+        reason: str,
+        review_comment: str | None = None,
+    ) -> EconomicThemeRedirect:
+        self._assert_draft(taxonomy_version_id)
+        self._require_theme_revision(taxonomy_version_id, source_theme_id)
+        self._require_theme_revision(taxonomy_version_id, target_theme_id)
+        self._require_text(actor, "actor")
+        self._require_text(reason, "reason")
+        row = EconomicThemeRedirect(
+            taxonomy_version_id=taxonomy_version_id,
+            source_theme_id=source_theme_id,
+            target_theme_id=target_theme_id,
+            created_by=actor,
+            reason=reason,
+            review_comment=review_comment,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return row
+
     def clone_draft(
         self, source_version_id: UUID, *, actor: str, reason: str
     ) -> TaxonomyVersion:
@@ -491,6 +626,52 @@ class EconomicTaxonomyRepository:
                     review_comment=row.review_comment,
                 )
             )
+        for row in self._rows(LegacyIdentityDisposition, source_version_id):
+            self._session.add(
+                LegacyIdentityDisposition(
+                    taxonomy_version_id=clone.id,
+                    legacy_theme_cluster_id=row.legacy_theme_cluster_id,
+                    disposition=row.disposition,
+                    created_by=actor,
+                    review_comment=row.review_comment,
+                )
+            )
+        self._session.flush()
+        for row in self._rows(LegacyDestinationMapping, source_version_id):
+            self._session.add(
+                LegacyDestinationMapping(
+                    taxonomy_version_id=clone.id,
+                    legacy_theme_cluster_id=row.legacy_theme_cluster_id,
+                    destination_theme_id=row.destination_theme_id,
+                    created_by=actor,
+                    review_comment=row.review_comment,
+                )
+            )
+        self._session.flush()
+        for row in self._rows(LegacyClaimAllocation, source_version_id):
+            self._session.add(
+                LegacyClaimAllocation(
+                    taxonomy_version_id=clone.id,
+                    legacy_theme_cluster_id=row.legacy_theme_cluster_id,
+                    allocation_kind=row.allocation_kind,
+                    allocation_key=row.allocation_key,
+                    destination_theme_id=row.destination_theme_id,
+                    reviewed_exclusion=row.reviewed_exclusion,
+                    created_by=actor,
+                    review_comment=row.review_comment,
+                )
+            )
+        for row in self._rows(EconomicThemeRedirect, source_version_id):
+            self._session.add(
+                EconomicThemeRedirect(
+                    taxonomy_version_id=clone.id,
+                    source_theme_id=row.source_theme_id,
+                    target_theme_id=row.target_theme_id,
+                    reason=row.reason,
+                    created_by=actor,
+                    review_comment=row.review_comment,
+                )
+            )
         self._session.flush()
         return clone
 
@@ -569,6 +750,22 @@ class EconomicTaxonomyRepository:
             "policies": [
                 self._row_dict(row)
                 for row in self._rows(TaxonomyPolicy, taxonomy_version_id)
+            ],
+            "legacy_dispositions": [
+                self._row_dict(row)
+                for row in self._rows(LegacyIdentityDisposition, taxonomy_version_id)
+            ],
+            "legacy_destinations": [
+                self._row_dict(row)
+                for row in self._rows(LegacyDestinationMapping, taxonomy_version_id)
+            ],
+            "legacy_claim_allocations": [
+                self._row_dict(row)
+                for row in self._rows(LegacyClaimAllocation, taxonomy_version_id)
+            ],
+            "theme_redirects": [
+                self._row_dict(row)
+                for row in self._rows(EconomicThemeRedirect, taxonomy_version_id)
             ],
         }
 
@@ -664,13 +861,54 @@ class EconomicTaxonomyRepository:
             }
             for row in self._rows(TaxonomyPolicy, taxonomy_version_id)
         ]
+        mappings = [
+            {
+                "mapping_kind": "legacy_disposition",
+                "legacy_identity": row.legacy_theme_cluster_id,
+                "disposition": row.disposition,
+            }
+            for row in self._rows(LegacyIdentityDisposition, taxonomy_version_id)
+        ]
+        mappings.extend(
+            {
+                "mapping_kind": "legacy_destination",
+                "legacy_identity": row.legacy_theme_cluster_id,
+                "destination_semantic_key": str(
+                    theme_keys[row.destination_theme_id]
+                ),
+            }
+            for row in self._rows(LegacyDestinationMapping, taxonomy_version_id)
+        )
+        mappings.extend(
+            {
+                "mapping_kind": "legacy_allocation",
+                "legacy_identity": row.legacy_theme_cluster_id,
+                "allocation_kind": row.allocation_kind,
+                "allocation_key": row.allocation_key,
+                "destination_semantic_key": (
+                    str(theme_keys[row.destination_theme_id])
+                    if row.destination_theme_id is not None
+                    else None
+                ),
+                "reviewed_exclusion": row.reviewed_exclusion,
+            }
+            for row in self._rows(LegacyClaimAllocation, taxonomy_version_id)
+        )
+        mappings.extend(
+            {
+                "mapping_kind": "theme_redirect",
+                "source_semantic_key": str(theme_keys[row.source_theme_id]),
+                "target_semantic_key": str(theme_keys[row.target_theme_id]),
+            }
+            for row in self._rows(EconomicThemeRedirect, taxonomy_version_id)
+        )
         return {
             "themes": _sorted_records(themes),
             "aliases": _sorted_records(aliases),
             "dimensions": _sorted_records(dimensions),
             "facets": _sorted_records(facets),
             "relationships": _sorted_records(relationships),
-            "mappings": [],
+            "mappings": _sorted_records(mappings),
             "policies": _sorted_records(policies),
         }
 
@@ -679,12 +917,60 @@ class EconomicTaxonomyRepository:
         relationships = self._rows(
             EconomicThemeRelationship, taxonomy_version_id
         )
+        dispositions = self._rows(LegacyIdentityDisposition, taxonomy_version_id)
+        destinations = self._rows(LegacyDestinationMapping, taxonomy_version_id)
+        allocations = self._rows(LegacyClaimAllocation, taxonomy_version_id)
+        redirects = self._rows(EconomicThemeRedirect, taxonomy_version_id)
         for relationship in relationships:
             if (
                 relationship.source_theme_id not in theme_ids
                 or relationship.target_theme_id not in theme_ids
             ):
                 raise SnapshotValidationError("same_snapshot_reference")
+        for destination in destinations:
+            if destination.destination_theme_id not in theme_ids:
+                raise SnapshotValidationError("same_snapshot_reference")
+        for allocation in allocations:
+            if (
+                allocation.destination_theme_id is not None
+                and allocation.destination_theme_id not in theme_ids
+            ):
+                raise SnapshotValidationError("same_snapshot_reference")
+        for redirect in redirects:
+            if (
+                redirect.source_theme_id not in theme_ids
+                or redirect.target_theme_id not in theme_ids
+            ):
+                raise SnapshotValidationError("same_snapshot_reference")
+
+        destinations_by_legacy: dict[int, set[UUID]] = {}
+        allocations_by_legacy: dict[int, list[LegacyClaimAllocation]] = {}
+        for destination in destinations:
+            destinations_by_legacy.setdefault(
+                destination.legacy_theme_cluster_id, set()
+            ).add(destination.destination_theme_id)
+        for allocation in allocations:
+            allocations_by_legacy.setdefault(
+                allocation.legacy_theme_cluster_id, []
+            ).append(allocation)
+        for disposition in dispositions:
+            destination_count = len(
+                destinations_by_legacy.get(disposition.legacy_theme_cluster_id, set())
+            )
+            allocation_count = len(
+                allocations_by_legacy.get(disposition.legacy_theme_cluster_id, [])
+            )
+            if disposition.disposition in {"not_a_theme", "deferred"}:
+                if destination_count:
+                    raise SnapshotValidationError("excluded_disposition_has_destination")
+            elif disposition.disposition in {"mapped", "merged_equivalent"}:
+                if destination_count != 1:
+                    raise SnapshotValidationError("mapping_requires_one_destination")
+            elif (
+                disposition.disposition == "split_required"
+                and (destination_count < 2 or allocation_count == 0)
+            ):
+                raise SnapshotValidationError("split_requires_allocations")
 
         edges: dict[UUID, set[UUID]] = {}
         pair_kinds: dict[frozenset[UUID], set[str]] = {}
@@ -697,9 +983,19 @@ class EconomicTaxonomyRepository:
                 edges.setdefault(relationship.source_theme_id, set()).add(
                     relationship.target_theme_id
                 )
+        for redirect in redirects:
+            pair = frozenset((redirect.source_theme_id, redirect.target_theme_id))
+            pair_kinds.setdefault(pair, set()).add("redirect")
+            edges.setdefault(redirect.source_theme_id, set()).add(
+                redirect.target_theme_id
+            )
 
         for kinds in pair_kinds.values():
-            if "distinct" in kinds and kinds & {"equivalent", "specialization"}:
+            if "distinct" in kinds and kinds & {
+                "equivalent",
+                "specialization",
+                "redirect",
+            }:
                 raise GraphInvariantViolation(
                     "contradictory_relationship_assertion"
                 )
@@ -781,9 +1077,9 @@ class EconomicTaxonomyRepository:
 
 
 __all__ = [
+    "SEMANTIC_HASH_FIELDS",
     "EconomicTaxonomyRepository",
     "GraphInvariantViolation",
     "ImmutableSnapshot",
-    "SEMANTIC_HASH_FIELDS",
     "SnapshotValidationError",
 ]
