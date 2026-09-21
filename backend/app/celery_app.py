@@ -83,6 +83,7 @@ celery_app = Celery(
         'app.tasks.market_rs_tasks',  # Canonical Market RS snapshot tasks
         'app.tasks.industry_tasks',  # Tracked IBD industry reference loading
         'app.tasks.theme_discovery_tasks',  # Theme discovery pipeline tasks
+        'app.tasks.economic_taxonomy_tasks',  # Global Economic Taxonomy runtime
         'app.tasks.live_attachment_tasks',
         'app.tasks.theme_intelligence_tasks',
         'app.tasks.universe_tasks',  # Stock universe management tasks
@@ -404,6 +405,16 @@ for _social_task in (
 ):
     celery_app.conf.task_routes[_social_task] = {'queue': 'social_ingestion'}
 
+for _economic_taxonomy_task in (
+    'app.tasks.economic_taxonomy_tasks.discover_economic_taxonomy_work',
+    'app.tasks.economic_taxonomy_tasks.process_economic_taxonomy_work',
+    'app.tasks.economic_taxonomy_tasks.deliver_taxonomy_outbox',
+    'app.tasks.economic_taxonomy_tasks.refresh_economic_taxonomy_generation',
+    'app.tasks.economic_taxonomy_tasks.apply_economic_theme_lifecycle',
+    'app.tasks.economic_taxonomy_tasks.calculate_economic_theme_metrics',
+):
+    celery_app.conf.task_routes[_economic_taxonomy_task] = {'queue': 'celery'}
+
 # User scans: same default-to-shared pattern; API layer sets the queue explicitly.
 celery_app.conf.task_routes['app.tasks.scan_tasks.run_bulk_scan'] = {
     'queue': SHARED_USER_SCANS_QUEUE
@@ -638,6 +649,43 @@ def _build_cache_warmup_beat_schedule(enabled_markets: list[str]) -> dict:
         'periodic-theme-metrics': {
             'task': 'app.tasks.theme_discovery_tasks.calculate_theme_metrics',
             'schedule': crontab(minute='20,50'),
+        },
+
+        # Bounded Economic Taxonomy orchestration uses the existing general
+        # worker. Publication is coalesced independently from discovery so a
+        # burst of sources cannot create one serving generation per source.
+        'economic-taxonomy-discovery': {
+            'task': 'app.tasks.economic_taxonomy_tasks.discover_economic_taxonomy_work',
+            'schedule': crontab(minute='*/5'),
+            'options': {'queue': 'celery', 'expires': 295},
+            'kwargs': {'limit': 100},
+        },
+        'economic-taxonomy-processing': {
+            'task': 'app.tasks.economic_taxonomy_tasks.process_economic_taxonomy_work',
+            'schedule': crontab(minute='*'),
+            'options': {'queue': 'celery', 'expires': 55},
+            'kwargs': {'limit': 50},
+        },
+        'economic-taxonomy-delivery': {
+            'task': 'app.tasks.economic_taxonomy_tasks.deliver_taxonomy_outbox',
+            'schedule': crontab(minute='*'),
+            'options': {'queue': 'celery', 'expires': 55},
+            'kwargs': {'limit': 100},
+        },
+        'economic-taxonomy-refresh': {
+            'task': 'app.tasks.economic_taxonomy_tasks.refresh_economic_taxonomy_generation',
+            'schedule': crontab(minute='*'),
+            'options': {'queue': 'celery', 'expires': 55},
+        },
+        'economic-taxonomy-lifecycle': {
+            'task': 'app.tasks.economic_taxonomy_tasks.apply_economic_theme_lifecycle',
+            'schedule': crontab(hour=2, minute=10),
+            'options': {'queue': 'celery'},
+        },
+        'economic-taxonomy-metrics': {
+            'task': 'app.tasks.economic_taxonomy_tasks.calculate_economic_theme_metrics',
+            'schedule': crontab(minute='25,55'),
+            'options': {'queue': 'celery'},
         },
 
         # Weekly telemetry governance audit (bead asia.10.4).
