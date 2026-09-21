@@ -8,17 +8,18 @@ unsealed and allow one audited transition to ``sealed``.
 
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from datetime import datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy import (
+    DDL,
     JSON,
     Boolean,
     CheckConstraint,
     Column,
     DateTime,
-    DDL,
     Float,
     ForeignKey,
     Integer,
@@ -34,6 +35,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Session, relationship
 
 from app.database import Base
+from app.models.economic_taxonomy import TaxonomyVersion
 
 
 class ImmutableRuntimePayload(ValueError):
@@ -459,6 +461,9 @@ class InterpretationSet(Base):
     status = Column(String(16), nullable=False, default="unsealed")
     semantic_hash = Column(String(128))
     artifact_integrity_hash = Column(String(128))
+    generation_input_manifest_id = Column(
+        Uuid(as_uuid=True), ForeignKey("economic_generation_input_manifests.id")
+    )
     created_by = Column(String(200), nullable=False)
     created_at = _created_at()
     sealed_at = Column(DateTime(timezone=True))
@@ -624,6 +629,9 @@ class MetricsRevision(Base):
     interpretation_set_id = Column(
         Uuid(as_uuid=True), ForeignKey("economic_interpretation_sets.id"), nullable=False
     )
+    generation_input_manifest_id = Column(
+        Uuid(as_uuid=True), ForeignKey("economic_generation_input_manifests.id")
+    )
     formula_version = Column(String(120), nullable=False)
     as_of = Column(DateTime(timezone=True), nullable=False)
     semantic_hash = Column(String(128))
@@ -680,6 +688,232 @@ class ThemeMetric(Base):
     )
 
 
+class TaxonomySourceRevisionLog(Base):
+    __tablename__ = "taxonomy_source_revision_log"
+
+    id = _uuid_pk()
+    producer_kind = Column(String(80), nullable=False)
+    logical_source_key = Column(String(500), nullable=False)
+    revision_kind = Column(String(80), nullable=False)
+    revision_number = Column(Integer, nullable=False)
+    content_hash = Column(String(128), nullable=False)
+    authority_epoch = Column(Integer, nullable=False)
+    committed_at = _created_at()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "producer_kind",
+            "logical_source_key",
+            "revision_kind",
+            "revision_number",
+            name="uq_taxonomy_source_revision_identity",
+        ),
+    )
+
+
+class SemanticInvalidationRevision(Base):
+    __tablename__ = "economic_semantic_invalidation_revisions"
+
+    id = _uuid_pk()
+    revision_number = Column(Integer, nullable=False, unique=True)
+    reason = Column(Text, nullable=False)
+    created_by = Column(String(200), nullable=False)
+    created_at = _created_at()
+
+
+class ReaderCapabilityManifest(Base):
+    __tablename__ = "economic_reader_capability_manifests"
+
+    id = _uuid_pk()
+    backend_contract = Column(Integer, nullable=False)
+    frontend_contract = Column(Integer, nullable=False)
+    migration_version = Column(String(80), nullable=False)
+    consumer_test_hash = Column(String(128), nullable=False)
+    verified_by = Column(String(200), nullable=False)
+    verified_at = _created_at()
+
+    __table_args__ = (
+        UniqueConstraint(
+            "backend_contract",
+            "frontend_contract",
+            "migration_version",
+            "consumer_test_hash",
+            name="uq_economic_reader_capability_manifest",
+        ),
+    )
+
+
+class GenerationInputManifest(Base):
+    __tablename__ = "economic_generation_input_manifests"
+
+    id = _uuid_pk()
+    status = Column(String(16), nullable=False, default="unsealed")
+    expected_parent_generation_id = Column(Uuid(as_uuid=True))
+    semantic_invalidation_revision = Column(Integer, nullable=False, default=0)
+    committed_revision_tuples = Column(JSON, nullable=False)
+    selections = Column(JSON, nullable=False)
+    semantic_hash = Column(String(128))
+    artifact_integrity_hash = Column(String(128))
+    created_by = Column(String(200), nullable=False)
+    created_at = _created_at()
+    sealed_at = Column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('unsealed','sealed')",
+            name="ck_economic_generation_input_manifest_status",
+        ),
+    )
+
+    def seal(self, *, semantic_hash: str, artifact_integrity_hash: str) -> None:
+        if self.status != "unsealed":
+            raise ImmutableRuntimePayload("sealed_payload_immutable")
+        self.status = "sealed"
+        self.semantic_hash = semantic_hash
+        self.artifact_integrity_hash = artifact_integrity_hash
+        self.sealed_at = datetime.now(timezone.utc)
+
+
+class ReaderSnapshotBundle(Base):
+    __tablename__ = "economic_reader_snapshot_bundles"
+
+    id = _uuid_pk()
+    status = Column(String(16), nullable=False, default="unsealed")
+    generation_input_manifest_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_generation_input_manifests.id"),
+        nullable=False,
+    )
+    payload = Column(JSON, nullable=False)
+    semantic_hash = Column(String(128))
+    artifact_integrity_hash = Column(String(128))
+    created_by = Column(String(200), nullable=False)
+    created_at = _created_at()
+    sealed_at = Column(DateTime(timezone=True))
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('unsealed','sealed')",
+            name="ck_economic_reader_snapshot_bundle_status",
+        ),
+    )
+
+    def seal(self, *, semantic_hash: str, artifact_integrity_hash: str) -> None:
+        if self.status != "unsealed":
+            raise ImmutableRuntimePayload("sealed_payload_immutable")
+        self.status = "sealed"
+        self.semantic_hash = semantic_hash
+        self.artifact_integrity_hash = artifact_integrity_hash
+        self.sealed_at = datetime.now(timezone.utc)
+
+
+class ServingGeneration(Base):
+    __tablename__ = "economic_serving_generations"
+
+    id = _uuid_pk()
+    expected_parent_generation_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey(
+            "economic_serving_generations.id",
+            use_alter=True,
+            name="fk_economic_generation_expected_parent",
+        ),
+    )
+    taxonomy_version_id = Column(
+        Uuid(as_uuid=True), ForeignKey("economic_taxonomy_versions.id"), nullable=False
+    )
+    interpretation_set_id = Column(
+        Uuid(as_uuid=True), ForeignKey("economic_interpretation_sets.id"), nullable=False
+    )
+    metrics_revision_id = Column(
+        Uuid(as_uuid=True), ForeignKey("economic_metrics_revisions.id"), nullable=False
+    )
+    generation_input_manifest_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_generation_input_manifests.id"),
+        nullable=False,
+    )
+    reader_snapshot_bundle_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_reader_snapshot_bundles.id"),
+        nullable=False,
+    )
+    reader_capability_manifest_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_reader_capability_manifests.id"),
+        nullable=False,
+    )
+    semantic_hash = Column(String(128), nullable=False)
+    artifact_integrity_hash = Column(String(128), nullable=False)
+    created_by = Column(String(200), nullable=False)
+    created_at = _created_at()
+
+    events = relationship(
+        "ServingGenerationEvent",
+        back_populates="serving_generation",
+        order_by="ServingGenerationEvent.sequence_number",
+    )
+
+
+class ServingGenerationEvent(Base):
+    __tablename__ = "economic_serving_generation_events"
+
+    id = _uuid_pk()
+    serving_generation_id = Column(
+        Uuid(as_uuid=True), ForeignKey("economic_serving_generations.id"), nullable=False
+    )
+    sequence_number = Column(Integer, nullable=False)
+    event_type = Column(String(24), nullable=False)
+    actor = Column(String(200), nullable=False)
+    details = Column(JSON, nullable=False, default=dict)
+    created_at = _created_at()
+
+    serving_generation = relationship("ServingGeneration", back_populates="events")
+
+    __table_args__ = (
+        CheckConstraint(
+            "event_type IN ('prepared','published','superseded','abandoned')",
+            name="ck_economic_serving_generation_event_type",
+        ),
+        UniqueConstraint(
+            "serving_generation_id",
+            "sequence_number",
+            name="uq_economic_serving_generation_event_sequence",
+        ),
+    )
+
+
+class TaxonomyAuthority(Base):
+    __tablename__ = "taxonomy_authority"
+
+    id = Column(Integer, primary_key=True, default=1)
+    mode = Column(String(16), nullable=False, default="legacy")
+    processing_taxonomy_version_id = Column(
+        Uuid(as_uuid=True), ForeignKey("economic_taxonomy_versions.id")
+    )
+    processing_head_revision = Column(Integer, nullable=False, default=0)
+    serving_generation_id = Column(
+        Uuid(as_uuid=True), ForeignKey("economic_serving_generations.id")
+    )
+    authority_epoch = Column(Integer, nullable=False, default=1)
+    writes_fenced = Column(Boolean, nullable=False, default=False)
+    semantic_invalidation_revision = Column(Integer, nullable=False, default=0)
+    cutover_catch_up_cursor = Column(JSON, nullable=False, default=list)
+    rollback_state = Column(String(40), nullable=False, default="ready")
+    rollback_reason = Column(Text)
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_taxonomy_authority_singleton"),
+        CheckConstraint(
+            "mode IN ('legacy','shadow','dual','economic')",
+            name="ck_taxonomy_authority_mode",
+        ),
+    )
+
+
 APPEND_ONLY_RUNTIME_MODELS = (
     SourceFamily,
     SourceLineage,
@@ -703,9 +937,19 @@ APPEND_ONLY_RUNTIME_MODELS = (
     ThemeSignalObservation,
     EconomicThemeEmbedding,
     ThemeMetric,
+    TaxonomySourceRevisionLog,
+    SemanticInvalidationRevision,
+    ReaderCapabilityManifest,
+    ServingGeneration,
+    ServingGenerationEvent,
 )
 
-SEALED_RUNTIME_MODELS = (InterpretationSet, MetricsRevision)
+SEALED_RUNTIME_MODELS = (
+    InterpretationSet,
+    MetricsRevision,
+    GenerationInputManifest,
+    ReaderSnapshotBundle,
+)
 
 ECONOMIC_TAXONOMY_RUNTIME_TABLES = [
     SourceFamily.__table__,
@@ -732,6 +976,14 @@ ECONOMIC_TAXONOMY_RUNTIME_TABLES = [
     EconomicThemeEmbedding.__table__,
     MetricsRevision.__table__,
     ThemeMetric.__table__,
+    TaxonomySourceRevisionLog.__table__,
+    SemanticInvalidationRevision.__table__,
+    ReaderCapabilityManifest.__table__,
+    GenerationInputManifest.__table__,
+    ReaderSnapshotBundle.__table__,
+    ServingGeneration.__table__,
+    ServingGenerationEvent.__table__,
+    TaxonomyAuthority.__table__,
 ]
 
 
@@ -771,6 +1023,9 @@ def _protect_sealable(row) -> None:
     if prior_status == "sealed":
         raise ImmutableRuntimePayload("sealed_payload_immutable")
 
+    if row.status == "unsealed":
+        return
+
     changed = {
         attr.key
         for attr in state.mapper.column_attrs
@@ -783,9 +1038,67 @@ def _protect_sealable(row) -> None:
         raise ImmutableRuntimePayload("sealed_payload_incomplete")
 
 
+def _normalize_generation_manifest(row: GenerationInputManifest) -> None:
+    row.committed_revision_tuples = sorted(
+        row.committed_revision_tuples or [],
+        key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+    )
+    row.selections = sorted(
+        row.selections or [],
+        key=lambda item: (
+            str(item.get("lineage", "")),
+            str(item.get("evidence_packet_id", "")),
+            json.dumps(item, sort_keys=True, separators=(",", ":")),
+        ),
+    )
+
+
+def _validate_serving_generation(session: Session, row: ServingGeneration) -> None:
+    with session.no_autoflush:
+        taxonomy = session.get(TaxonomyVersion, row.taxonomy_version_id)
+        interpretation = session.get(InterpretationSet, row.interpretation_set_id)
+        metrics = session.get(MetricsRevision, row.metrics_revision_id)
+        manifest = session.get(
+            GenerationInputManifest, row.generation_input_manifest_id
+        )
+        snapshots = session.get(ReaderSnapshotBundle, row.reader_snapshot_bundle_id)
+        capability = session.get(
+            ReaderCapabilityManifest, row.reader_capability_manifest_id
+        )
+    if any(
+        value is None
+        for value in (
+            taxonomy,
+            interpretation,
+            metrics,
+            manifest,
+            snapshots,
+            capability,
+        )
+    ):
+        raise ImmutableRuntimePayload("generation_reference_missing")
+    if taxonomy.status != "sealed" or any(
+        value.status != "sealed"
+        for value in (interpretation, metrics, manifest, snapshots)
+    ):
+        raise ImmutableRuntimePayload("generation_payload_unsealed")
+    if {
+        interpretation.generation_input_manifest_id,
+        metrics.generation_input_manifest_id,
+        snapshots.generation_input_manifest_id,
+    } != {manifest.id}:
+        raise ImmutableRuntimePayload("manifest_mismatch")
+
+
 @event.listens_for(Session, "before_flush")
 def _protect_economic_taxonomy_runtime(session, _flush_context, _instances):
     _allocate_evidence_ordinals(session)
+
+    for row in session.new:
+        if isinstance(row, GenerationInputManifest):
+            _normalize_generation_manifest(row)
+        elif isinstance(row, ServingGeneration):
+            _validate_serving_generation(session, row)
 
     for row in session.deleted:
         if isinstance(row, APPEND_ONLY_RUNTIME_MODELS + SEALED_RUNTIME_MODELS):

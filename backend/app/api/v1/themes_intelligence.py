@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.api.v1.config import require_admin
 from app.database import get_db
+from app.domain.economic_taxonomy.contracts import AdminPrincipal
 from app.models.theme import ContentItem, ThemeCluster, ThemeMention
 from app.models.theme_intelligence import (
     ThemeDevelopmentObservation,
@@ -51,18 +52,20 @@ def preview_equivalence(source_id: int, target_id: int, db: DbSession):
         raise HTTPException(409, str(exc)) from exc
 
 
-@router.post("/equivalence", dependencies=[Depends(require_admin)])
+@router.post("/equivalence")
 def apply_equivalence(
     request: GroupRequest,
     db: DbSession,
     x_admin_actor: str = Header(default="admin", alias="X-Admin-Actor"),
+    principal: AdminPrincipal = Depends(require_admin),
 ):
+    _ = x_admin_actor
     service = ThemeEquivalenceService(db)
     try:
         result = service.apply(
             request.source_id,
             request.target_id,
-            actor=x_admin_actor,
+            actor=principal.subject,
             reason=request.reason,
             key=request.operation_key,
             expected_version=request.expected_version,
@@ -107,18 +110,20 @@ def equivalence_history(
     }
 
 
-@router.post(
-    "/equivalence/{operation_id}/undo", dependencies=[Depends(require_admin)]
-)
+@router.post("/equivalence/{operation_id}/undo")
 def undo_equivalence(
     operation_id: int,
     request: UndoRequest,
     db: DbSession,
     x_admin_actor: str = Header(default="admin", alias="X-Admin-Actor"),
+    principal: AdminPrincipal = Depends(require_admin),
 ):
+    _ = x_admin_actor
     service = ThemeEquivalenceService(db)
     try:
-        result = service.undo(operation_id, actor=x_admin_actor, reason=request.reason)
+        result = service.undo(
+            operation_id, actor=principal.subject, reason=request.reason
+        )
         db.commit()
     except EquivalenceConflict as exc:
         db.rollback()

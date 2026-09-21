@@ -7,6 +7,9 @@ from pathlib import Path
 import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
+from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.orm import sessionmaker
+
 from app.api.v1.themes_intelligence import theme_developments
 from app.database import Base
 from app.infra.db.models.social_signals import ContentPipelineEligibility
@@ -29,8 +32,6 @@ from app.services.theme_equivalence_service import (
     guard_grouped_merge,
 )
 from app.services.theme_group_reads import grouped_constituents
-from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.orm import sessionmaker
 
 NOW = datetime.now(timezone.utc)
 
@@ -233,8 +234,16 @@ def test_target_migration_round_trip_preserves_existing_tables():
 
 
 def test_group_api_preview_apply_search_undo_and_conflict(sessions, monkeypatch):
-    from app.api.v1 import themes_intelligence as api
     from fastapi import HTTPException
+
+    from app.api.v1 import themes_intelligence as api
+    from app.domain.economic_taxonomy.contracts import AdminPrincipal
+
+    principal = AdminPrincipal(
+        subject="test:trusted-reviewer",
+        auth_method="admin_api_key",
+        roles=frozenset({"taxonomy:review"}),
+    )
 
     with sessions() as db:
         _, a, b = seed(db)
@@ -246,34 +255,50 @@ def test_group_api_preview_apply_search_undo_and_conflict(sessions, monkeypatch)
             operation_key="api-test",
             expected_version=preview["version"],
         )
-        result = api.apply_equivalence(request, db, x_admin_actor="Reviewer")
+        result = api.apply_equivalence(
+            request, db, x_admin_actor="forged", principal=principal
+        )
         assert result["refresh_status"] == "pending"
         choices = api.search_equivalent_themes(db, q="CPO", pipeline="technical")[
             "themes"
         ]
         assert [row["id"] for row in choices] == [b.id]
-        assert api.apply_equivalence(request, db, x_admin_actor="Reviewer")["id"] == result["id"]
+        assert (
+            api.apply_equivalence(
+                request, db, x_admin_actor="forged", principal=principal
+            )["id"]
+            == result["id"]
+        )
         assert api.equivalence_history(db, pipeline="technical")["operations"][0][
             "active"
         ]
         with pytest.raises(HTTPException) as error:
             api.apply_equivalence(
-                request.model_copy(update={"operation_key": "stale"}), db, x_admin_actor="Reviewer"
+                request.model_copy(update={"operation_key": "stale"}),
+                db,
+                x_admin_actor="forged",
+                principal=principal,
             )
         assert error.value.status_code == 409
         api.undo_equivalence(
-            result["id"], api.UndoRequest(reason="Separate again"), db, x_admin_actor="Undo Reviewer"
+            result["id"],
+            api.UndoRequest(reason="Separate again"),
+            db,
+            x_admin_actor="forged undo actor",
+            principal=principal,
         )
         operation = api.equivalence_history(db, pipeline="technical")["operations"][0]
-        assert operation["undone_by"] == "Undo Reviewer"
+        assert operation["actor"] == "test:trusted-reviewer"
+        assert operation["undone_by"] == "test:trusted-reviewer"
         assert ThemeEquivalenceService(db).members(a.id) == [a.id]
 
 
 def test_grouped_themes_must_be_ungrouped_before_deactivation(
     sessions, monkeypatch
 ):
-    from app.api.v1.themes_review_merge import deactivate_theme
     from fastapi import HTTPException
+
+    from app.api.v1.themes_review_merge import deactivate_theme
 
     with sessions() as db:
         _, alias, representative = seed(db)
@@ -304,8 +329,9 @@ def test_grouped_themes_must_be_ungrouped_before_deactivation(
 
 
 def test_disabled_backfill_is_read_only_and_rejects_model_work(sessions, monkeypatch):
-    from app.api.v1.themes_intelligence import BackfillRequest, backfill_developments
     from fastapi import HTTPException
+
+    from app.api.v1.themes_intelligence import BackfillRequest, backfill_developments
 
     monkeypatch.delenv("THEME_DEVELOPMENT_TRACKING_ENABLED", raising=False)
     with sessions() as db:
@@ -325,6 +351,7 @@ def test_disabled_backfill_is_read_only_and_rejects_model_work(sessions, monkeyp
 @pytest.mark.asyncio
 async def test_equivalence_mutations_require_admin_key(sessions, monkeypatch):
     import httpx
+
     from app.api.v1.config import settings as config_settings
     from app.database import get_db
     from app.main import app
@@ -356,6 +383,7 @@ async def test_equivalence_mutations_require_admin_key(sessions, monkeypatch):
 @pytest.mark.asyncio
 async def test_development_backfill_apply_requires_admin_key(sessions, monkeypatch):
     import httpx
+
     from app.api.v1.config import settings as config_settings
     from app.database import get_db
     from app.main import app
@@ -606,11 +634,12 @@ def test_development_enqueue_failure_preserves_extracted_mentions(
 ):
     from types import SimpleNamespace
 
+    from sqlalchemy.exc import SQLAlchemyError
+
     from app.services import theme_development_worker
     from app.services.theme_extraction_service import ThemeExtractionService
     from app.services.theme_taxonomy_service import ThemeTaxonomyService
     from app.tasks import theme_intelligence_tasks
-    from sqlalchemy.exc import SQLAlchemyError
 
     with sessions.begin() as db:
         item, cluster, _ = seed(db)
