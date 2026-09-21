@@ -6,6 +6,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
@@ -92,6 +93,8 @@ def _clean_payload(value: Any) -> Any:
         return [_clean_payload(item) for item in value]
     if isinstance(value, UUID):
         return str(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
     return value
 
 
@@ -357,7 +360,11 @@ class EconomicTaxonomyOperationService:
             publication.append_source_revision(
                 producer_kind="economic_taxonomy",
                 logical_source_key=f"taxonomy_operation:{request.id}",
-                revision_kind="structural_operation",
+                revision_kind=(
+                    "lifecycle_change"
+                    if request.operation_kind == "lifecycle_override"
+                    else "structural_operation"
+                ),
                 revision_number=1,
                 content_hash=preview.preview_hash,
                 authority_epoch=authority.authority_epoch,
@@ -414,6 +421,11 @@ class EconomicTaxonomyOperationService:
                 if operation_kind == "retire"
                 else _required_text(payload.get("lifecycle"), "lifecycle")
             )
+            if payload.get("lifecycle_policy_version") is not None:
+                revision.lifecycle_policy_version = _required_text(
+                    payload.get("lifecycle_policy_version"),
+                    "lifecycle_policy_version",
+                )
             affected.append(str(theme_id))
         elif operation_kind == "merge":
             source_id = UUID(
