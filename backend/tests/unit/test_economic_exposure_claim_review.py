@@ -6,7 +6,7 @@ from app.database import SessionLocal
 from app.infra.db.repositories.economic_taxonomy_work_repo import (
     EconomicTaxonomyWorkRepository,
 )
-from app.models.economic_taxonomy_runtime import TaxonomyAuthority
+from app.models.economic_taxonomy_runtime import ProviderAttempt, TaxonomyAuthority
 from app.services.economic_exposure_claim_review import EconomicExposureClaimReviewer
 from app.services.economic_exposure_extraction import EconomicExposureExtractor
 from app.services.economic_source_admission import (
@@ -14,6 +14,7 @@ from app.services.economic_source_admission import (
     EvidenceAdmission,
 )
 from app.services.economic_taxonomy_seed import INITIAL_DIMENSIONS
+from sqlalchemy import select
 
 NOW = datetime(2026, 9, 21, 8, 0, tzinfo=timezone.utc)
 
@@ -151,6 +152,33 @@ def test_exact_review_key_reuses_artifact_without_provider_call(db_session):
 
     assert first.id == second.id
     assert provider.review_count == 1
+
+
+def test_review_attempt_is_attributed_to_active_processing_request(db_session):
+    provider = Provider(_provider_payload(_candidate()))
+    first_request, extraction = _extraction(db_session, provider)
+    with SessionLocal.begin() as session:
+        active_request = EconomicTaxonomyWorkRepository(session).enqueue_request(
+            source_lineage_id=first_request.source_lineage_id,
+            evidence_packet_id=first_request.evidence_packet_id,
+            policy_bundle_version="bundle-v2",
+            available_at=NOW,
+        )
+        active_request_id = active_request.id
+
+    _reviewer(provider).review(
+        extraction,
+        request_id=active_request_id,
+        facet_hash="catalog-v2",
+    )
+
+    with SessionLocal() as session:
+        attempt = session.scalar(
+            select(ProviderAttempt).where(
+                ProviderAttempt.operation_kind == "claim_review"
+            )
+        )
+        assert attempt.logical_request_id == active_request_id
 
 
 def test_taxonomy_head_only_change_reuses_both_artifacts(db_session):

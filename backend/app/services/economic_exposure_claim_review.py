@@ -89,6 +89,7 @@ class EconomicExposureClaimReviewer:
         self,
         extraction: ExtractionArtifact | UUID,
         *,
+        request_id: UUID | None = None,
         policy_version: str | None = None,
         facet_hash: str,
     ) -> ClaimReviewArtifact:
@@ -104,22 +105,35 @@ class EconomicExposureClaimReviewer:
             existing = self._find_existing(session, extraction_id, policy, facet_hash)
             if existing is not None:
                 return self._detach(session, existing)
-            request = session.execute(
-                select(ProcessingRequest)
-                .where(
-                    ProcessingRequest.evidence_packet_id == persisted.evidence_packet_id
-                )
-                .order_by(ProcessingRequest.created_at, ProcessingRequest.id)
-                .limit(1)
-            ).scalar_one_or_none()
+            request = (
+                session.get(ProcessingRequest, request_id)
+                if request_id is not None
+                else None
+            )
+            if request_id is None:
+                requests = session.scalars(
+                    select(ProcessingRequest)
+                    .where(
+                        ProcessingRequest.evidence_packet_id
+                        == persisted.evidence_packet_id
+                    )
+                    .order_by(ProcessingRequest.created_at, ProcessingRequest.id)
+                    .limit(2)
+                ).all()
+                if len(requests) == 1:
+                    request = requests[0]
+                elif len(requests) > 1:
+                    raise ValueError("request_id_required_for_ambiguous_packet")
             if request is None:
                 raise KeyError("processing request for extraction not found")
+            if request.evidence_packet_id != persisted.evidence_packet_id:
+                raise ValueError("processing request does not match extraction")
             packet = session.get(EvidencePacket, persisted.evidence_packet_id)
             if packet is None:
                 raise KeyError(
                     f"evidence packet {persisted.evidence_packet_id} not found"
                 )
-            request_id = request.id
+            active_request_id = request.id
             extraction_payload = dict(persisted.result_payload or {})
             grounded_security_ids = self._grounded_security_ids(
                 packet.grounding_snapshot or {}
@@ -144,10 +158,10 @@ class EconomicExposureClaimReviewer:
             )
 
         dispatch_id = str(uuid4())
-        reservation = self._reserve(request_id, dispatch_id)
+        reservation = self._reserve(active_request_id, dispatch_id)
         with self.session_factory() as session:
             attempt = EconomicTaxonomyWorkRepository(session).begin_provider_attempt(
-                request_id,
+                active_request_id,
                 operation="claim_review",
                 dispatch_id=dispatch_id,
             )

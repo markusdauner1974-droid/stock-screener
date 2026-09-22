@@ -6,8 +6,6 @@ from unittest.mock import Mock
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import event, select
-
 from app.database import SessionLocal
 from app.domain.economic_taxonomy.contracts import AdminPrincipal
 from app.infra.db.repositories.economic_taxonomy_publication_repo import (
@@ -51,6 +49,7 @@ from app.tasks.economic_taxonomy_tasks import (
     configure_economic_taxonomy_pipeline,
     refresh_is_coalesced,
 )
+from sqlalchemy import event, select
 
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 ADMIN = AdminPrincipal(
@@ -352,7 +351,11 @@ def test_processing_pipeline_runs_extract_review_then_fenced_processor(monkeypat
 
     assert result is expected
     extractor.extract.assert_called_once_with(request_id)
-    reviewer.review.assert_called_once_with(extraction, facet_hash="facet-hash-v1")
+    reviewer.review.assert_called_once_with(
+        extraction,
+        request_id=request_id,
+        facet_hash="facet-hash-v1",
+    )
     processor.process.assert_called_once_with(request_id, lease_token)
 
 
@@ -609,3 +612,54 @@ def test_refresh_holds_review_required_structural_change(db_session):
 
     assert result["status"] == "held"
     assert result["held_revision_ids"] == [str(revision.id)]
+
+
+def test_refresh_rechecks_revisions_committed_while_capturing_cutoff(db_session):
+    coordinator, generation_id, _capability_id = _published_generation(
+        db_session, with_projection=False
+    )
+    published_at = db_session.scalar(
+        select(ServingGenerationEvent.created_at).where(
+            ServingGenerationEvent.serving_generation_id == generation_id,
+            ServingGenerationEvent.event_type == "published",
+        )
+    )
+    clock = _Clock(published_at + timedelta(minutes=6))
+    authority = db_session.get(TaxonomyAuthority, 1)
+    EconomicTaxonomyPublicationRepository(db_session).append_source_revision(
+        producer_kind="economic_taxonomy",
+        logical_source_key="classification:routine",
+        revision_kind="classification_attempt",
+        revision_number=1,
+        content_hash="routine",
+        authority_epoch=authority.authority_epoch,
+    )
+    db_session.commit()
+    original_capture = coordinator.capture_cutoff
+    raced_revision_id = None
+
+    def capture_with_raced_structural_revision(*, principal):
+        nonlocal raced_revision_id
+        with SessionLocal.begin() as session:
+            current = session.get(TaxonomyAuthority, 1)
+            raced = EconomicTaxonomyPublicationRepository(
+                session
+            ).append_source_revision(
+                producer_kind="economic_taxonomy",
+                logical_source_key="operation:raced-split",
+                revision_kind="structural_operation",
+                revision_number=1,
+                content_hash="raced-split",
+                authority_epoch=current.authority_epoch,
+            )
+            raced_revision_id = raced.id
+        return original_capture(principal=principal)
+
+    coordinator.capture_cutoff = capture_with_raced_structural_revision
+
+    result = EconomicTaxonomyTaskService(
+        SessionLocal, coordinator=coordinator, clock=clock
+    ).refresh()
+
+    assert result["status"] == "held"
+    assert result["held_revision_ids"] == [str(raced_revision_id)]

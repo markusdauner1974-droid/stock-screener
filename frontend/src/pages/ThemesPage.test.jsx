@@ -1,4 +1,4 @@
-import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import ThemesPage from './ThemesPage';
 import { renderWithProviders } from '../test/renderWithProviders';
@@ -176,5 +176,40 @@ describe('ThemesPage', () => {
     expect(screen.getByText('Unavailable')).toBeInTheDocument();
     expect(screen.queryByText('Fundamental Momentum')).not.toBeInTheDocument();
     expect(screen.queryByTestId('taxonomy')).not.toBeInTheDocument();
+  });
+
+  it('switches to a newly published economic generation while mounted', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    economicApi.getEconomicThemes
+      .mockResolvedValueOnce({
+        generation_id: 'generation-legacy',
+        generation: { authority_mode: 'dual' },
+        themes: [],
+      })
+      .mockResolvedValueOnce({
+        generation_id: 'generation-economic',
+        generation: { authority_mode: 'economic' },
+        themes: [{
+          economic_theme_id: 'theme-1',
+          display_name: 'AI Memory',
+          lifecycle: 'active',
+          definition: 'AI-driven memory demand.',
+          metrics: {},
+        }],
+      });
+
+    const { unmount } = renderPage();
+    expect(await screen.findByTestId('taxonomy')).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+
+    await waitFor(() => expect(economicApi.getEconomicThemes).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole('heading', { name: 'Economic Themes' })).toBeInTheDocument();
+    expect(screen.queryByTestId('taxonomy')).not.toBeInTheDocument();
+
+    unmount();
+    vi.useRealTimers();
   });
 });

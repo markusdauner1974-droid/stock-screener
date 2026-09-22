@@ -119,7 +119,11 @@ class EconomicExtractionReviewPipeline:
         extraction = self.extractor.extract(request_id)
         for _stale_review_retry in range(5):
             facet_hash = self._facet_hash_for_request(request_id)
-            self.reviewer.review(extraction, facet_hash=facet_hash)
+            self.reviewer.review(
+                extraction,
+                request_id=request_id,
+                facet_hash=facet_hash,
+            )
             try:
                 return self.processor.process(request_id, lease_token)
             except ProviderResultUnavailable as exc:
@@ -181,11 +185,19 @@ def refresh_is_coalesced(last_published_at: datetime | None, *, now: datetime) -
 def classify_dirty_revisions(
     revisions: Iterable[TaxonomySourceRevisionLog | Any],
 ) -> DirtyRevisionClassification:
+    return _classify_revision_pairs(
+        (str(revision.id), str(revision.revision_kind)) for revision in revisions
+    )
+
+
+def _classify_revision_pairs(
+    revisions: Iterable[tuple[str, str]],
+) -> DirtyRevisionClassification:
     routine: list[str] = []
     held: list[str] = []
-    for revision in revisions:
-        target = routine if revision.revision_kind in _ROUTINE_REVISION_KINDS else held
-        target.append(str(revision.id))
+    for revision_id, revision_kind in revisions:
+        target = routine if revision_kind in _ROUTINE_REVISION_KINDS else held
+        target.append(revision_id)
     return DirtyRevisionClassification(tuple(routine), tuple(held))
 
 
@@ -526,6 +538,37 @@ class EconomicTaxonomyTaskService:
                 }
             capability_id = current.reader_capability_manifest_id
         cutoff = self.coordinator.capture_cutoff(principal=SYSTEM_PRINCIPAL)
+        with self.session_factory() as session:
+            parent_revision_ids: set[str] = set()
+            if cutoff.expected_parent_generation_id is not None:
+                parent = session.get(
+                    ServingGeneration, cutoff.expected_parent_generation_id
+                )
+                if parent is not None:
+                    parent_manifest = session.get(
+                        GenerationInputManifest,
+                        parent.generation_input_manifest_id,
+                    )
+                    if parent_manifest is not None:
+                        parent_revision_ids = {
+                            str(row[5])
+                            for row in (
+                                parent_manifest.committed_revision_tuples or []
+                            )
+                            if len(row) >= 6
+                        }
+            captured = _classify_revision_pairs(
+                (str(row[5]), str(row[2]))
+                for row in cutoff.committed_revision_tuples
+                if len(row) >= 6 and str(row[5]) not in parent_revision_ids
+            )
+        if captured.held_revision_ids:
+            return {
+                "status": "held",
+                "reason": "review_required",
+                "held_revision_ids": list(captured.held_revision_ids),
+                "routine_revision_ids": list(captured.routine_revision_ids),
+            }
         prepared = self.coordinator.prepare_generation(
             cutoff,
             principal=SYSTEM_PRINCIPAL,
@@ -547,7 +590,7 @@ class EconomicTaxonomyTaskService:
             "status": "published",
             "generation_id": str(published.id),
             "authority_epoch": published.authority_epoch,
-            "routine_revision_ids": list(classified.routine_revision_ids),
+            "routine_revision_ids": list(captured.routine_revision_ids),
         }
 
     def apply_lifecycle(

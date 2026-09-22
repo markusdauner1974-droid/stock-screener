@@ -104,6 +104,7 @@ function ThemesPage() {
     queryFn: () => getEconomicThemes(),
     enabled: runtimeReady,
     retry: false,
+    refetchInterval: 60_000,
     staleTime: 60_000,
   });
   const economicCatalog = economicCatalogQuery.data;
