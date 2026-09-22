@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import update
 
 from app.infra.db.repositories.economic_taxonomy_repo import EconomicTaxonomyRepository
 from app.models.economic_taxonomy_runtime import (
@@ -229,6 +230,81 @@ def test_delivery_eligibility_comes_from_publication_history(db_session):
 
     assert {claim.projection_event_id for claim in claims} == {published.id}
     assert abandoned.id not in {claim.projection_event_id for claim in claims}
+
+
+def test_delivery_limit_is_applied_after_terminal_events_are_excluded(db_session):
+    taxonomy, generation = _generation(db_session, events=("prepared", "published"))
+    db_session.add(
+        TaxonomyAuthority(
+            id=1,
+            mode="economic",
+            processing_taxonomy_version_id=taxonomy.id,
+            processing_head_revision=1,
+            authority_epoch=10,
+            writes_fenced=False,
+            semantic_invalidation_revision=0,
+            rollback_state="ready",
+        )
+    )
+    service = EconomicTaxonomyRuntimeService(db_session)
+    first = _stage(service, generation_id=generation.id, lineage="post:first")
+    db_session.commit()
+    first_claim = service.claim_deliveries_from_published_generations(
+        worker_id="worker:1", expected_epoch=10, now=NOW, limit=1
+    )[0]
+    db_session.commit()
+    service.apply_delivery(first_claim, expected_epoch=10, now=NOW)
+    db_session.commit()
+
+    second = _stage(service, generation_id=generation.id, lineage="post:second")
+    db_session.commit()
+
+    claims = service.claim_deliveries_from_published_generations(
+        worker_id="worker:1", expected_epoch=10, now=NOW, limit=1
+    )
+
+    assert first.id != second.id
+    assert [claim.projection_event_id for claim in claims] == [second.id]
+
+
+def test_delivery_limit_is_applied_after_active_leases_are_excluded(db_session):
+    taxonomy, generation = _generation(db_session, events=("prepared", "published"))
+    db_session.add(
+        TaxonomyAuthority(
+            id=1,
+            mode="economic",
+            processing_taxonomy_version_id=taxonomy.id,
+            processing_head_revision=1,
+            authority_epoch=10,
+            writes_fenced=False,
+            semantic_invalidation_revision=0,
+            rollback_state="ready",
+        )
+    )
+    service = EconomicTaxonomyRuntimeService(db_session)
+    first = _stage(service, generation_id=generation.id, lineage="post:leased")
+    db_session.commit()
+    service.claim_deliveries_from_published_generations(
+        worker_id="worker:1", expected_epoch=10, now=NOW, limit=1
+    )
+    db_session.commit()
+    if db_session.get_bind().dialect.name == "sqlite":
+        db_session.execute(
+            update(TaxonomyProjectionEvent)
+            .where(TaxonomyProjectionEvent.id == first.id)
+            .values(created_at=NOW - timedelta(minutes=1))
+        )
+        db_session.commit()
+
+    second = _stage(service, generation_id=generation.id, lineage="post:available")
+    db_session.commit()
+
+    claims = service.claim_deliveries_from_published_generations(
+        worker_id="worker:2", expected_epoch=10, now=NOW, limit=1
+    )
+
+    assert first.id != second.id
+    assert [claim.projection_event_id for claim in claims] == [second.id]
 
 
 def test_apply_delivery_is_a_non_recursive_complete_replacement(db_session):

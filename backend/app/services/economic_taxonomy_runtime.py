@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.infra.db.repositories.economic_taxonomy_publication_repo import (
     EconomicTaxonomyPublicationRepository,
@@ -292,11 +292,52 @@ class EconomicTaxonomyRuntimeService:
             published = select(ServingGenerationEvent.serving_generation_id).where(
                 ServingGenerationEvent.event_type == "published"
             )
+            terminal_attempt = aliased(TaxonomyProjectionDeliveryAttempt)
+            terminal_delivery_exists = (
+                select(TaxonomyProjectionDeliveryEvent.id)
+                .join(
+                    terminal_attempt,
+                    TaxonomyProjectionDeliveryEvent.delivery_attempt_id
+                    == terminal_attempt.id,
+                )
+                .where(
+                    terminal_attempt.projection_event_id
+                    == TaxonomyProjectionEvent.id,
+                    TaxonomyProjectionDeliveryEvent.outcome.in_(
+                        ("success", "stale_noop", "terminal_failure")
+                    ),
+                )
+                .correlate(TaxonomyProjectionEvent)
+                .exists()
+            )
+            active_attempt = aliased(TaxonomyProjectionDeliveryAttempt)
+            active_attempt_outcome_exists = (
+                select(TaxonomyProjectionDeliveryEvent.id)
+                .where(
+                    TaxonomyProjectionDeliveryEvent.delivery_attempt_id
+                    == active_attempt.id
+                )
+                .correlate(active_attempt)
+                .exists()
+            )
+            active_attempt_exists = (
+                select(active_attempt.id)
+                .where(
+                    active_attempt.projection_event_id
+                    == TaxonomyProjectionEvent.id,
+                    active_attempt.lease_expires_at > now,
+                    ~active_attempt_outcome_exists,
+                )
+                .correlate(TaxonomyProjectionEvent)
+                .exists()
+            )
             query = (
                 select(TaxonomyProjectionEvent)
                 .where(
                     TaxonomyProjectionEvent.delivery_scope == "candidate",
                     TaxonomyProjectionEvent.serving_generation_id.in_(published),
+                    ~terminal_delivery_exists,
+                    ~active_attempt_exists,
                 )
                 .order_by(
                     TaxonomyProjectionEvent.created_at,

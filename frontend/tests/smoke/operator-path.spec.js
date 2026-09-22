@@ -595,6 +595,12 @@ test('single-tenant operator smoke path (assistant -> scan -> themes review -> a
       return jsonResponse(route, { status: 'healthy' });
     }
 
+    if (path === '/v1/economic-themes' && method === 'GET') {
+      return jsonResponse(route, {
+        detail: { code: 'serving_generation_unavailable' },
+      }, 503);
+    }
+
     if (path === '/v1/filter-presets' && method === 'GET') {
       return jsonResponse(route, { presets: [] });
     }

@@ -8,6 +8,7 @@ from app.models.economic_taxonomy_runtime import (
     EvidencePacket,
     LensEligibilityRevision,
     ProcessingRequest,
+    TaxonomySourceRevisionLog,
 )
 from app.services.economic_source_admission import (
     EconomicSourceAdmissionService,
@@ -87,6 +88,15 @@ def test_adding_lens_does_not_create_packet_or_work(db_session):
         db_session.scalar(select(func.count()).select_from(LensEligibilityRevision))
         == 2
     )
+    publication_revision = db_session.scalar(
+        select(TaxonomySourceRevisionLog).where(
+            TaxonomySourceRevisionLog.logical_source_key
+            == f"evidence_packet:{admitted.packet_id}",
+            TaxonomySourceRevisionLog.revision_kind == "lens_eligibility",
+        )
+    )
+    assert publication_revision is not None
+    assert publication_revision.revision_number == revised.revision_number
 
 
 def test_packet_hash_excludes_lens_but_frozen_inputs_remain_reproducible(db_session):

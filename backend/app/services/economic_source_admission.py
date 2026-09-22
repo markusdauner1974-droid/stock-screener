@@ -19,6 +19,9 @@ from app.domain.economic_taxonomy.contracts import (
     SourceLineageKey,
 )
 from app.domain.economic_taxonomy.policy import decide_evidence_precedence
+from app.infra.db.repositories.economic_taxonomy_publication_repo import (
+    EconomicTaxonomyPublicationRepository,
+)
 from app.models.economic_taxonomy_runtime import (
     EvidencePacket,
     EvidencePrecedenceRevision,
@@ -280,13 +283,14 @@ class EconomicSourceAdmissionService:
             self.session,
             expected_epoch=expected_epoch,
             allowed_modes={"legacy", "shadow", "dual", "economic"},
-        ):
+        ) as authority:
             return self._revise_lens_eligibility(
                 packet_id,
                 add=add,
                 remove=remove,
                 evidence_channels=evidence_channels,
                 reason=reason,
+                authority_epoch=authority.authority_epoch,
             )
 
     def _revise_lens_eligibility(
@@ -297,6 +301,7 @@ class EconomicSourceAdmissionService:
         remove: str | None,
         evidence_channels: tuple[str, ...] | None,
         reason: str,
+        authority_epoch: int,
     ) -> LensEligibilityResult:
         packet = self.session.get(EvidencePacket, packet_id)
         if packet is None:
@@ -331,6 +336,21 @@ class EconomicSourceAdmissionService:
         )
         self.session.add(revision)
         self.session.flush()
+        EconomicTaxonomyPublicationRepository(self.session).append_source_revision(
+            producer_kind="evidence",
+            logical_source_key=f"evidence_packet:{packet.id}",
+            revision_kind="lens_eligibility",
+            revision_number=revision.revision_number,
+            content_hash=_hash(
+                {
+                    "evidence_packet_id": str(packet.id),
+                    "revision_number": revision.revision_number,
+                    "evidence_channels": list(revision.evidence_channels),
+                    "reason": reason,
+                }
+            ),
+            authority_epoch=authority_epoch,
+        )
         return LensEligibilityResult(
             packet_id=packet.id,
             revision_number=revision.revision_number,

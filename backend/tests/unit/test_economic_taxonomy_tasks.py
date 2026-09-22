@@ -6,6 +6,8 @@ from unittest.mock import Mock
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import select
+
 from app.database import SessionLocal
 from app.domain.economic_taxonomy.contracts import AdminPrincipal
 from app.infra.db.repositories.economic_taxonomy_publication_repo import (
@@ -14,12 +16,25 @@ from app.infra.db.repositories.economic_taxonomy_publication_repo import (
 from app.infra.db.repositories.economic_taxonomy_repo import (
     EconomicTaxonomyRepository,
 )
+from app.infra.db.repositories.economic_taxonomy_work_repo import (
+    EconomicTaxonomyWorkRepository,
+)
 from app.models.economic_taxonomy_runtime import (
+    ProcessingRequest,
     ReaderCapabilityManifest,
     ServingGenerationEvent,
+    SourceLineage,
     TaxonomyAuthority,
 )
-from app.services.economic_exposure_extraction import BudgetExhausted
+from app.services.economic_exposure_claim_review import ClaimReviewSchemaError
+from app.services.economic_exposure_extraction import (
+    BudgetExhausted,
+    EvidenceSchemaError,
+)
+from app.services.economic_source_admission import (
+    EconomicSourceAdmissionService,
+    EvidenceAdmission,
+)
 from app.services.economic_taxonomy_benchmark_store import (
     register_verified_benchmark,
 )
@@ -33,7 +48,6 @@ from app.tasks.economic_taxonomy_tasks import (
     classify_dirty_revisions,
     refresh_is_coalesced,
 )
-from sqlalchemy import select
 
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 ADMIN = AdminPrincipal(
@@ -224,6 +238,54 @@ def test_budget_exhaustion_stops_batch_before_another_provider_call(
     assert retries == [(lease.id, "budget_exhausted", timedelta(minutes=5))]
 
 
+@pytest.mark.parametrize(
+    "failure",
+    (
+        EvidenceSchemaError("invalid extraction schema"),
+        ClaimReviewSchemaError("invalid review schema"),
+    ),
+    ids=("extraction", "claim-review"),
+)
+def test_invalid_provider_schema_terminalizes_processing_request(
+    db_session, failure
+):
+    _authority(db_session)
+    admitted = EconomicSourceAdmissionService(db_session).admit_content(
+        EvidenceAdmission(
+            provider="test",
+            canonical_item_id=f"schema-{type(failure).__name__}",
+            capture_route="test",
+            original_text="Malformed provider response fixture",
+            preparation_version="prep-v1",
+            available_at=NOW,
+            evidence_channels=("narrative",),
+        )
+    )
+    request = EconomicTaxonomyWorkRepository(db_session).enqueue_request(
+        source_lineage_id=admitted.source_lineage_id,
+        evidence_packet_id=admitted.packet_id,
+        policy_bundle_version="economic-taxonomy-v1",
+        available_at=NOW,
+    )
+    request_id = request.id
+    db_session.commit()
+
+    result = EconomicTaxonomyTaskService(
+        SessionLocal,
+        pipeline=_Pipeline(failure=failure),
+        clock=lambda: NOW,
+    ).process(limit=1, worker_id="worker:schema")
+
+    db_session.expire_all()
+    stored = db_session.get(ProcessingRequest, request_id)
+    assert result["claimed"] == 1
+    assert result["terminal_failures"] == 1
+    assert stored.status == "terminal_failure"
+    assert stored.lease_token is None
+    assert stored.lease_owner is None
+    assert stored.lease_expires_at is None
+
+
 def test_processing_pipeline_runs_extract_review_then_fenced_processor(monkeypatch):
     request_id = uuid4()
     lease_token = uuid4()
@@ -283,6 +345,54 @@ def test_limits_are_positive_and_bounded(db_session):
         service.process(limit=0, worker_id="worker:test")
     with pytest.raises(ValueError, match="limit"):
         service.discover(limit=501)
+
+
+def test_discovery_limit_applies_only_to_new_requests(db_session):
+    _authority(db_session)
+    admission = EconomicSourceAdmissionService(db_session)
+    admitted = {}
+    for index in range(3):
+        result = admission.admit_content(
+            EvidenceAdmission(
+                provider="test",
+                canonical_item_id=f"post-{index}",
+                capture_route="test",
+                original_text=f"Evidence {index}",
+                preparation_version="prep-v1",
+                available_at=NOW,
+                evidence_channels=("narrative",),
+            )
+        )
+        admitted[result.source_lineage_id] = result
+    ordered_lineage_ids = db_session.scalars(
+        select(SourceLineage.id).order_by(SourceLineage.id)
+    ).all()
+    work = EconomicTaxonomyWorkRepository(db_session)
+    for lineage_id in ordered_lineage_ids[:2]:
+        result = admitted[lineage_id]
+        work.enqueue_request(
+            source_lineage_id=lineage_id,
+            evidence_packet_id=result.packet_id,
+            policy_bundle_version="economic-taxonomy-v1",
+            available_at=NOW,
+        )
+    db_session.commit()
+
+    discovered = EconomicTaxonomyTaskService(
+        SessionLocal, pipeline=_Pipeline(), clock=lambda: NOW
+    ).discover(limit=1)
+
+    db_session.expire_all()
+    expected = admitted[ordered_lineage_ids[2]]
+    assert discovered["discovered"] == 1
+    assert discovered["enqueued"] == 1
+    assert db_session.scalar(
+        select(ProcessingRequest.id).where(
+            ProcessingRequest.source_lineage_id == expected.source_lineage_id,
+            ProcessingRequest.evidence_packet_id == expected.packet_id,
+            ProcessingRequest.policy_bundle_version == "economic-taxonomy-v1",
+        )
+    ) is not None
 
 
 def test_delivery_poll_recovers_missing_publish_notification(db_session):

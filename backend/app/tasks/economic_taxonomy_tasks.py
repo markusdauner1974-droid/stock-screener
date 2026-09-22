@@ -37,11 +37,13 @@ from app.models.economic_taxonomy_runtime import (
     TaxonomySourceRevisionLog,
 )
 from app.services.economic_exposure_claim_review import (
+    ClaimReviewSchemaError,
     EconomicExposureClaimReviewer,
 )
 from app.services.economic_exposure_extraction import (
     BudgetExhausted,
     EconomicExposureExtractor,
+    EvidenceSchemaError,
     ProviderOutcomeUncertain,
     ProviderTerminalFailure,
     RetryableProviderFailure,
@@ -247,7 +249,6 @@ class EconomicTaxonomyTaskService:
                     )
                     if eligibility is None or not eligibility.evidence_channels:
                         continue
-                    discovered += 1
                     existed = session.scalar(
                         select(ProcessingRequest.id).where(
                             ProcessingRequest.source_lineage_id == lineage_id,
@@ -256,19 +257,21 @@ class EconomicTaxonomyTaskService:
                             == POLICY_BUNDLE_VERSION,
                         )
                     )
+                    if existed is not None:
+                        continue
+                    discovered += 1
                     request = work.enqueue_request(
                         source_lineage_id=lineage_id,
                         evidence_packet_id=packet.id,
                         policy_bundle_version=POLICY_BUNDLE_VERSION,
                         available_at=packet.available_at,
                     )
-                    if existed is None:
-                        enqueued += 1
-                        self._append_packet_revision(
-                            session,
-                            packet=packet,
-                            authority_epoch=locked.authority_epoch,
-                        )
+                    enqueued += 1
+                    self._append_packet_revision(
+                        session,
+                        packet=packet,
+                        authority_epoch=locked.authority_epoch,
+                    )
                     del request
                 session.commit()
             return {
@@ -364,6 +367,14 @@ class EconomicTaxonomyTaskService:
                     revision_kind="claim_review_required",
                 )
                 result["held"] += 1
+            except (EvidenceSchemaError, ClaimReviewSchemaError) as exc:
+                self._terminal_request(
+                    request_id,
+                    lease_token,
+                    reason=str(exc) or "invalid_provider_schema",
+                    revision_kind="provider_invalid_schema",
+                )
+                result["terminal_failures"] += 1
             except ProviderTerminalFailure as exc:
                 self._terminal_request(
                     request_id,
