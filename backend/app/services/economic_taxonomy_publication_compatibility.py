@@ -141,6 +141,11 @@ def build_default_compatibility_projections(
             .order_by(TaxonomyProjectionEvent.projection_revision)
         ).all()
         for event in parent_rows:
+            if event.projection_kind == "social_membership":
+                # Social mirrors are one-time side effects. Preparation requires the
+                # parent generation to be fully acknowledged, so cloning them would
+                # create a new event with no pending association revision to mirror.
+                continue
             key = (
                 event.source_lineage,
                 event.projection_kind,

@@ -133,14 +133,10 @@ class RollbackRecovery:
                 )
                 session.add(attempt)
                 session.flush()
-                applied = runtime.apply_replacement(
-                    target=event.target_representation,
-                    source_lineage=event.source_lineage,
-                    projection_kind=event.projection_kind,
-                    projection_revision=event.projection_revision,
-                    payload=event.payload,
-                    origin_representation=event.origin_representation,
-                    projection_event_id=event.id,
+                applied = runtime.apply_projection_event(
+                    event,
+                    authority_epoch=authority.authority_epoch,
+                    now=now,
                 )
                 session.add(
                     TaxonomyProjectionDeliveryEvent(

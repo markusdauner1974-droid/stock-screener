@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy import select
 
+from app.domain.economic_taxonomy.contracts import AdminPrincipal
 from app.infra.db.models.social_analysis import (
     EconomicSocialAssociation,
     EconomicSocialAssociationRevision,
@@ -26,6 +27,11 @@ from app.models.theme import ContentItem, ThemeCluster
 from app.services.economic_social_taxonomy_adapter import EconomicSocialTaxonomyAdapter
 from app.services.economic_source_admission import EvidenceAdmission
 from app.services.economic_taxonomy_fence import AuthorityWritesFenced
+from app.services.economic_taxonomy_publication_compatibility import (
+    build_default_compatibility_projections,
+)
+from app.services.economic_taxonomy_publication_contracts import PreparationContext
+from app.services.economic_taxonomy_rollback_recovery import RollbackRecovery
 from app.services.economic_taxonomy_runtime import EconomicTaxonomyRuntimeService
 from app.services.social_theme_market_service import EconomicAcceptedBasketReader
 from app.services.social_theme_projection_service import (
@@ -35,6 +41,11 @@ from app.services.social_theme_projection_service import (
 from .economic_taxonomy_reader_helpers import seed_generation
 
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
+ADMIN = AdminPrincipal(
+    subject="admin:test",
+    auth_method="admin_api_key",
+    roles=frozenset({"taxonomy:review"}),
+)
 
 
 def _global_pair(db_session):
@@ -266,6 +277,99 @@ def test_social_membership_delivery_applies_legacy_mirror_before_success(db_sess
     assert latest.live is True
     assert latest.mirror_state == "acknowledged"
     assert db_session.query(SocialThemeAssociation).count() == 1
+
+
+def test_completed_social_mirror_is_not_copied_to_the_next_generation(db_session):
+    seeded = seed_generation(db_session)
+    theme, security = _global_pair(db_session)
+    adapter = EconomicSocialTaxonomyAdapter(db_session)
+    association = adapter.get_or_create_association(theme.id, security.id)
+    adapter.revise(
+        association.id,
+        state="accepted",
+        idempotency_key="completed-parent-mirror",
+        actor="admin:test",
+        reason="reviewed native membership",
+        mirror_acknowledged=False,
+    )
+    db_session.commit()
+    authority = db_session.get(TaxonomyAuthority, 1)
+    runtime = EconomicTaxonomyRuntimeService(db_session)
+    claim = runtime.claim_deliveries_from_published_generations(
+        worker_id="worker:social-mirror",
+        expected_epoch=authority.authority_epoch,
+        now=NOW,
+        limit=1,
+    )[0]
+    db_session.commit()
+    runtime.apply_delivery(
+        claim,
+        expected_epoch=authority.authority_epoch,
+        now=NOW,
+    )
+    db_session.commit()
+
+    projections = build_default_compatibility_projections(
+        db_session,
+        PreparationContext(
+            manifest_id=seeded["manifest"].id,
+            taxonomy_version_id=seeded["taxonomy"].id,
+            interpretation_set_id=seeded["interpretation"].id,
+            metrics_revision_id=seeded["metrics"].id,
+            reader_snapshot_bundle_id=seeded["bundle"].id,
+            expected_parent_generation_id=seeded["generation"].id,
+            staged_epoch=authority.authority_epoch,
+            target_mode="economic",
+        ),
+    )
+
+    assert {projection.projection_kind for projection in projections} == {
+        "legacy_theme"
+    }
+
+
+def test_rollback_recovery_applies_pending_social_mirror_before_success(db_session):
+    seeded = seed_generation(db_session)
+    theme, security = _global_pair(db_session)
+    adapter = EconomicSocialTaxonomyAdapter(db_session)
+    association = adapter.get_or_create_association(theme.id, security.id)
+    pending = adapter.revise(
+        association.id,
+        state="accepted",
+        idempotency_key="rollback-parent-mirror",
+        actor="admin:test",
+        reason="reviewed native membership",
+        mirror_acknowledged=False,
+    )
+    db_session.commit()
+    factory = lambda: db_session.__class__(bind=db_session.get_bind())
+    recovery = RollbackRecovery(factory, clock=lambda: NOW)
+    recovery.begin(
+        generation_id=seeded["generation"].id,
+        principal=ADMIN,
+        reason="compatibility delivery unhealthy",
+    )
+
+    recovery.rebuild_legacy_projections(
+        seeded["generation"].id,
+        principal=ADMIN,
+    )
+
+    db_session.expire_all()
+    latest = db_session.scalar(
+        select(EconomicSocialAssociationRevision)
+        .where(EconomicSocialAssociationRevision.association_id == association.id)
+        .order_by(EconomicSocialAssociationRevision.revision_number.desc())
+        .limit(1)
+    )
+    assert pending.state == "pending_legacy_mirror"
+    assert latest.state == "accepted"
+    assert latest.mirror_state == "acknowledged"
+    assert db_session.query(SocialThemeAssociation).count() == 1
+    assert EconomicTaxonomyRuntimeService(db_session).generation_acknowledged(
+        seeded["generation"].id
+    )
+    assert db_session.get(TaxonomyAuthority, 1).rollback_state == "recovered"
 
 
 def test_native_legacy_mirror_respects_authority_write_fence(db_session):
