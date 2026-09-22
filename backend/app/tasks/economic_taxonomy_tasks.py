@@ -22,9 +22,9 @@ from app.infra.db.repositories.economic_taxonomy_repo import EconomicTaxonomyRep
 from app.infra.db.repositories.economic_taxonomy_work_repo import (
     EconomicTaxonomyWorkRepository,
 )
+from app.models.economic_taxonomy import FacetDimension
 from app.models.economic_taxonomy_runtime import (
     EvidencePacket,
-    EvidencePrecedenceRevision,
     GenerationInputManifest,
     LensEligibilityRevision,
     ProcessingRequest,
@@ -49,9 +49,6 @@ from app.services.economic_exposure_extraction import (
     RetryableProviderFailure,
 )
 from app.services.economic_taxonomy_fence import producer_write
-from app.services.economic_taxonomy_interpretations import (
-    EconomicTaxonomyInterpretationService,
-)
 from app.services.economic_taxonomy_processor import (
     EconomicTaxonomyProcessor,
     ProviderResultUnavailable,
@@ -505,11 +502,7 @@ class EconomicTaxonomyTaskService:
                     "dirty_revision_count": len(dirty),
                 }
             capability_id = current.reader_capability_manifest_id
-            selections = self._build_generation_selections(session, authority)
-
-        cutoff = self.coordinator.capture_cutoff(
-            principal=SYSTEM_PRINCIPAL, selections=selections
-        )
+        cutoff = self.coordinator.capture_cutoff(principal=SYSTEM_PRINCIPAL)
         prepared = self.coordinator.prepare_generation(
             cutoff,
             principal=SYSTEM_PRINCIPAL,
@@ -722,91 +715,6 @@ class EconomicTaxonomyTaskService:
                 )
                 session.commit()
 
-    def _build_generation_selections(
-        self, session, authority: TaxonomyAuthority
-    ) -> list[dict[str, Any]]:
-        previous: dict[str, dict[str, Any]] = {}
-        if authority.serving_generation_id is not None:
-            generation = session.get(ServingGeneration, authority.serving_generation_id)
-            old_manifest = session.get(
-                GenerationInputManifest, generation.generation_input_manifest_id
-            )
-            previous = {
-                str(value.get("lineage")): dict(value)
-                for value in (old_manifest.selections or [])
-                if value.get("lineage")
-            }
-        interpretation_service = EconomicTaxonomyInterpretationService(
-            self.session_factory
-        )
-        entries: list[dict[str, Any]] = []
-        for lineage_id in session.scalars(
-            select(SourceLineage.id).order_by(SourceLineage.id)
-        ):
-            precedence_cutoff = session.scalar(
-                select(func.max(EvidencePrecedenceRevision.revision_number)).where(
-                    EvidencePrecedenceRevision.source_lineage_id == lineage_id
-                )
-            )
-            if precedence_cutoff is None:
-                continue
-            packet = session.scalar(
-                select(EvidencePacket)
-                .join(
-                    EvidencePrecedenceRevision,
-                    EvidencePrecedenceRevision.evidence_packet_id == EvidencePacket.id,
-                )
-                .where(
-                    EvidencePrecedenceRevision.source_lineage_id == lineage_id,
-                    EvidencePrecedenceRevision.disposition == "effective",
-                )
-                .order_by(EvidencePrecedenceRevision.revision_number.desc())
-                .limit(1)
-            )
-            if packet is None:
-                continue
-            eligibility = session.scalar(
-                select(LensEligibilityRevision)
-                .where(LensEligibilityRevision.evidence_packet_id == packet.id)
-                .order_by(LensEligibilityRevision.revision_number.desc())
-                .limit(1)
-            )
-            if eligibility is None:
-                continue
-            attempt = interpretation_service._default_attempt(
-                session,
-                lineage_id,
-                precedence_cutoff=precedence_cutoff,
-            )
-            old = previous.get(str(lineage_id), {})
-            projection_revision = session.scalar(
-                select(func.max(TaxonomyProjectionEvent.projection_revision)).where(
-                    TaxonomyProjectionEvent.source_lineage == str(lineage_id)
-                )
-            )
-            entry = {
-                "lineage": str(lineage_id),
-                "evidence_packet_id": str(packet.id),
-                "selected_attempt_id": str(attempt.id) if attempt else None,
-                "eligibility_revision": eligibility.revision_number,
-                "evidence_precedence_revision": int(precedence_cutoff),
-                "interpretation_override_revision_id": None,
-                "constituent_decision_revision": old.get(
-                    "constituent_decision_revision"
-                ),
-                "social_association_revision": old.get("social_association_revision"),
-                "social_decision_revision": old.get("social_decision_revision"),
-                "development_identity": old.get("development_identity"),
-                "development_revision": old.get("development_revision"),
-                "mapping_revision": max(1, authority.processing_head_revision),
-                "metrics_policy_revision": 1,
-                "compatibility_projection_revision": max(
-                    1, int(projection_revision or 0) + 1
-                ),
-            }
-            entries.append(entry)
-        return entries
-
     @staticmethod
     def _append_packet_revision(session, *, packet, authority_epoch: int) -> None:
         repository = EconomicTaxonomyPublicationRepository(session)
@@ -851,8 +759,63 @@ def configure_economic_taxonomy_pipeline(
     _PIPELINE_FACTORY = factory
 
 
+def build_default_economic_taxonomy_pipeline(session_factory):
+    """Construct the deployed pipeline when sanctioned provider credentials exist."""
+
+    from app.services.economic_taxonomy_llm_provider import (
+        build_economic_taxonomy_provider,
+    )
+
+    provider, reservations = build_economic_taxonomy_provider(session_factory)
+    if provider is None:
+        return None
+    with session_factory() as session:
+        authority = session.get(TaxonomyAuthority, 1)
+        if authority is None or authority.processing_taxonomy_version_id is None:
+            return None
+        approved_dimensions = set(
+            session.scalars(
+                select(FacetDimension.key).where(
+                    FacetDimension.taxonomy_version_id
+                    == authority.processing_taxonomy_version_id
+                )
+            )
+        )
+    extractor = EconomicExposureExtractor(
+        session_factory,
+        provider=provider,
+        extraction_policy_version="economic-extraction-v1",
+        approved_dimensions=approved_dimensions,
+        reservations=reservations,
+    )
+    reviewer = EconomicExposureClaimReviewer(
+        session_factory,
+        provider=provider,
+        claim_review_policy_version="economic-claim-review-v1",
+        approved_dimensions=approved_dimensions,
+        reservations=reservations,
+    )
+    processor = EconomicTaxonomyProcessor(
+        session_factory,
+        resolver_policy_version="economic-resolver-v1",
+        naming_policy_version="economic-naming-v1",
+        derivation_policy_version="economic-derivation-v1",
+        lifecycle_policy_version="economic-lifecycle-v1",
+    )
+    return EconomicExtractionReviewPipeline(
+        session_factory,
+        extractor=extractor,
+        reviewer=reviewer,
+        processor=processor,
+    )
+
+
 def _service() -> EconomicTaxonomyTaskService:
-    pipeline = _PIPELINE_FACTORY() if _PIPELINE_FACTORY is not None else None
+    pipeline = (
+        _PIPELINE_FACTORY()
+        if _PIPELINE_FACTORY is not None
+        else build_default_economic_taxonomy_pipeline(SessionLocal)
+    )
     return EconomicTaxonomyTaskService(SessionLocal, pipeline=pipeline)
 
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
+from sqlalchemy import func, select
+
 from app.database import SessionLocal
 from app.domain.economic_taxonomy.contracts import AdminPrincipal
 from app.infra.db.repositories.economic_taxonomy_repo import EconomicTaxonomyRepository
@@ -31,10 +33,17 @@ from app.services.economic_taxonomy_interpretations import (
     InvalidInterpretation,
     create_interpretation_override,
 )
+from app.services.economic_taxonomy_publication import (
+    EconomicTaxonomyPublicationCoordinator,
+)
 from app.services.economic_taxonomy_seed import seed_initial_dimensions
-from sqlalchemy import func, select
 
 NOW = datetime(2026, 9, 21, 8, 0, tzinfo=timezone.utc)
+ADMIN = AdminPrincipal(
+    subject="admin:test",
+    auth_method="admin_api_key",
+    roles=frozenset({"taxonomy:review"}),
+)
 
 
 def _fixture(db_session):
@@ -243,6 +252,42 @@ def _set_observation_count(interpretation_set_id):
                 InterpretationSelection.interpretation_set_id == interpretation_set_id
             )
         )
+
+
+def test_default_publication_cutoff_selects_completed_processing_attempt(db_session):
+    taxonomy, theme = _fixture(db_session)
+    admitted = _admit(db_session)
+    attempt = _attempt(
+        db_session,
+        admitted=admitted,
+        taxonomy_id=taxonomy.id,
+        theme_id=theme.id,
+    )
+    factory = lambda: db_session.__class__(bind=db_session.get_bind())
+
+    cutoff = EconomicTaxonomyPublicationCoordinator(factory).capture_cutoff(
+        principal=ADMIN
+    )
+
+    manifest = db_session.get(GenerationInputManifest, cutoff.manifest_id)
+    assert manifest.selections == [
+        {
+            "lineage": str(admitted.source_lineage_id),
+            "evidence_packet_id": str(admitted.packet_id),
+            "selected_attempt_id": str(attempt.id),
+            "eligibility_revision": 1,
+            "evidence_precedence_revision": 1,
+            "interpretation_override_revision_id": None,
+            "constituent_decision_revision": None,
+            "social_association_revision": None,
+            "social_decision_revision": None,
+            "development_identity": None,
+            "development_revision": None,
+            "mapping_revision": 1,
+            "metrics_policy_revision": 1,
+            "compatibility_projection_revision": 1,
+        }
+    ]
 
 
 def test_corrected_to_empty_removes_current_facts_but_preserves_old_set(db_session):

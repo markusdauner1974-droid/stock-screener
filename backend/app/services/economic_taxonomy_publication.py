@@ -24,13 +24,20 @@ from app.infra.db.repositories.economic_taxonomy_publication_repo import (
 )
 from app.models.economic_taxonomy import TaxonomyVersion
 from app.models.economic_taxonomy_runtime import (
+    EvidencePacket,
+    EvidencePrecedenceRevision,
     GenerationInputManifest,
+    LensEligibilityRevision,
     ServingGeneration,
     ServingGenerationEvent,
+    SourceLineage,
     TaxonomyAuthority,
     TaxonomyProjectionEvent,
 )
 from app.services.economic_taxonomy_fence import exclusive_publication
+from app.services.economic_taxonomy_interpretations import (
+    EconomicTaxonomyInterpretationService,
+)
 from app.services.economic_taxonomy_publication_compatibility import (
     CompatibilityProjection,
     build_default_compatibility_projections,
@@ -464,15 +471,93 @@ class EconomicTaxonomyPublicationCoordinator:
     def _current_selections(
         session: Session, authority: TaxonomyAuthority
     ) -> list[dict[str, Any]]:
-        if authority.serving_generation_id is None:
-            return []
-        generation = session.get(ServingGeneration, authority.serving_generation_id)
-        if generation is None:
-            return []
-        manifest = session.get(
-            GenerationInputManifest, generation.generation_input_manifest_id
+        previous: dict[str, dict[str, Any]] = {}
+        if authority.serving_generation_id is not None:
+            generation = session.get(ServingGeneration, authority.serving_generation_id)
+            if generation is not None:
+                manifest = session.get(
+                    GenerationInputManifest, generation.generation_input_manifest_id
+                )
+                previous = {
+                    str(value.get("lineage")): dict(value)
+                    for value in (manifest.selections or [])
+                    if value.get("lineage")
+                }
+
+        interpretation_service = EconomicTaxonomyInterpretationService(
+            lambda: session
         )
-        return list(manifest.selections or []) if manifest is not None else []
+        selections: list[dict[str, Any]] = []
+        for lineage_id in session.scalars(
+            select(SourceLineage.id).order_by(SourceLineage.id)
+        ):
+            precedence_revision = session.scalar(
+                select(func.max(EvidencePrecedenceRevision.revision_number)).where(
+                    EvidencePrecedenceRevision.source_lineage_id == lineage_id
+                )
+            )
+            if precedence_revision is None:
+                continue
+            packet = session.scalar(
+                select(EvidencePacket)
+                .join(
+                    EvidencePrecedenceRevision,
+                    EvidencePrecedenceRevision.evidence_packet_id
+                    == EvidencePacket.id,
+                )
+                .where(
+                    EvidencePrecedenceRevision.source_lineage_id == lineage_id,
+                    EvidencePrecedenceRevision.disposition == "effective",
+                )
+                .order_by(EvidencePrecedenceRevision.revision_number.desc())
+                .limit(1)
+            )
+            if packet is None:
+                continue
+            eligibility = session.scalar(
+                select(LensEligibilityRevision)
+                .where(LensEligibilityRevision.evidence_packet_id == packet.id)
+                .order_by(LensEligibilityRevision.revision_number.desc())
+                .limit(1)
+            )
+            if eligibility is None:
+                continue
+            attempt = interpretation_service._default_attempt(
+                session,
+                lineage_id,
+                precedence_cutoff=precedence_revision,
+            )
+            old = previous.get(str(lineage_id), {})
+            projection_revision = session.scalar(
+                select(func.max(TaxonomyProjectionEvent.projection_revision)).where(
+                    TaxonomyProjectionEvent.source_lineage == str(lineage_id)
+                )
+            )
+            selections.append(
+                {
+                    "lineage": str(lineage_id),
+                    "evidence_packet_id": str(packet.id),
+                    "selected_attempt_id": str(attempt.id) if attempt else None,
+                    "eligibility_revision": eligibility.revision_number,
+                    "evidence_precedence_revision": int(precedence_revision),
+                    "interpretation_override_revision_id": None,
+                    "constituent_decision_revision": old.get(
+                        "constituent_decision_revision"
+                    ),
+                    "social_association_revision": old.get(
+                        "social_association_revision"
+                    ),
+                    "social_decision_revision": old.get("social_decision_revision"),
+                    "development_identity": old.get("development_identity"),
+                    "development_revision": old.get("development_revision"),
+                    "mapping_revision": max(1, authority.processing_head_revision),
+                    "metrics_policy_revision": 1,
+                    "compatibility_projection_revision": max(
+                        1, int(projection_revision or 0) + 1
+                    ),
+                }
+            )
+        return selections
 
     @staticmethod
     def _require_admin(principal: AdminPrincipal) -> None:

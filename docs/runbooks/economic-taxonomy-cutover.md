@@ -84,12 +84,14 @@ All remaining commands target the migrated deployment database:
 export DATABASE_URL="$TARGET_DATABASE_URL"
 ```
 
-Before shadow mode, verify that worker bootstrap has called
-`configure_economic_taxonomy_pipeline(...)` with the deployed extraction,
-claim-review, resolution, and Social budget adapters. Dispatch one synthetic
+Before shadow mode, verify that the worker constructed the default Economic
+Taxonomy pipeline from a sanctioned extraction-provider credential and the
+current processing taxonomy. The default binds extraction, claim review,
+resolution, and Social's durable budget adapter. A deployment may replace it
+through `configure_economic_taxonomy_pipeline(...)`. Dispatch one synthetic
 request and require `processed: 1`. The repository deliberately fails closed as
-`processor_unconfigured` when this installation-specific provider binding is
-absent; entering shadow without it is prohibited.
+`processor_unconfigured` when neither the default nor an explicit override can
+be built; entering shadow without a successful synthetic request is prohibited.
 
 ## 2. Seed the governed V1 snapshot
 

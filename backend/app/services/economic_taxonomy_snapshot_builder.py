@@ -46,13 +46,15 @@ from app.models.economic_taxonomy_runtime import (
     TaxonomyOperationRequest,
     ThemeConstituentExposure,
     ThemeMetric,
-    ThemeObservation,
     ThemeSignalObservation,
 )
 from app.models.stock_universe import StockUniverse
 from app.models.theme_intelligence import (
     EconomicThemeDevelopment,
     ThemeDevelopmentObservation,
+)
+from app.services.economic_theme_observation_service import (
+    observation_rows_for_interpretation,
 )
 from app.utils.file_hashing import canonical_json_sha256 as _snapshot_hash
 
@@ -279,15 +281,14 @@ def _build_economic_snapshot_payloads(
     ).all()
     assignment_by_id = {row.id: row for row in assignments}
     assignment_ids = tuple(assignment_by_id)
-    observation_rows = (
-        db.scalars(
-            select(ThemeObservation).where(
-                ThemeObservation.claim_assignment_id.in_(assignment_ids)
-            )
-        ).all()
-        if assignment_ids
-        else []
-    )
+    observation_rows = [
+        observation
+        for observation, _assignment in observation_rows_for_interpretation(
+            db,
+            interpretation_set_id=interpretation.id,
+            manifest_id=manifest.id,
+        )
+    ]
     constituent_rows = (
         db.scalars(
             select(ThemeConstituentExposure).where(
@@ -328,7 +329,7 @@ def _build_economic_snapshot_payloads(
                     SourceLineage.id == ProcessingRequest.source_lineage_id,
                 )
                 .where(ClaimAssignment.id.in_(assignment_ids))
-            )
+            ).tuples().all()
         )
         if assignment_ids
         else {}

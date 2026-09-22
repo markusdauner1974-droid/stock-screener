@@ -95,8 +95,9 @@ interpretations, atomic reader pointers, stale-delivery protection, normal
 rollback, and unhealthy-delivery recovery all behaved as specified.
 
 Production still must satisfy the runbook's environment-specific gates. In
-particular, the deployment must bind extraction, review, resolution, and Social
-budget adapters through `configure_economic_taxonomy_pipeline(...)`, complete a
+particular, the worker must build the default extraction, review, resolution,
+and Social-budget pipeline from a sanctioned provider credential (or install an
+explicit `configure_economic_taxonomy_pipeline(...)` override), complete a
 synthetic provider request, and generate the non-tautological shadow benchmark
 export. These are explicit pre-shadow stop conditions, not deferred product
 work. No capability listed in the runbook's Deferred Work Boundary is required

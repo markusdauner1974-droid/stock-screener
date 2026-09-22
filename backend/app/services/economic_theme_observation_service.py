@@ -80,6 +80,71 @@ class SignalFact:
     payload: dict[str, Any]
 
 
+def observation_rows_for_interpretation(
+    session,
+    *,
+    interpretation_set_id: UUID,
+    manifest_id: UUID,
+) -> list[tuple[ThemeObservation, ClaimAssignment]]:
+    """Return selected observation rows allowed by the manifest's lens revision."""
+
+    manifest = session.get(GenerationInputManifest, manifest_id)
+    if manifest is None:
+        raise FactMaterializationError("generation_manifest_missing")
+    revision_by_lineage = {
+        str(item.get("lineage")): item.get("eligibility_revision")
+        for item in manifest.selections or []
+        if item.get("lineage") is not None
+        and item.get("eligibility_revision") is not None
+    }
+    selections = session.scalars(
+        select(InterpretationSelection).where(
+            InterpretationSelection.interpretation_set_id == interpretation_set_id
+        )
+    ).all()
+    channels_by_attempt: dict[UUID, frozenset[str]] = {}
+    for selection in selections:
+        revision_number = revision_by_lineage.get(str(selection.source_lineage_id))
+        if revision_number is None:
+            raise FactMaterializationError("eligibility_revision_not_pinned")
+        eligibility = session.scalar(
+            select(LensEligibilityRevision).where(
+                LensEligibilityRevision.source_lineage_id
+                == selection.source_lineage_id,
+                LensEligibilityRevision.evidence_packet_id
+                == selection.evidence_packet_id,
+                LensEligibilityRevision.revision_number == int(revision_number),
+            )
+        )
+        if eligibility is None:
+            raise FactMaterializationError("eligibility_revision_not_pinned")
+        channels_by_attempt[selection.selected_classification_attempt_id] = frozenset(
+            eligibility.evidence_channels
+        )
+    rows = session.execute(
+        select(ThemeObservation, ClaimAssignment)
+        .join(
+            ClaimAssignment,
+            ClaimAssignment.id == ThemeObservation.claim_assignment_id,
+        )
+        .join(
+            InterpretationSelection,
+            InterpretationSelection.selected_classification_attempt_id
+            == ClaimAssignment.classification_attempt_id,
+        )
+        .where(InterpretationSelection.interpretation_set_id == interpretation_set_id)
+        .order_by(ThemeObservation.created_at, ThemeObservation.id)
+    ).all()
+    return [
+        (observation, assignment)
+        for observation, assignment in rows
+        if observation.evidence_channel
+        in channels_by_attempt.get(
+            assignment.classification_attempt_id, frozenset()
+        )
+    ]
+
+
 def _as_datetime(value: Any, *, fallback: datetime) -> datetime:
     if isinstance(value, datetime):
         parsed = value
@@ -568,62 +633,12 @@ class EconomicThemeObservationService:
 
     @staticmethod
     def _observations_for_set(session, interpretation_set_id, manifest_id):
-        manifest = session.get(GenerationInputManifest, manifest_id)
-        if manifest is None:
-            raise FactMaterializationError("generation_manifest_missing")
-        revision_by_lineage = {
-            str(item.get("lineage")): item.get("eligibility_revision")
-            for item in manifest.selections or []
-            if item.get("lineage") is not None
-            and item.get("eligibility_revision") is not None
-        }
-        selections = session.scalars(
-            select(InterpretationSelection).where(
-                InterpretationSelection.interpretation_set_id == interpretation_set_id
-            )
-        ).all()
-        channels_by_attempt: dict[UUID, frozenset[str]] = {}
-        for selection in selections:
-            revision_number = revision_by_lineage.get(str(selection.source_lineage_id))
-            if revision_number is None:
-                raise FactMaterializationError("eligibility_revision_not_pinned")
-            eligibility = session.scalar(
-                select(LensEligibilityRevision).where(
-                    LensEligibilityRevision.source_lineage_id
-                    == selection.source_lineage_id,
-                    LensEligibilityRevision.evidence_packet_id
-                    == selection.evidence_packet_id,
-                    LensEligibilityRevision.revision_number == int(revision_number),
-                )
-            )
-            if eligibility is None:
-                raise FactMaterializationError("eligibility_revision_not_pinned")
-            channels_by_attempt[selection.selected_classification_attempt_id] = (
-                frozenset(eligibility.evidence_channels)
-            )
-        rows = session.execute(
-            select(ThemeObservation, ClaimAssignment)
-            .join(
-                ClaimAssignment,
-                ClaimAssignment.id == ThemeObservation.claim_assignment_id,
-            )
-            .join(
-                # Selection is the only authority for current interpretation.
-                InterpretationSelection,
-                InterpretationSelection.selected_classification_attempt_id
-                == ClaimAssignment.classification_attempt_id,
-            )
-            .where(
-                InterpretationSelection.interpretation_set_id == interpretation_set_id
-            )
-            .order_by(ThemeObservation.created_at, ThemeObservation.id)
-        ).all()
         facts: list[ObservationFact] = []
-        for observation, assignment in rows:
-            if observation.evidence_channel not in channels_by_attempt.get(
-                assignment.classification_attempt_id, frozenset()
-            ):
-                continue
+        for observation, assignment in observation_rows_for_interpretation(
+            session,
+            interpretation_set_id=interpretation_set_id,
+            manifest_id=manifest_id,
+        ):
             target_ids = observation.payload.get("economic_theme_ids") or [
                 str(assignment.economic_theme_id)
             ]

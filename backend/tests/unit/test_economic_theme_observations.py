@@ -22,6 +22,7 @@ from app.models.economic_taxonomy_runtime import (
     MetricsRevision,
     ReaderCapabilityManifest,
     ReaderSnapshotBundle,
+    ReaderSnapshotEntry,
     ServingGeneration,
     TaxonomyAuthority,
     ThemeConstituentExposure,
@@ -34,6 +35,10 @@ from app.services.economic_source_admission import (
     EvidenceAdmission,
 )
 from app.services.economic_taxonomy_seed import seed_initial_dimensions
+from app.services.economic_taxonomy_snapshot_builder import (
+    GenerationSnapshotInputs,
+    build_snapshot_bundle,
+)
 from app.services.economic_theme_observation_service import (
     EconomicThemeObservationService,
     materialize_assignment_facts,
@@ -360,6 +365,46 @@ def test_generation_filters_observations_by_pinned_lens_eligibility(db_session):
     ).observations_for_generation(generation.id)
 
     assert {row.evidence_channel for row in observations} == {"narrative"}
+
+
+def test_snapshot_filters_observations_by_pinned_lens_eligibility(db_session):
+    taxonomy, parent, child, admitted, attempt, _assignment, eligibility = _setup(
+        db_session
+    )
+    materialize_assignment_facts(
+        db_session,
+        classification_attempt_id=attempt.id,
+        evidence_channels=eligibility.evidence_channels,
+        taxonomy_version_id=taxonomy.id,
+        detector_policy_version="signals-v1",
+    )
+    revised = EconomicSourceAdmissionService(db_session).revise_lens_eligibility(
+        admitted.packet_id,
+        remove="fundamental",
+        reason="fundamental evidence no longer eligible",
+    )
+    generation = _generation(db_session, taxonomy, admitted, attempt, revised)
+
+    bundle = build_snapshot_bundle(
+        db_session,
+        GenerationSnapshotInputs(
+            taxonomy_version_id=taxonomy.id,
+            interpretation_set_id=generation.interpretation_set_id,
+            generation_input_manifest_id=generation.generation_input_manifest_id,
+            metrics_revision_id=generation.metrics_revision_id,
+            created_by="test:publisher",
+        ),
+    )
+    catalog = db_session.scalar(
+        select(ReaderSnapshotEntry).where(
+            ReaderSnapshotEntry.reader_snapshot_bundle_id == bundle.id,
+            ReaderSnapshotEntry.snapshot_kind == "economic_themes",
+        )
+    ).payload
+    by_id = {row["economic_theme_id"]: row for row in catalog["themes"]}
+
+    assert by_id[str(child.id)]["direct_observation_count"] == 1
+    assert by_id[str(parent.id)]["derived_observation_count"] == 1
 
 
 def test_direct_root_count_deduplicates_source_family_and_excludes_derived(db_session):

@@ -45,7 +45,10 @@ from app.services.economic_taxonomy_publication import (
 from app.tasks.economic_taxonomy_tasks import (
     EconomicExtractionReviewPipeline,
     EconomicTaxonomyTaskService,
+    _service,
+    build_default_economic_taxonomy_pipeline,
     classify_dirty_revisions,
+    configure_economic_taxonomy_pipeline,
     refresh_is_coalesced,
 )
 
@@ -160,6 +163,45 @@ class _Clock:
 
     def __call__(self):
         return self.value
+
+
+def test_celery_service_constructs_configured_default_pipeline(monkeypatch):
+    pipeline = _Pipeline()
+    configure_economic_taxonomy_pipeline(None)
+    monkeypatch.setattr(
+        "app.tasks.economic_taxonomy_tasks.build_default_economic_taxonomy_pipeline",
+        lambda _session_factory: pipeline,
+    )
+
+    service = _service()
+
+    assert service.pipeline is pipeline
+
+
+def test_default_pipeline_wires_provider_to_all_processing_stages(
+    db_session, monkeypatch
+):
+    repository = EconomicTaxonomyRepository(db_session)
+    taxonomy = repository.seal_draft(
+        repository.create_draft(actor=ADMIN.subject, reason="pipeline fixture").id
+    )
+    authority = _authority(db_session)
+    authority.processing_taxonomy_version_id = taxonomy.id
+    db_session.commit()
+    provider = Mock()
+    reservations = Mock()
+    monkeypatch.setattr(
+        "app.services.economic_taxonomy_llm_provider.build_economic_taxonomy_provider",
+        lambda _session_factory: (provider, reservations),
+    )
+
+    pipeline = build_default_economic_taxonomy_pipeline(SessionLocal)
+
+    assert isinstance(pipeline, EconomicExtractionReviewPipeline)
+    assert pipeline.extractor.provider is provider
+    assert pipeline.reviewer.provider is provider
+    assert pipeline.extractor.reservations is reservations
+    assert pipeline.reviewer.reservations is reservations
 
 
 def test_legacy_mode_processing_is_noop(db_session):

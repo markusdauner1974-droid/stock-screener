@@ -16,7 +16,7 @@ from app.infra.db.models.social_analysis import (
 from app.infra.db.models.social_signals import SocialSignalRun, SocialSourceRegistry
 from app.infra.db.repositories.economic_taxonomy_repo import EconomicTaxonomyRepository
 from app.models.economic_taxonomy import EconomicTheme
-from app.models.economic_taxonomy_runtime import TaxonomyAuthority
+from app.models.economic_taxonomy_runtime import EvidencePacket, TaxonomyAuthority
 from app.models.stock_universe import StockUniverse
 from app.models.theme import ContentItem, ThemeCluster
 from app.services.economic_social_taxonomy_adapter import EconomicSocialTaxonomyAdapter
@@ -369,6 +369,9 @@ def test_only_published_succeeded_effective_work_is_live_admitted(db_session):
     assert admitted.live is True
     assert review_only.live is False
     assert review_only.admission_state == "review_only"
+    assert db_session.get(EvidencePacket, admitted.packet_id).source_metadata[
+        "social_work_id"
+    ] == published.id
 
 
 def test_unordered_late_archive_remains_review_only(db_session):

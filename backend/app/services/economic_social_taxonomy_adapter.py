@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -557,6 +557,13 @@ class EconomicSocialTaxonomyAdapter:
         work = self.db.get(SocialExtractionWork, work_id)
         if work is None:
             raise KeyError(f"social work {work_id} not found")
+        evidence = replace(
+            evidence,
+            source_metadata={
+                **dict(evidence.source_metadata),
+                "social_work_id": work_id,
+            },
+        )
         admitted: AdmissionResult = EconomicSourceAdmissionService(
             self.db
         ).admit_social_work(evidence)
