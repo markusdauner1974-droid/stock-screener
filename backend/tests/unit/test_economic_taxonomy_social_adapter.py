@@ -3,8 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
-from sqlalchemy import select
-
 from app.infra.db.models.social_analysis import (
     EconomicSocialAssociation,
     EconomicSocialAssociationRevision,
@@ -14,14 +12,19 @@ from app.infra.db.models.social_analysis import (
     SocialThemeAssociation,
 )
 from app.infra.db.models.social_signals import SocialSignalRun, SocialSourceRegistry
+from app.infra.db.repositories.economic_taxonomy_repo import EconomicTaxonomyRepository
 from app.models.economic_taxonomy import EconomicTheme
 from app.models.economic_taxonomy_runtime import TaxonomyAuthority
 from app.models.stock_universe import StockUniverse
 from app.models.theme import ContentItem, ThemeCluster
+from app.services.economic_social_taxonomy_adapter import EconomicSocialTaxonomyAdapter
 from app.services.economic_source_admission import EvidenceAdmission
 from app.services.economic_taxonomy_fence import AuthorityWritesFenced
 from app.services.social_theme_market_service import EconomicAcceptedBasketReader
-from app.services.social_theme_projection_service import EconomicSocialTaxonomyAdapter
+from app.services.social_theme_projection_service import (
+    SocialThemeProjectionService,
+)
+from sqlalchemy import select
 
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 
@@ -368,3 +371,55 @@ def test_legacy_rows_are_not_mutated_by_global_projection(db_session):
     )
 
     assert after == before
+
+
+def test_legacy_projection_uses_single_destination_mapping_fallback(db_session):
+    legacy = _legacy_association(db_session, name="Memory Legacy", state="accepted")
+    security = StockUniverse(symbol="MU", market="US", is_active=True)
+    db_session.add(security)
+    repo = EconomicTaxonomyRepository(db_session)
+    taxonomy = repo.create_draft(actor="test:social", reason="test")
+    theme = repo.create_theme(
+        taxonomy.id,
+        display_name="Memory",
+        definition="Memory demand",
+        mechanism="Memory pricing",
+        lifecycle="established",
+        lifecycle_policy_version="v1",
+        actor="test:social",
+    )
+    repo.set_legacy_disposition(
+        taxonomy.id,
+        legacy.theme_cluster_id,
+        disposition="mapped",
+        actor="test:social",
+    )
+    repo.add_legacy_destination(
+        taxonomy.id,
+        legacy.theme_cluster_id,
+        theme.id,
+        actor="test:social",
+    )
+    taxonomy = repo.seal_draft(taxonomy.id)
+    db_session.add(
+        TaxonomyAuthority(
+            id=1,
+            mode="dual",
+            processing_taxonomy_version_id=taxonomy.id,
+            processing_head_revision=1,
+            authority_epoch=1,
+            writes_fenced=False,
+            semantic_invalidation_revision=0,
+            cutover_catch_up_cursor=[],
+            rollback_state="ready",
+        )
+    )
+    db_session.flush()
+
+    SocialThemeProjectionService(db_session)._project_legacy_association_to_economic(
+        legacy.id
+    )
+
+    association = db_session.scalar(select(EconomicSocialAssociation))
+    assert association.economic_theme_id == theme.id
+    assert association.security_id == security.id

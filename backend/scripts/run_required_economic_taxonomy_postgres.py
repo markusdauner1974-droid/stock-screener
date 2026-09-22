@@ -7,10 +7,10 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Callable, Iterable
 from dataclasses import asdict, dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Callable, Iterable
 
 import pytest
 from sqlalchemy import create_engine, select, text
@@ -283,7 +283,7 @@ def register_reader_capability(
                 select(ReaderCapabilityManifest).where(
                     ReaderCapabilityManifest.backend_contract == 1,
                     ReaderCapabilityManifest.frontend_contract == 1,
-                    ReaderCapabilityManifest.migration_version == "0054",
+                    ReaderCapabilityManifest.migration_version == "0055",
                     ReaderCapabilityManifest.consumer_test_hash == consumer_test_hash,
                 )
             )
@@ -292,7 +292,7 @@ def register_reader_capability(
             capability = ReaderCapabilityManifest(
                 backend_contract=1,
                 frontend_contract=1,
-                migration_version="0054",
+                migration_version="0055",
                 consumer_test_hash=consumer_test_hash,
                 verified_by=verified_by,
             )

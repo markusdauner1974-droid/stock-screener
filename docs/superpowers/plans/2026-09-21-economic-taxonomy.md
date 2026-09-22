@@ -76,7 +76,9 @@
 - `backend/app/domain/economic_taxonomy/contracts.py` — enums, immutable keys, results, and serving-generation contract.
 - `backend/app/domain/economic_taxonomy/policy.py` — pure interpretation, mapping, relationship, lifecycle, and reconciliation rules.
 - `backend/app/models/economic_taxonomy.py` — stable identities and version-owned semantic snapshot rows.
-- `backend/app/models/economic_taxonomy_runtime.py` — lineages, packets, requests, reusable artifacts, exact attempts/events, assignments, selections/overrides, observations, mappings, revisions, metrics, outbox, and serving artifacts/events.
+- `backend/app/models/economic_taxonomy_runtime.py` — compatibility facade for runtime model imports.
+- `backend/app/models/economic_taxonomy_runtime_{evidence,migration,publication}.py` — cohesive runtime declarations for evidence/interpretation, migration/benchmark, and publication/projection records.
+- `backend/app/models/economic_taxonomy_runtime_invariants.py` — ORM immutability checks plus `metadata.create_all()` PostgreSQL trigger registration; frozen Alembic migrations remain the deployment authority.
 - `backend/app/infra/db/repositories/economic_taxonomy_repo.py` — clone, validate, hash, and seal semantic snapshots.
 - `backend/app/infra/db/repositories/economic_taxonomy_work_repo.py` — evidence/request/artifact/attempt idempotency and leases.
 - `backend/app/infra/db/repositories/economic_taxonomy_publication_repo.py` — cutoff capture, generation-input manifests, sealed artifacts, generation events, and atomic pointer changes.
@@ -98,7 +100,12 @@
 - `backend/app/services/economic_theme_metrics_service.py` — versioned channel and ranking-view calculations.
 - `backend/app/services/economic_taxonomy_runtime.py` — fenced legacy/economic routing and compatibility delivery.
 - `backend/app/services/economic_taxonomy_migration.py` — migration dispositions, allocations, replay, and benchmark.
-- `backend/app/services/economic_taxonomy_publication.py` — prepare, validate, publish, cutover, and rollback recovery.
+- `backend/app/services/economic_taxonomy_publication.py` — stable publication facade and transaction coordinator.
+- `backend/app/services/economic_taxonomy_publication_{preparation,validation,compatibility}.py` — candidate preparation, publication verification, and projection construction.
+- `backend/app/services/economic_taxonomy_rollback_recovery.py` — fenced compatibility recovery for rollback.
+- `backend/app/services/economic_taxonomy_snapshot_builder.py` — economic generation snapshot construction, separate from legacy UI bootstrap snapshots.
+- `backend/app/services/economic_social_taxonomy_adapter.py` — Social admission and global association reconciliation adapter.
+- `backend/app/services/economic_taxonomy_benchmark_store.py` — durable, taxonomy/policy-bound benchmark registration and verification.
 - `backend/app/services/economic_theme_read_service.py` — generation-scoped reader facade.
 
 ### Migrations
@@ -112,6 +119,7 @@
 - `backend/alembic/versions/20260921_0052_economic_taxonomy_social.py` — stable global Social association identity, numbered association/decision revisions, and legacy bridge.
 - `backend/alembic/versions/20260921_0053_economic_taxonomy_developments.py` — narrative development provenance and economic links.
 - `backend/alembic/versions/20260921_0054_economic_taxonomy_reader_snapshots.py` — generation-scoped API/UI snapshot pointers.
+- `backend/alembic/versions/20260922_0055_economic_taxonomy_benchmarks.py` — durable fail-closed benchmark results.
 
 ### Product, tests, and operations
 
@@ -421,7 +429,12 @@ git commit -m "feat: add sealed economic taxonomy snapshots"
 ### Task 2: Persist frozen evidence, classification history, and interpretations
 
 **Files:**
-- Create: `backend/app/models/economic_taxonomy_runtime.py`
+- Create: `backend/app/models/economic_taxonomy_runtime.py` compatibility facade
+- Create: `backend/app/models/economic_taxonomy_runtime_common.py`
+- Create: `backend/app/models/economic_taxonomy_runtime_evidence.py`
+- Create: `backend/app/models/economic_taxonomy_runtime_migration.py`
+- Create: `backend/app/models/economic_taxonomy_runtime_publication.py`
+- Create: `backend/app/models/economic_taxonomy_runtime_invariants.py`
 - Modify: `backend/app/models/__init__.py`
 - Create: `backend/alembic/versions/20260921_0047_economic_taxonomy_interpretations.py`
 - Test: `backend/tests/unit/test_economic_taxonomy_interpretation_models.py`
@@ -482,12 +495,12 @@ Persist append-only eligibility, constituent-decision, proposal-decision, develo
 
 Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_interpretation_models.py tests/integration/test_economic_taxonomy_interpretation_migration.py tests/unit/test_main_migrations.py -q`
 
-Expected: PASS and Alembic head `20260921_0047`; H10/H11 attempts coexist, old payloads reject mutation, evidence ordinal allocation is concurrency-safe, and Social selections carry stable association ID plus immutable revision number.
+Expected: PASS and Alembic head includes the runtime schema; H10/H11 attempts coexist, old payloads reject mutation, evidence ordinal allocation is concurrency-safe, and Social selections carry stable association ID plus immutable revision number. The compatibility facade and split evidence/migration/publication modules expose identical ORM class objects, and `Base.metadata.create_all()` retains the trigger-backed invariants.
 
 - [ ] **Step 6: Commit interpretation persistence**
 
 ```bash
-git add backend/app/models/economic_taxonomy_runtime.py backend/app/models/__init__.py backend/alembic/versions/20260921_0047_economic_taxonomy_interpretations.py backend/tests/unit/test_economic_taxonomy_interpretation_models.py backend/tests/integration/test_economic_taxonomy_interpretation_migration.py
+git add backend/app/models/economic_taxonomy_runtime*.py backend/app/models/__init__.py backend/alembic/versions/20260921_0047_economic_taxonomy_interpretations.py backend/tests/unit/test_economic_taxonomy_interpretation_models.py backend/tests/integration/test_economic_taxonomy_interpretation_migration.py
 git commit -m "feat: persist taxonomy interpretation history"
 ```
 
@@ -1189,6 +1202,7 @@ git commit -m "feat: fence and order taxonomy compatibility writes"
 **Files:**
 - Modify: `backend/app/infra/db/models/social_analysis.py`
 - Modify: `backend/app/services/social_theme_projection_service.py`
+- Create: `backend/app/services/economic_social_taxonomy_adapter.py`
 - Modify: `backend/app/services/social_llm_budget_service.py`
 - Modify: `backend/app/services/social_theme_market_service.py`
 - Create: `backend/alembic/versions/20260921_0052_economic_taxonomy_social.py`
@@ -1299,7 +1313,7 @@ Expected: historical legacy rows/decisions remain unchanged; stable pair identit
 - [ ] **Step 7: Commit Social integration**
 
 ```bash
-git add backend/app/infra/db/models/social_analysis.py backend/app/services/social_theme_projection_service.py backend/app/services/social_llm_budget_service.py backend/app/services/social_theme_market_service.py backend/alembic/versions/20260921_0052_economic_taxonomy_social.py backend/tests/unit/test_economic_taxonomy_social_adapter.py backend/tests/integration/test_economic_taxonomy_social_postgres.py backend/tests/unit/services/test_social_llm_budget.py
+git add backend/app/infra/db/models/social_analysis.py backend/app/services/economic_social_taxonomy_adapter.py backend/app/services/social_theme_projection_service.py backend/app/services/social_llm_budget_service.py backend/app/services/social_theme_market_service.py backend/alembic/versions/20260921_0052_economic_taxonomy_social.py backend/tests/unit/test_economic_taxonomy_social_adapter.py backend/tests/integration/test_economic_taxonomy_social_postgres.py backend/tests/unit/services/test_social_llm_budget.py
 git commit -m "feat: integrate Social with economic taxonomy"
 ```
 
@@ -1365,6 +1379,7 @@ git commit -m "feat: add narrative economic theme developments"
 - Create: `backend/app/api/v1/economic_taxonomy.py`
 - Modify: `backend/app/api/v1/router.py`
 - Modify: `backend/app/services/ui_snapshot_service.py`
+- Create: `backend/app/services/economic_taxonomy_snapshot_builder.py`
 - Create: `backend/alembic/versions/20260921_0054_economic_taxonomy_reader_snapshots.py`
 - Test: `backend/tests/unit/test_economic_theme_api.py`
 - Test: `backend/tests/unit/test_economic_taxonomy_api.py`
@@ -1412,7 +1427,7 @@ Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_theme_api.py test
 Expected: PASS.
 
 ```bash
-git add backend/app/api/v1/economic_themes.py backend/app/api/v1/economic_taxonomy.py backend/app/api/v1/router.py backend/app/services/ui_snapshot_service.py backend/alembic/versions/20260921_0054_economic_taxonomy_reader_snapshots.py backend/tests/unit/test_economic_theme_api.py backend/tests/unit/test_economic_taxonomy_api.py backend/tests/unit/test_economic_theme_ui_snapshot.py
+git add backend/app/api/v1/economic_themes.py backend/app/api/v1/economic_taxonomy.py backend/app/api/v1/router.py backend/app/services/economic_taxonomy_snapshot_builder.py backend/app/services/ui_snapshot_service.py backend/alembic/versions/20260921_0054_economic_taxonomy_reader_snapshots.py backend/tests/unit/test_economic_theme_api.py backend/tests/unit/test_economic_taxonomy_api.py backend/tests/unit/test_economic_theme_ui_snapshot.py
 git commit -m "feat: expose generation-scoped economic themes"
 ```
 
@@ -1420,14 +1435,18 @@ git commit -m "feat: expose generation-scoped economic themes"
 
 **Files:**
 - Create: `backend/app/services/economic_taxonomy_migration.py`
+- Create: `backend/app/services/economic_taxonomy_benchmark_store.py`
 - Create: `backend/scripts/run_economic_taxonomy_benchmark.py`
+- Create: `backend/scripts/register_economic_taxonomy_benchmark.py`
+- Create: `backend/alembic/versions/20260922_0055_economic_taxonomy_benchmarks.py`
 - Expand: `backend/tests/fixtures/economic_taxonomy/contract_cases.json`
 - Test: `backend/tests/unit/test_economic_taxonomy_migration.py`
 - Test: `backend/tests/unit/test_economic_taxonomy_benchmark.py`
+- Test: `backend/tests/integration/test_economic_taxonomy_benchmark_migration.py`
 
 **Interfaces:**
 - Consumes: legacy themes/mentions/associations/developments, mapping operations, source revision log.
-- Produces: sealed `TaxonomyMigrationRun`, append-only `TaxonomyMigrationProgressEvent`, `build_migration()`, `review_disposition()`, `replay_manifest()`, and a fail-closed benchmark report bound to taxonomy and policy hashes.
+- Produces: sealed `TaxonomyMigrationRun`, append-only `TaxonomyMigrationProgressEvent`, `build_migration()`, `review_disposition()`, `replay_manifest()`, and a durable fail-closed benchmark result bound to taxonomy and policy hashes.
 
 - [ ] **Step 1: Write failing coverage and split-allocation tests**
 
@@ -1461,10 +1480,10 @@ Replay sorted committed revision-log tuples, not sequence maxima. Every fixture 
 
 Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_migration.py tests/unit/test_economic_taxonomy_benchmark.py -q`
 
-Expected: PASS and benchmark report includes fixture version, taxonomy hash, policy bundle, and per-case outcome.
+Expected: PASS and benchmark report includes fixture version, taxonomy hash, policy bundle, and per-case outcome. Registration rejects failed reports; publication rejects a missing, mismatched, or mutated registered result.
 
 ```bash
-git add backend/app/services/economic_taxonomy_migration.py backend/scripts/run_economic_taxonomy_benchmark.py backend/tests/fixtures/economic_taxonomy/contract_cases.json backend/tests/unit/test_economic_taxonomy_migration.py backend/tests/unit/test_economic_taxonomy_benchmark.py
+git add backend/app/services/economic_taxonomy_migration.py backend/app/services/economic_taxonomy_benchmark_store.py backend/scripts/run_economic_taxonomy_benchmark.py backend/scripts/register_economic_taxonomy_benchmark.py backend/alembic/versions/20260922_0055_economic_taxonomy_benchmarks.py backend/tests/fixtures/economic_taxonomy/contract_cases.json backend/tests/unit/test_economic_taxonomy_migration.py backend/tests/unit/test_economic_taxonomy_benchmark.py
 git commit -m "feat: migrate and benchmark economic taxonomy"
 ```
 
@@ -1472,6 +1491,11 @@ git commit -m "feat: migrate and benchmark economic taxonomy"
 
 **Files:**
 - Create: `backend/app/services/economic_taxonomy_publication.py`
+- Create: `backend/app/services/economic_taxonomy_publication_contracts.py`
+- Create: `backend/app/services/economic_taxonomy_publication_preparation.py`
+- Create: `backend/app/services/economic_taxonomy_publication_validation.py`
+- Create: `backend/app/services/economic_taxonomy_publication_compatibility.py`
+- Create: `backend/app/services/economic_taxonomy_rollback_recovery.py`
 - Create: `backend/scripts/publish_economic_taxonomy.py`
 - Test: `backend/tests/unit/test_economic_taxonomy_publication.py`
 - Test: `backend/tests/integration/test_economic_taxonomy_publication_postgres.py`
@@ -1523,6 +1547,11 @@ def test_abandoned_generation_events_are_never_delivered(coordinator, delivery_w
     coordinator.abandon(prepared.id, reason="stale_parent")
     delivery_worker.run()
     assert coordinator.compatibility_checkpoint(prepared.id).delivery_count == 0
+
+def test_passing_callback_cannot_bypass_durable_benchmark_artifact(coordinator):
+    coordinator.benchmark_verifier = lambda *_: {"passed": True}
+    with pytest.raises(BenchmarkRejected, match="benchmark_result_missing"):
+        coordinator.prepare_generation(coordinator.capture_cutoff())
 ```
 
 - [ ] **Step 2: Run tests and confirm coordinator is absent**
@@ -1537,7 +1566,7 @@ In a short transaction, acquire `exclusive_publication()`, drain shared writers,
 
 - [ ] **Step 4: Implement preparation outside the exclusive lock**
 
-From frozen C, build and seal the interpretation set, metrics revision, UI/API snapshot bundle, complete candidate-generation compatibility payloads, and immutable serving-generation payload. Verify benchmark output and reader capability. Require compatibility acknowledgement through the previously accepted generation and staged candidate payloads; do not wait for candidate delivery. Append `prepared`. No authority pointer changes occur here.
+From frozen C, build and seal the interpretation set, metrics revision, UI/API snapshot bundle, complete candidate-generation compatibility payloads, and immutable serving-generation payload. Verify the append-only benchmark result by ID, report hash, taxonomy semantic hash, and policy bundle; a boolean or callback-only pass is insufficient. Verify reader capability. Require compatibility acknowledgement through the previously accepted generation and staged candidate payloads; do not wait for candidate delivery. Append `prepared`. No authority pointer changes occur here.
 
 - [ ] **Step 5: Implement the short final compare-and-set barrier**
 
@@ -1562,7 +1591,7 @@ Run: `cd backend && ./venv/bin/pytest tests/unit/test_economic_taxonomy_publicat
 Expected: PASS.
 
 ```bash
-git add backend/app/services/economic_taxonomy_publication.py backend/scripts/publish_economic_taxonomy.py backend/tests/unit/test_economic_taxonomy_publication.py backend/tests/integration/test_economic_taxonomy_publication_postgres.py
+git add backend/app/services/economic_taxonomy_publication*.py backend/app/services/economic_taxonomy_rollback_recovery.py backend/scripts/publish_economic_taxonomy.py backend/tests/unit/test_economic_taxonomy_publication.py backend/tests/integration/test_economic_taxonomy_publication_postgres.py
 git commit -m "feat: coordinate economic taxonomy publication"
 ```
 
@@ -1698,7 +1727,7 @@ Show `Technical Attention`, unsigned `Fundamental Attention`, `Narrative Attenti
 
 - [ ] **Step 6: Register reader capability only after contract tests pass**
 
-Build `ReaderCapabilityManifest(backend_contract=1, frontend_contract=1, migration_version="0054", consumer_test_hash=<test inventory hash>)`. The release command persists it only after backend consumer tests, frontend tests, and build succeed. Task 16 may reuse this verified capability for later data-only generations; any software, schema, or reader-contract change requires a newly verified capability manifest.
+Build `ReaderCapabilityManifest(backend_contract=1, frontend_contract=1, migration_version="0055", consumer_test_hash=<test inventory hash>)`. The release command persists it only after backend consumer tests, frontend tests, build, and benchmark-result migration succeed. Task 16 may reuse this verified capability for later data-only generations; any software, schema, or reader-contract change requires a newly verified capability manifest.
 
 - [ ] **Step 7: Run backend/frontend verification and commit**
 

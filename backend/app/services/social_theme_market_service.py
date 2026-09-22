@@ -32,10 +32,8 @@ from app.services.social_confirmation_reader import (
     SocialConfirmationReader,
     _available_at,
 )
-from app.services.social_theme_projection_service import (
-    EconomicSocialTaxonomyAdapter,
-    SocialThemeProjectionService,
-)
+from app.services.economic_social_taxonomy_adapter import EconomicSocialTaxonomyAdapter
+from app.services.social_theme_projection_service import SocialThemeProjectionService
 from app.services.social_ticker_resolver import SocialTickerResolver
 from app.services.theme_discovery_service import (
     compound_theme_returns,

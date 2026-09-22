@@ -6,8 +6,6 @@ from unittest.mock import Mock
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select
-
 from app.database import SessionLocal
 from app.domain.economic_taxonomy.contracts import AdminPrincipal
 from app.infra.db.repositories.economic_taxonomy_publication_repo import (
@@ -22,6 +20,9 @@ from app.models.economic_taxonomy_runtime import (
     TaxonomyAuthority,
 )
 from app.services.economic_exposure_extraction import BudgetExhausted
+from app.services.economic_taxonomy_benchmark_store import (
+    register_verified_benchmark,
+)
 from app.services.economic_taxonomy_publication import (
     CompatibilityProjection,
     EconomicTaxonomyPublicationCoordinator,
@@ -32,6 +33,7 @@ from app.tasks.economic_taxonomy_tasks import (
     classify_dirty_revisions,
     refresh_is_coalesced,
 )
+from sqlalchemy import select
 
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 ADMIN = AdminPrincipal(
@@ -76,7 +78,7 @@ def _published_generation(db_session, *, with_projection: bool):
     capability = ReaderCapabilityManifest(
         backend_contract=1,
         frontend_contract=1,
-        migration_version="0054",
+        migration_version="0055",
         consumer_test_hash=str(uuid4()),
         verified_by=ADMIN.subject,
     )
@@ -92,6 +94,18 @@ def _published_generation(db_session, *, with_projection: bool):
         rollback_state="ready",
     )
     db_session.add_all([capability, authority])
+    register_verified_benchmark(
+        db_session,
+        report={
+            "passed": True,
+            "fixture_version": 1,
+            "taxonomy_hash": taxonomy.semantic_hash,
+            "policy_bundle": "economic-taxonomy-v1",
+            "errors": [],
+            "cases": [],
+        },
+        verified_by=ADMIN.subject,
+    )
     db_session.commit()
 
     def compatibility(_session, context):

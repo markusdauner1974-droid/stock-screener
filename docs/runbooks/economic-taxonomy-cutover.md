@@ -256,6 +256,20 @@ Validate that export with the fail-closed contrast benchmark:
 An absent case, wrong taxonomy/policy hash, forbidden result, or benchmark
 failure is a stop.
 
+Register the passed report in the target database. Publication fails closed
+unless this append-only result matches the sealed taxonomy semantic hash and
+the `economic-taxonomy-v1` policy bundle:
+
+```bash
+./venv/bin/python scripts/register_economic_taxonomy_benchmark.py \
+  --report "$RELEASE_DIR/benchmark-report.json" \
+  --verified-by "$TAXONOMY_ACTOR"
+```
+
+Record the printed benchmark-result UUID with the release evidence. A taxonomy
+or policy change requires a new report and registration before another
+generation can be prepared.
+
 ## 5. Enter dual and drain required compatibility work
 
 After reviewed mappings, split allocations, Social conflicts, development

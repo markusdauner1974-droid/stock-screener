@@ -3,8 +3,6 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from sqlalchemy.orm import sessionmaker
-
 from app.database import engine
 from app.infra.db.models.social_analysis import (
     EconomicSocialAssociation,
@@ -12,7 +10,8 @@ from app.infra.db.models.social_analysis import (
 )
 from app.models.economic_taxonomy import EconomicTheme
 from app.models.stock_universe import StockUniverse
-from app.services.social_theme_projection_service import EconomicSocialTaxonomyAdapter
+from app.services.economic_social_taxonomy_adapter import EconomicSocialTaxonomyAdapter
+from sqlalchemy.orm import sessionmaker
 
 pytestmark = pytest.mark.skipif(
     engine.dialect.name != "postgresql", reason="requires PostgreSQL uniqueness"

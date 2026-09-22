@@ -2,7 +2,6 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
-
 from app.models.economic_taxonomy import EconomicTheme
 from app.models.economic_taxonomy_runtime import (
     DevelopmentSelectionRevision,
@@ -11,7 +10,7 @@ from app.models.economic_taxonomy_runtime import (
     ReaderSnapshotEntry,
     ThemeMetric,
 )
-from app.services.ui_snapshot_service import (
+from app.services.economic_taxonomy_snapshot_builder import (
     GenerationSnapshotInputs,
     SnapshotBundleError,
     build_snapshot_bundle,

@@ -3,8 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
-from sqlalchemy import select
-
 from app.domain.economic_taxonomy.contracts import AdminPrincipal
 from app.infra.db.repositories.economic_taxonomy_publication_repo import (
     EconomicTaxonomyPublicationRepository,
@@ -22,6 +20,9 @@ from app.models.economic_taxonomy_runtime import (
     TaxonomyProjectionEvent,
     TaxonomySourceRevisionLog,
 )
+from app.services.economic_taxonomy_benchmark_store import (
+    register_verified_benchmark,
+)
 from app.services.economic_taxonomy_publication import (
     BenchmarkRejected,
     CompatibilityProjection,
@@ -29,7 +30,11 @@ from app.services.economic_taxonomy_publication import (
     InjectedPublicationCrash,
     ManifestChanged,
 )
+from app.services.economic_taxonomy_publication_compatibility import (
+    CompatibilityProjection as SplitCompatibilityProjection,
+)
 from app.services.economic_taxonomy_runtime import EconomicTaxonomyRuntimeService
+from sqlalchemy import select
 
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 ADMIN = AdminPrincipal(
@@ -39,14 +44,18 @@ ADMIN = AdminPrincipal(
 )
 
 
-def _seed(db_session):
+def test_publication_facade_preserves_split_contract_identity():
+    assert SplitCompatibilityProjection is CompatibilityProjection
+
+
+def _seed(db_session, *, include_benchmark=True):
     repository = EconomicTaxonomyRepository(db_session)
     draft = repository.create_draft(actor=ADMIN.subject, reason="publication fixture")
     taxonomy = repository.seal_draft(draft.id)
     capability = ReaderCapabilityManifest(
         backend_contract=1,
         frontend_contract=1,
-        migration_version="0054",
+        migration_version="0055",
         consumer_test_hash="publication-tests-v1",
         verified_by=ADMIN.subject,
     )
@@ -62,6 +71,19 @@ def _seed(db_session):
         rollback_state="ready",
     )
     db_session.add_all([capability, authority])
+    if include_benchmark:
+        register_verified_benchmark(
+            db_session,
+            report={
+                "passed": True,
+                "fixture_version": 1,
+                "taxonomy_hash": taxonomy.semantic_hash,
+                "policy_bundle": "economic-taxonomy-v1",
+                "errors": [],
+                "cases": [],
+            },
+            verified_by=ADMIN.subject,
+        )
     db_session.commit()
     return taxonomy, capability
 
@@ -97,6 +119,10 @@ def test_prepare_builds_all_artifacts_from_one_manifest(db_session):
         assert metrics.generation_input_manifest_id == cutoff.manifest_id
         assert snapshots.generation_input_manifest_id == cutoff.manifest_id
         assert [event.event_type for event in generation.events] == ["prepared"]
+        benchmark = generation.events[0].details["benchmark"]
+        assert benchmark["passed"] is True
+        assert benchmark["benchmark_result_id"]
+        assert benchmark["report_hash"]
         assert check.get(TaxonomyAuthority, 1).serving_generation_id is None
 
 
@@ -356,3 +382,34 @@ def test_failed_benchmark_does_not_prepare_candidate(db_session):
 
     with db_session.__class__(bind=db_session.get_bind()) as check:
         assert check.query(ServingGenerationEvent).count() == 0
+
+
+def test_passing_callback_cannot_bypass_durable_benchmark_artifact(db_session):
+    _taxonomy, capability = _seed(db_session)
+    coordinator = _coordinator(
+        db_session,
+        benchmark_verifier=lambda _session, _context: {"passed": True},
+    )
+    cutoff = coordinator.capture_cutoff(principal=ADMIN, selections=[])
+
+    with pytest.raises(BenchmarkRejected, match="benchmark_result_missing"):
+        coordinator.prepare_generation(
+            cutoff,
+            principal=ADMIN,
+            reader_capability_manifest_id=capability.id,
+        )
+
+
+def test_default_benchmark_verification_fails_closed_without_registered_result(
+    db_session,
+):
+    _taxonomy, capability = _seed(db_session, include_benchmark=False)
+    coordinator = _coordinator(db_session)
+    cutoff = coordinator.capture_cutoff(principal=ADMIN, selections=[])
+
+    with pytest.raises(BenchmarkRejected, match="benchmark_result_missing"):
+        coordinator.prepare_generation(
+            cutoff,
+            principal=ADMIN,
+            reader_capability_manifest_id=capability.id,
+        )

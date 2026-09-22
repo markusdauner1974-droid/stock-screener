@@ -4,10 +4,6 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import create_engine, event
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import sessionmaker
-
 from app.database import Base
 from app.models.economic_taxonomy import ECONOMIC_TAXONOMY_TABLES, EconomicTheme
 from app.models.economic_taxonomy_runtime import (
@@ -31,6 +27,16 @@ from app.models.economic_taxonomy_runtime import (
     ThemeMetric,
     ThemeObservation,
 )
+from app.models.economic_taxonomy_runtime_evidence import (
+    SourceFamily as EvidenceModuleSourceFamily,
+)
+from sqlalchemy import create_engine, event
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import sessionmaker
+
+
+def test_runtime_model_facade_preserves_split_model_identity():
+    assert EvidenceModuleSourceFamily is SourceFamily
 
 
 @pytest.fixture
@@ -113,9 +119,7 @@ def _source_graph(db):
 def _taxonomy_version(db, label):
     from app.models.economic_taxonomy import TaxonomyVersion
 
-    version = TaxonomyVersion(
-        status="draft", created_by="test:author", reason=label
-    )
+    version = TaxonomyVersion(status="draft", created_by="test:author", reason=label)
     db.add(version)
     db.flush()
     return version
@@ -361,9 +365,7 @@ def test_metrics_revision_seals_once_and_blocks_metric_changes(db):
 
 
 def test_generation_input_uses_social_association_revision_not_pair_only(db):
-    first = SocialAssociationRevisionRef(
-        association_id=uuid4(), revision_number=1
-    )
+    first = SocialAssociationRevisionRef(association_id=uuid4(), revision_number=1)
     second = SocialAssociationRevisionRef(
         association_id=first.association_id, revision_number=2
     )

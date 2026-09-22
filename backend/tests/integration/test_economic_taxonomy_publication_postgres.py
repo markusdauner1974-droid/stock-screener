@@ -6,8 +6,6 @@ from threading import Event
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select
-
 from app.database import SessionLocal, engine
 from app.domain.economic_taxonomy.contracts import AdminPrincipal
 from app.infra.db.repositories.economic_taxonomy_publication_repo import (
@@ -19,8 +17,12 @@ from app.models.economic_taxonomy_runtime import (
     ReaderCapabilityManifest,
     ServingGenerationEvent,
     TaxonomyAuthority,
+    TaxonomyBenchmarkResult,
     TaxonomyProjectionDeliveryEvent,
     TaxonomyProjectionEvent,
+)
+from app.services.economic_taxonomy_benchmark_store import (
+    register_verified_benchmark,
 )
 from app.services.economic_taxonomy_fence import (
     StaleAuthorityEpoch,
@@ -33,6 +35,8 @@ from app.services.economic_taxonomy_publication import (
     ManifestChanged,
 )
 from app.services.economic_taxonomy_runtime import EconomicTaxonomyRuntimeService
+from sqlalchemy import select, update
+from sqlalchemy.exc import DBAPIError
 
 pytestmark = pytest.mark.skipif(
     engine.dialect.name != "postgresql",
@@ -56,7 +60,7 @@ def seeded():
         capability = ReaderCapabilityManifest(
             backend_contract=1,
             frontend_contract=1,
-            migration_version="0054",
+            migration_version="0055",
             consumer_test_hash=f"pg-publication-{uuid4()}",
             verified_by=ADMIN.subject,
         )
@@ -75,6 +79,18 @@ def seeded():
                     rollback_state="ready",
                 ),
             ]
+        )
+        register_verified_benchmark(
+            session,
+            report={
+                "passed": True,
+                "fixture_version": 1,
+                "taxonomy_hash": taxonomy.semantic_hash,
+                "policy_bundle": "economic-taxonomy-v1",
+                "errors": [],
+                "cases": [],
+            },
+            verified_by=ADMIN.subject,
         )
         session.commit()
         return taxonomy.id, capability.id
@@ -109,6 +125,20 @@ def _prepare(coordinator, capability_id, *, target_mode="economic"):
         reader_capability_manifest_id=capability_id,
         target_mode=target_mode,
     )
+
+
+def test_registered_benchmark_is_database_append_only(seeded):
+    with SessionLocal() as session:
+        result = session.scalar(select(TaxonomyBenchmarkResult))
+        assert result is not None
+        with pytest.raises(DBAPIError, match="runtime_payload_immutable"):
+            session.execute(
+                update(TaxonomyBenchmarkResult)
+                .where(TaxonomyBenchmarkResult.id == result.id)
+                .values(verified_by="admin:replacement")
+            )
+            session.commit()
+        session.rollback()
 
 
 def test_late_lower_id_is_in_cutoff_and_post_cutoff_work_is_backlog(seeded):

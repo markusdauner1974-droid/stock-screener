@@ -3,8 +3,6 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import select
-
 from app.infra.db.repositories.economic_taxonomy_publication_repo import (
     EconomicTaxonomyPublicationRepository,
 )
@@ -33,10 +31,11 @@ from app.models.economic_taxonomy_runtime import (
     TaxonomyAuthority,
     ThemeMetric,
 )
-from app.services.ui_snapshot_service import (
+from app.services.economic_taxonomy_snapshot_builder import (
     GenerationSnapshotInputs,
     build_snapshot_bundle,
 )
+from sqlalchemy import select
 
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 
@@ -239,7 +238,7 @@ def seed_generation(db, *, display_name="AI Memory", set_serving=True):
         select(ReaderCapabilityManifest).where(
             ReaderCapabilityManifest.backend_contract == 1,
             ReaderCapabilityManifest.frontend_contract == 1,
-            ReaderCapabilityManifest.migration_version == "0054",
+            ReaderCapabilityManifest.migration_version == "0055",
             ReaderCapabilityManifest.consumer_test_hash == "reader-tests-v1",
         )
     )
@@ -247,7 +246,7 @@ def seed_generation(db, *, display_name="AI Memory", set_serving=True):
         capability = ReaderCapabilityManifest(
             backend_contract=1,
             frontend_contract=1,
-            migration_version="0054",
+            migration_version="0055",
             consumer_test_hash="reader-tests-v1",
             verified_by="test:reader",
         )
