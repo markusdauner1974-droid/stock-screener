@@ -595,7 +595,7 @@ class EconomicTaxonomyRuntimeService:
                     pipeline="technical",
                     aliases=[],
                     description=detail.get("definition"),
-                    discovery_source="economic_taxonomy_mirror",
+                    discovery_source="taxonomy_mirror",
                     first_seen_at=now,
                     last_seen_at=now,
                     lifecycle_state=lifecycle,
@@ -632,7 +632,7 @@ class EconomicTaxonomyRuntimeService:
                     constituent = ThemeConstituent(
                         theme_cluster_id=cluster.id,
                         symbol=symbol,
-                        source="economic_taxonomy_mirror",
+                        source="taxonomy_mirror",
                         confidence=1.0,
                         mention_count=1,
                         first_mentioned_at=now,
@@ -645,7 +645,7 @@ class EconomicTaxonomyRuntimeService:
                     constituent.last_mentioned_at = now
             for symbol, constituent in constituents.items():
                 if (
-                    constituent.source == "economic_taxonomy_mirror"
+                    constituent.source == "taxonomy_mirror"
                     and symbol not in desired_symbols
                 ):
                     constituent.is_active = False
@@ -654,18 +654,18 @@ class EconomicTaxonomyRuntimeService:
             select(ThemeCluster).where(
                 ThemeCluster.pipeline == "technical",
                 ThemeCluster.discovery_source.in_(
-                    ("economic_taxonomy_mirror", "economic_mirror")
+                    ("taxonomy_mirror", "economic_mirror")
                 ),
             )
         ):
             if cluster.canonical_key in desired_keys:
                 continue
-            if cluster.discovery_source == "economic_taxonomy_mirror":
+            if cluster.discovery_source == "taxonomy_mirror":
                 cluster.is_active = False
             for constituent in self.session.scalars(
                 select(ThemeConstituent).where(
                     ThemeConstituent.theme_cluster_id == cluster.id,
-                    ThemeConstituent.source == "economic_taxonomy_mirror",
+                    ThemeConstituent.source == "taxonomy_mirror",
                 )
             ):
                 constituent.is_active = False

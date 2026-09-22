@@ -242,6 +242,7 @@ def test_legacy_theme_delivery_materializes_and_retracts_legacy_reader_rows(
     assert cluster.display_name == "AI Memory"
     assert cluster.lifecycle_state == "active"
     assert cluster.is_active is True
+    assert len(cluster.discovery_source) <= ThemeCluster.discovery_source.type.length
     constituent = db_session.scalar(
         select(ThemeConstituent).where(
             ThemeConstituent.theme_cluster_id == cluster.id,
