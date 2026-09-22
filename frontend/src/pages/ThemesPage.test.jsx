@@ -212,4 +212,52 @@ describe('ThemesPage', () => {
     unmount();
     vi.useRealTimers();
   });
+
+  it('refreshes an open economic-theme detail with the new generation', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    economicApi.getEconomicThemes
+      .mockResolvedValueOnce({
+        generation_id: 'generation-1',
+        generation: { authority_mode: 'economic' },
+        themes: [{
+          economic_theme_id: 'theme-1',
+          display_name: 'AI Memory',
+          lifecycle: 'active',
+          definition: 'Original definition.',
+          metrics: {},
+        }],
+      })
+      .mockResolvedValueOnce({
+        generation_id: 'generation-2',
+        generation: { authority_mode: 'economic' },
+        themes: [{
+          economic_theme_id: 'theme-1',
+          display_name: 'AI Memory Infrastructure',
+          lifecycle: 'established',
+          definition: 'Updated definition.',
+          metrics: {},
+        }],
+      });
+
+    const { unmount } = renderPage();
+    fireEvent.click(await screen.findByText('AI Memory'));
+    expect(screen.getByRole('dialog')).toHaveTextContent('Generation generation-1');
+    expect(screen.getByRole('dialog')).toHaveTextContent('Original definition.');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole('dialog')).toHaveTextContent(
+        'AI Memory Infrastructure',
+      );
+    });
+    expect(screen.getByRole('dialog')).toHaveTextContent('Generation generation-2');
+    expect(screen.getByRole('dialog')).toHaveTextContent('Updated definition.');
+    expect(screen.getByRole('dialog')).not.toHaveTextContent('Original definition.');
+
+    unmount();
+    vi.useRealTimers();
+  });
 });

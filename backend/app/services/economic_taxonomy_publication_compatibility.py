@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
@@ -12,12 +13,15 @@ from sqlalchemy.orm import Session
 from app.infra.db.repositories.economic_taxonomy_publication_repo import (
     PublicationInvariantError,
 )
+from app.models.economic_taxonomy import EconomicThemeRevision
 from app.models.economic_taxonomy_runtime import (
     ClaimAssignment,
     GenerationInputManifest,
     InterpretationSelection,
     TaxonomyProjectionEvent,
+    ThemeConstituentExposure,
 )
+from app.models.stock_universe import StockUniverse
 from app.services.economic_taxonomy_publication_contracts import PreparationContext
 from app.utils.file_hashing import canonical_json_sha256 as _hash
 
@@ -107,11 +111,13 @@ def build_default_compatibility_projections(
     """Build a complete candidate projection, carrying parent-owned lineages."""
 
     manifest = session.get(GenerationInputManifest, context.manifest_id)
-    current: dict[str, set[str]] = {}
-    for lineage_id, theme_id in session.execute(
+    current: dict[str, dict[str, set[Any]]] = {}
+    theme_identity_by_string: dict[str, Any] = {}
+    for lineage_id, theme_id, assignment_id in session.execute(
         select(
             InterpretationSelection.source_lineage_id,
             ClaimAssignment.economic_theme_id,
+            ClaimAssignment.id,
         )
         .join(
             ClaimAssignment,
@@ -123,10 +129,51 @@ def build_default_compatibility_projections(
             == context.interpretation_set_id
         )
     ):
-        current.setdefault(str(lineage_id), set()).add(str(theme_id))
+        theme_key = str(theme_id)
+        theme_identity_by_string[theme_key] = theme_id
+        current.setdefault(str(lineage_id), {}).setdefault(theme_key, set()).add(
+            assignment_id
+        )
     for value in manifest.selections or []:
         if value.get("lineage"):
-            current.setdefault(str(value["lineage"]), set())
+            current.setdefault(str(value["lineage"]), {})
+
+    assignment_ids = {
+        assignment_id
+        for themes in current.values()
+        for ids in themes.values()
+        for assignment_id in ids
+    }
+    symbols_by_assignment: dict[Any, set[str]] = defaultdict(set)
+    if assignment_ids:
+        for assignment_id, symbol in session.execute(
+            select(
+                ThemeConstituentExposure.claim_assignment_id,
+                StockUniverse.symbol,
+            )
+            .join(
+                StockUniverse,
+                StockUniverse.id == ThemeConstituentExposure.security_id,
+            )
+            .where(ThemeConstituentExposure.claim_assignment_id.in_(assignment_ids))
+        ):
+            symbols_by_assignment[assignment_id].add(str(symbol))
+
+    theme_ids = set(theme_identity_by_string.values())
+    revisions = (
+        {
+            str(row.theme_id): row
+            for row in session.scalars(
+                select(EconomicThemeRevision).where(
+                    EconomicThemeRevision.taxonomy_version_id
+                    == context.taxonomy_version_id,
+                    EconomicThemeRevision.theme_id.in_(theme_ids),
+                )
+            )
+        }
+        if theme_ids
+        else {}
+    )
 
     projections: dict[tuple[str, str, str], CompatibilityProjection] = {}
     previous_theme_lineages: set[str] = set()
@@ -183,12 +230,37 @@ def build_default_compatibility_projections(
 
     for lineage in sorted(set(current) | previous_theme_lineages):
         key = (lineage, "legacy_theme", "legacy")
+        themes = current.get(lineage, {})
+        details = []
+        for theme_id, theme_assignment_ids in sorted(themes.items()):
+            revision = revisions.get(theme_id)
+            details.append(
+                {
+                    "economic_theme_id": theme_id,
+                    "display_name": (
+                        revision.display_name
+                        if revision is not None
+                        else f"Economic Theme {theme_id}"
+                    ),
+                    "definition": revision.definition if revision is not None else None,
+                    "lifecycle": (
+                        revision.lifecycle if revision is not None else "provisional"
+                    ),
+                    "constituents": sorted(
+                        {
+                            symbol
+                            for assignment_id in theme_assignment_ids
+                            for symbol in symbols_by_assignment.get(assignment_id, ())
+                        }
+                    ),
+                }
+            )
         projections[key] = CompatibilityProjection(
             source_lineage=lineage,
             projection_kind="legacy_theme",
             projection_version=1,
             target="legacy",
-            payload={"themes": sorted(current.get(lineage, set()))},
+            payload={"themes": sorted(themes), "theme_details": details},
             origin_representation="economic",
             selected_interpretation_version=str(context.interpretation_set_id),
             mapping_version=str(context.taxonomy_version_id),

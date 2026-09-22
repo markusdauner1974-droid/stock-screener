@@ -53,11 +53,15 @@ def test_eligibility_without_support_is_unavailable():
 def test_fundamental_attention_is_unsigned():
     family = uuid4()
     positive = EconomicThemeMetricsService.calculate(
-        _theme(observations=[_root("fundamental", family=family, direction="positive")]),
+        _theme(
+            observations=[_root("fundamental", family=family, direction="positive")]
+        ),
         as_of=NOW,
     )
     negative = EconomicThemeMetricsService.calculate(
-        _theme(observations=[_root("fundamental", family=family, direction="negative")]),
+        _theme(
+            observations=[_root("fundamental", family=family, direction="negative")]
+        ),
         as_of=NOW,
     )
 
@@ -209,6 +213,31 @@ def test_broad_confirmation_requires_two_channels_and_two_direct_families():
 
     assert technical_only.broad_confirmation.availability == "unavailable"
     assert broad.broad_confirmation.raw == pytest.approx(100.0)
+
+
+def test_broad_confirmation_counts_accepted_technical_signal_family():
+    signal_family = uuid4()
+    narrative_family = uuid4()
+    broad = EconomicThemeMetricsService.calculate_and_rank(
+        [
+            _theme(
+                observations=[_root("narrative", family=narrative_family)],
+                signals=[
+                    MetricSignal(
+                        source_family_id=signal_family,
+                        signal_kind="breakout",
+                        available_at=NOW,
+                    )
+                ],
+            )
+        ],
+        as_of=NOW,
+    )[0]
+
+    assert broad.broad_confirmation.availability == "available"
+    assert broad.broad_confirmation.components["direct_source_family_ids"] == sorted(
+        (str(narrative_family), str(signal_family))
+    )
 
 
 def test_calculate_metrics_persists_sealed_formula_and_eligibility_provenance(

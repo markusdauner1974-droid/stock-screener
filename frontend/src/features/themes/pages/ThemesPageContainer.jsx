@@ -92,7 +92,7 @@ function ThemesPage() {
   const [categoryFilter, setCategoryFilter] = useState(null);
   const [bootstrapSettledVariants, setBootstrapSettledVariants] = useState({});
   const [dismissingAlertId, setDismissingAlertId] = useState(null);
-  const [selectedEconomicTheme, setSelectedEconomicTheme] = useState(null);
+  const [selectedEconomicThemeId, setSelectedEconomicThemeId] = useState(null);
 
   const { runtimeReady, uiSnapshots, features = {} } = useRuntime();
   const { selectedMarket } = useMarket();
@@ -108,6 +108,9 @@ function ThemesPage() {
     staleTime: 60_000,
   });
   const economicCatalog = economicCatalogQuery.data;
+  const selectedEconomicTheme = (economicCatalog?.themes || []).find(
+    (theme) => theme.economic_theme_id === selectedEconomicThemeId,
+  ) || null;
   const economicMode = economicCatalog?.generation?.authority_mode === 'economic';
   const economicReviewQuery = useQuery({
     queryKey: ['economicTaxonomyReview', economicCatalog?.generation_id],
@@ -453,7 +456,7 @@ function ThemesPage() {
               <Card variant="outlined" sx={{ height: '100%' }}>
                 <CardActionArea
                   sx={{ height: '100%', alignItems: 'stretch' }}
-                  onClick={() => setSelectedEconomicTheme(theme)}
+                  onClick={() => setSelectedEconomicThemeId(theme.economic_theme_id)}
                 >
                   <CardContent>
                     <Stack direction="row" justifyContent="space-between" gap={1}>
@@ -492,7 +495,7 @@ function ThemesPage() {
           open={Boolean(selectedEconomicTheme)}
           theme={selectedEconomicTheme}
           generationId={economicCatalog.generation_id}
-          onClose={() => setSelectedEconomicTheme(null)}
+          onClose={() => setSelectedEconomicThemeId(null)}
         />
       </Container>
     );

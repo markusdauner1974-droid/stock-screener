@@ -157,9 +157,7 @@ class EconomicThemeMetricsService:
             fundamental_attention=fundamental,
             narrative_attention=narrative,
             emerging=emerging,
-            broad_confirmation=_unavailable(
-                reason="channel_percentiles_not_ranked"
-            ),
+            broad_confirmation=_unavailable(reason="channel_percentiles_not_ranked"),
             pinned_eligibility_revision_ids=tuple(
                 sorted(theme.pinned_eligibility_revision_ids)
             ),
@@ -322,8 +320,7 @@ class EconomicThemeMetricsService:
             row.theme_id
             for row in self.session.scalars(
                 select(EconomicThemeRevision).where(
-                    EconomicThemeRevision.taxonomy_version_id
-                    == taxonomy_version_id
+                    EconomicThemeRevision.taxonomy_version_id == taxonomy_version_id
                 )
             )
         }
@@ -431,6 +428,7 @@ class EconomicThemeMetricsService:
             )
             key = (signal.source_family_id, available_at.date())
             daily[key] = max(daily.get(key, 0.0), contribution)
+            direct_families.add(str(signal.source_family_id))
         if not daily:
             return _unavailable(reason="no_selected_support")
         return _available(
@@ -487,9 +485,7 @@ class EconomicThemeMetricsService:
         recent_lower = as_of - timedelta(days=7)
         prior_lower = as_of - timedelta(days=28)
         recent = [
-            root
-            for root in roots
-            if recent_lower <= _utc(root.available_at) <= as_of
+            root for root in roots if recent_lower <= _utc(root.available_at) <= as_of
         ]
         recent_families = {str(root.source_family_id) for root in recent}
         recent_dates = {_utc(root.available_at).date().isoformat() for root in recent}
@@ -588,8 +584,7 @@ class EconomicThemeMetricsService:
         }
         selections = self.session.scalars(
             select(InterpretationSelection).where(
-                InterpretationSelection.interpretation_set_id
-                == interpretation_set_id
+                InterpretationSelection.interpretation_set_id == interpretation_set_id
             )
         ).all()
         result: dict[UUID, set[str]] = defaultdict(set)
@@ -603,8 +598,7 @@ class EconomicThemeMetricsService:
                     == selection.source_lineage_id,
                     LensEligibilityRevision.evidence_packet_id
                     == selection.evidence_packet_id,
-                    LensEligibilityRevision.revision_number
-                    == int(revision_number),
+                    LensEligibilityRevision.revision_number == int(revision_number),
                 )
             )
             if eligibility is None:

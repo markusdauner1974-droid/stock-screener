@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
@@ -24,10 +25,14 @@ from app.models.economic_taxonomy_runtime import (
     InterpretationSelection,
     LensEligibilityRevision,
     TaxonomyAuthority,
+    ThemeConstituentExposure,
     ThemeObservation,
 )
 from app.models.stock_universe import StockUniverse
 from app.models.theme import ContentItem
+from app.services.economic_social_taxonomy_adapter import (
+    EconomicSocialTaxonomyAdapter,
+)
 from app.services.economic_source_admission import (
     EconomicSourceAdmissionService,
     EvidenceAdmission,
@@ -40,13 +45,14 @@ from app.services.economic_taxonomy_interpretations import (
 from app.services.economic_taxonomy_publication import (
     EconomicTaxonomyPublicationCoordinator,
 )
-from app.services.economic_social_taxonomy_adapter import (
-    EconomicSocialTaxonomyAdapter,
+from app.services.economic_taxonomy_publication_compatibility import (
+    build_default_compatibility_projections,
 )
+from app.services.economic_taxonomy_publication_contracts import PreparationContext
+from app.services.economic_taxonomy_seed import seed_initial_dimensions
 from app.services.economic_taxonomy_snapshot_builder import (
     _pinned_social_memberships,
 )
-from app.services.economic_taxonomy_seed import seed_initial_dimensions
 from app.services.theme_development_service import record_developments
 
 NOW = datetime(2026, 9, 21, 8, 0, tzinfo=timezone.utc)
@@ -427,10 +433,7 @@ def test_publication_cutoff_pins_all_current_social_association_revisions(
     )
     manifest = db_session.get(GenerationInputManifest, cutoff.manifest_id)
     pinned = manifest.selections[0]["social_association_revisions"]
-    assert {
-        (row["association_id"], row["revision_number"])
-        for row in pinned
-    } == {
+    assert {(row["association_id"], row["revision_number"]) for row in pinned} == {
         (str(revision.association_id), revision.revision_number)
         for revision in revisions
     }
@@ -440,9 +443,7 @@ def test_publication_cutoff_pins_all_current_social_association_revisions(
     ).build_interpretation_set(manifest.id)
     memberships = _pinned_social_memberships(db_session, interpretation.id)
 
-    assert {
-        row["security_id"] for row in memberships[theme.id]
-    } == {81, 82}
+    assert {row["security_id"] for row in memberships[theme.id]} == {81, 82}
 
     rejected = adapter.revise(
         associations[0].id,
@@ -465,9 +466,8 @@ def test_publication_cutoff_pins_all_current_social_association_revisions(
 
     assert next_pins[str(associations[0].id)] == rejected.revision_number
     assert {
-        row["state"] for row in _pinned_social_memberships(
-            db_session, interpretation.id
-        )[theme.id]
+        row["state"]
+        for row in _pinned_social_memberships(db_session, interpretation.id)[theme.id]
     } == {"accepted"}
 
 
@@ -592,9 +592,7 @@ def test_publication_cutoff_pins_multiple_developments_from_one_source(db_sessio
     assert {
         value["revision_number"] for value in selection["development_selections"]
     } == {1}
-    EconomicTaxonomyInterpretationService(factory).build_interpretation_set(
-        manifest.id
-    )
+    EconomicTaxonomyInterpretationService(factory).build_interpretation_set(manifest.id)
 
 
 def test_corrected_to_empty_removes_current_facts_but_preserves_old_set(db_session):
@@ -782,3 +780,63 @@ def test_same_manifest_is_idempotent(db_session):
             session.scalar(select(func.count()).select_from(InterpretationSelection))
             == 1
         )
+
+
+def test_compatibility_projection_carries_legacy_reader_metadata(db_session):
+    taxonomy, theme = _fixture(db_session)
+    packet = _admit(db_session)
+    attempt = _attempt(
+        db_session,
+        admitted=packet,
+        taxonomy_id=taxonomy.id,
+        theme_id=theme.id,
+    )
+    assignment = db_session.scalar(
+        select(ClaimAssignment).where(
+            ClaimAssignment.classification_attempt_id == attempt.id
+        )
+    )
+    security = StockUniverse(symbol="MU", name="Micron", market="US")
+    db_session.add(security)
+    db_session.flush()
+    db_session.add(
+        ThemeConstituentExposure(
+            claim_assignment_id=assignment.id,
+            security_id=security.id,
+            exposure_kind="direct",
+            exposure_strength=1.0,
+            derivation_policy_version="derive-v1",
+            payload={},
+        )
+    )
+    db_session.commit()
+    manifest = _manifest(db_session, _entry(db_session, packet, attempt.id))
+    interpretation = _service().build_interpretation_set(manifest.id)
+
+    projections = build_default_compatibility_projections(
+        db_session,
+        PreparationContext(
+            manifest_id=manifest.id,
+            taxonomy_version_id=taxonomy.id,
+            interpretation_set_id=interpretation.id,
+            metrics_revision_id=uuid4(),
+            reader_snapshot_bundle_id=uuid4(),
+            expected_parent_generation_id=None,
+            staged_epoch=1,
+            target_mode="economic",
+        ),
+    )
+
+    assert len(projections) == 1
+    assert projections[0].payload == {
+        "themes": [str(theme.id)],
+        "theme_details": [
+            {
+                "economic_theme_id": str(theme.id),
+                "display_name": "Memory",
+                "definition": "Memory semiconductor exposure.",
+                "lifecycle": "established",
+                "constituents": ["MU"],
+            }
+        ],
+    }

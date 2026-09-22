@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from app.infra.db.repositories.economic_taxonomy_repo import EconomicTaxonomyRepository
 from app.models.economic_taxonomy_runtime import (
@@ -18,6 +18,7 @@ from app.models.economic_taxonomy_runtime import (
     TaxonomyAuthority,
     TaxonomyProjectionEvent,
 )
+from app.models.theme import ThemeCluster, ThemeConstituent
 from app.services.economic_taxonomy_runtime import (
     EconomicTaxonomyRuntimeService,
     ProjectionPayloadConflict,
@@ -198,6 +199,126 @@ def test_empty_replacement_retracts_only_its_lineage(db_session):
     assert service.supporting_lineages(
         target="legacy", projection_kind="legacy_theme", theme="memory"
     ) == {"b"}
+
+
+def test_legacy_theme_delivery_materializes_and_retracts_legacy_reader_rows(
+    db_session,
+):
+    service = EconomicTaxonomyRuntimeService(db_session)
+    theme_id = uuid4()
+    first = service.stage_projection(
+        generation_id=None,
+        source_lineage="post:1",
+        projection_revision=1,
+        projection_kind="legacy_theme",
+        projection_version=1,
+        target="legacy",
+        payload={
+            "themes": [str(theme_id)],
+            "theme_details": [
+                {
+                    "economic_theme_id": str(theme_id),
+                    "display_name": "AI Memory",
+                    "definition": "Memory exposed to AI infrastructure demand.",
+                    "lifecycle": "established",
+                    "constituents": ["MU"],
+                }
+            ],
+        },
+        staged_epoch=10,
+        origin_representation="economic",
+        selected_interpretation_version="interpretation:1",
+        mapping_version="mapping:1",
+    )
+
+    service.apply_projection_event(first, authority_epoch=10, now=NOW)
+
+    cluster = db_session.scalar(
+        select(ThemeCluster).where(
+            ThemeCluster.pipeline == "technical",
+            ThemeCluster.canonical_key == f"economic_{theme_id.hex}",
+        )
+    )
+    assert cluster.display_name == "AI Memory"
+    assert cluster.lifecycle_state == "active"
+    assert cluster.is_active is True
+    constituent = db_session.scalar(
+        select(ThemeConstituent).where(
+            ThemeConstituent.theme_cluster_id == cluster.id,
+            ThemeConstituent.symbol == "MU",
+        )
+    )
+    assert constituent.is_active is True
+
+    second_source = service.stage_projection(
+        generation_id=None,
+        source_lineage="post:2",
+        projection_revision=1,
+        projection_kind="legacy_theme",
+        projection_version=1,
+        target="legacy",
+        payload={
+            "themes": [str(theme_id)],
+            "theme_details": [
+                {
+                    "economic_theme_id": str(theme_id),
+                    "display_name": "AI Memory",
+                    "definition": "Memory exposed to AI infrastructure demand.",
+                    "lifecycle": "established",
+                    "constituents": ["WDC"],
+                }
+            ],
+        },
+        staged_epoch=10,
+        origin_representation="economic",
+        selected_interpretation_version="interpretation:1",
+        mapping_version="mapping:1",
+    )
+    service.apply_projection_event(second_source, authority_epoch=10, now=NOW)
+
+    retraction = service.stage_projection(
+        generation_id=None,
+        source_lineage="post:1",
+        projection_revision=2,
+        projection_kind="legacy_theme",
+        projection_version=1,
+        target="legacy",
+        payload={"themes": [], "theme_details": []},
+        staged_epoch=10,
+        origin_representation="economic",
+        selected_interpretation_version="interpretation:2",
+        mapping_version="mapping:2",
+    )
+    service.apply_projection_event(retraction, authority_epoch=10, now=NOW)
+
+    assert cluster.is_active is True
+    assert constituent.is_active is False
+    assert (
+        db_session.scalar(
+            select(ThemeConstituent).where(
+                ThemeConstituent.theme_cluster_id == cluster.id,
+                ThemeConstituent.symbol == "WDC",
+            )
+        ).is_active
+        is True
+    )
+
+    final_retraction = service.stage_projection(
+        generation_id=None,
+        source_lineage="post:2",
+        projection_revision=2,
+        projection_kind="legacy_theme",
+        projection_version=1,
+        target="legacy",
+        payload={"themes": [], "theme_details": []},
+        staged_epoch=10,
+        origin_representation="economic",
+        selected_interpretation_version="interpretation:2",
+        mapping_version="mapping:2",
+    )
+    service.apply_projection_event(final_retraction, authority_epoch=10, now=NOW)
+
+    assert cluster.is_active is False
 
 
 def test_delivery_eligibility_comes_from_publication_history(db_session):

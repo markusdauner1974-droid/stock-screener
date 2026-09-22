@@ -26,6 +26,7 @@ from app.models.economic_taxonomy_runtime import (
     TaxonomyProjectionEvent,
     TaxonomySourceRevisionLog,
 )
+from app.models.theme import ThemeCluster, ThemeConstituent
 from app.services.economic_taxonomy_fence import producer_write
 from app.utils.file_hashing import canonical_json_sha256 as _payload_hash
 
@@ -301,8 +302,7 @@ class EconomicTaxonomyRuntimeService:
                     == terminal_attempt.id,
                 )
                 .where(
-                    terminal_attempt.projection_event_id
-                    == TaxonomyProjectionEvent.id,
+                    terminal_attempt.projection_event_id == TaxonomyProjectionEvent.id,
                     TaxonomyProjectionDeliveryEvent.outcome.in_(
                         ("success", "stale_noop", "terminal_failure")
                     ),
@@ -323,8 +323,7 @@ class EconomicTaxonomyRuntimeService:
             active_attempt_exists = (
                 select(active_attempt.id)
                 .where(
-                    active_attempt.projection_event_id
-                    == TaxonomyProjectionEvent.id,
+                    active_attempt.projection_event_id == TaxonomyProjectionEvent.id,
                     active_attempt.lease_expires_at > now,
                     ~active_attempt_outcome_exists,
                 )
@@ -483,6 +482,12 @@ class EconomicTaxonomyRuntimeService:
         if (
             applied
             and event.target_representation == "legacy"
+            and event.projection_kind == "legacy_theme"
+        ):
+            self._apply_legacy_theme_projection(now=now)
+        if (
+            applied
+            and event.target_representation == "legacy"
             and event.projection_kind == "social_membership"
         ):
             from app.infra.db.models.social_analysis import (
@@ -496,8 +501,7 @@ class EconomicTaxonomyRuntimeService:
                 select(EconomicSocialAssociationRevision)
                 .where(
                     EconomicSocialAssociationRevision.projection_event_id == event.id,
-                    EconomicSocialAssociationRevision.state
-                    == "pending_legacy_mirror",
+                    EconomicSocialAssociationRevision.state == "pending_legacy_mirror",
                 )
                 .order_by(EconomicSocialAssociationRevision.revision_number.desc())
                 .limit(1)
@@ -510,6 +514,162 @@ class EconomicTaxonomyRuntimeService:
                 authority_epoch=authority_epoch,
             )
         return applied
+
+    @staticmethod
+    def _legacy_theme_key(theme_id: str) -> str:
+        try:
+            return f"economic_{UUID(theme_id).hex}"
+        except (TypeError, ValueError, AttributeError):
+            return f"economic_{_payload_hash(str(theme_id))}"
+
+    def _apply_legacy_theme_projection(self, *, now: datetime) -> None:
+        """Materialize ordered checkpoints into the legacy reader tables."""
+
+        checkpoints = self.session.scalars(
+            select(ProjectionCheckpoint)
+            .where(
+                ProjectionCheckpoint.target_representation == "legacy",
+                ProjectionCheckpoint.projection_kind == "legacy_theme",
+            )
+            .order_by(
+                ProjectionCheckpoint.updated_at,
+                ProjectionCheckpoint.source_lineage,
+            )
+        ).all()
+        desired_theme_ids: set[str] = set()
+        details_by_theme: dict[str, dict[str, Any]] = {}
+        symbols_by_theme: dict[str, set[str]] = {}
+        for checkpoint in checkpoints:
+            payload = checkpoint.payload or {}
+            lineage_theme_ids = {str(value) for value in payload.get("themes", ())}
+            desired_theme_ids.update(lineage_theme_ids)
+            for detail in payload.get("theme_details", ()):
+                theme_id = str(detail.get("economic_theme_id") or "")
+                if not theme_id or theme_id not in lineage_theme_ids:
+                    continue
+                details_by_theme[theme_id] = dict(detail)
+                symbols_by_theme.setdefault(theme_id, set()).update(
+                    str(symbol).strip().upper()
+                    for symbol in detail.get("constituents", ())
+                    if str(symbol).strip()
+                )
+
+        desired_keys = {
+            self._legacy_theme_key(theme_id) for theme_id in desired_theme_ids
+        }
+        existing = (
+            {
+                row.canonical_key: row
+                for row in self.session.scalars(
+                    select(ThemeCluster).where(
+                        ThemeCluster.pipeline == "technical",
+                        ThemeCluster.canonical_key.in_(desired_keys),
+                    )
+                )
+            }
+            if desired_keys
+            else {}
+        )
+        lifecycle_states = {
+            "provisional": "candidate",
+            "established": "active",
+            "dormant": "dormant",
+            "reactivated": "reactivated",
+            "retired": "retired",
+        }
+        for theme_id in sorted(desired_theme_ids):
+            key = self._legacy_theme_key(theme_id)
+            detail = details_by_theme.get(theme_id, {})
+            display_name = str(
+                detail.get("display_name") or f"Economic Theme {theme_id}"
+            )
+            lifecycle = lifecycle_states.get(
+                str(detail.get("lifecycle") or "provisional"), "candidate"
+            )
+            cluster = existing.get(key)
+            if cluster is None:
+                cluster = ThemeCluster(
+                    name=display_name,
+                    display_name=display_name,
+                    canonical_key=key,
+                    pipeline="technical",
+                    aliases=[],
+                    description=detail.get("definition"),
+                    discovery_source="economic_taxonomy_mirror",
+                    first_seen_at=now,
+                    last_seen_at=now,
+                    lifecycle_state=lifecycle,
+                    lifecycle_state_updated_at=now,
+                    is_active=lifecycle != "retired",
+                    is_emerging=lifecycle == "candidate",
+                )
+                self.session.add(cluster)
+                self.session.flush()
+                existing[key] = cluster
+            else:
+                cluster.name = display_name
+                cluster.display_name = display_name
+                cluster.description = detail.get("definition")
+                cluster.last_seen_at = now
+                if cluster.lifecycle_state != lifecycle:
+                    cluster.lifecycle_state = lifecycle
+                    cluster.lifecycle_state_updated_at = now
+                cluster.is_active = lifecycle != "retired"
+                cluster.is_emerging = lifecycle == "candidate"
+
+            constituents = {
+                row.symbol: row
+                for row in self.session.scalars(
+                    select(ThemeConstituent).where(
+                        ThemeConstituent.theme_cluster_id == cluster.id
+                    )
+                )
+            }
+            desired_symbols = symbols_by_theme.get(theme_id, set())
+            for symbol in sorted(desired_symbols):
+                constituent = constituents.get(symbol)
+                if constituent is None:
+                    constituent = ThemeConstituent(
+                        theme_cluster_id=cluster.id,
+                        symbol=symbol,
+                        source="economic_taxonomy_mirror",
+                        confidence=1.0,
+                        mention_count=1,
+                        first_mentioned_at=now,
+                        last_mentioned_at=now,
+                        is_active=cluster.is_active,
+                    )
+                    self.session.add(constituent)
+                else:
+                    constituent.is_active = cluster.is_active
+                    constituent.last_mentioned_at = now
+            for symbol, constituent in constituents.items():
+                if (
+                    constituent.source == "economic_taxonomy_mirror"
+                    and symbol not in desired_symbols
+                ):
+                    constituent.is_active = False
+
+        for cluster in self.session.scalars(
+            select(ThemeCluster).where(
+                ThemeCluster.pipeline == "technical",
+                ThemeCluster.discovery_source.in_(
+                    ("economic_taxonomy_mirror", "economic_mirror")
+                ),
+            )
+        ):
+            if cluster.canonical_key in desired_keys:
+                continue
+            if cluster.discovery_source == "economic_taxonomy_mirror":
+                cluster.is_active = False
+            for constituent in self.session.scalars(
+                select(ThemeConstituent).where(
+                    ThemeConstituent.theme_cluster_id == cluster.id,
+                    ThemeConstituent.source == "economic_taxonomy_mirror",
+                )
+            ):
+                constituent.is_active = False
+        self.session.flush()
 
     def record_delivery_failure(
         self,
