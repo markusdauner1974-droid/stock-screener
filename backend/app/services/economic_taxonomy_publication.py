@@ -8,8 +8,6 @@ the fenced transactions.
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -53,6 +51,7 @@ from app.services.ui_snapshot_service import (
     GenerationSnapshotInputs,
     build_snapshot_bundle,
 )
+from app.utils.file_hashing import canonical_json_sha256 as _hash
 
 
 class PublicationError(RuntimeError):
@@ -85,14 +84,6 @@ class InjectedPublicationCrash(RuntimeError):
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _hash(value: Any) -> str:
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode(
-            "utf-8"
-        )
-    ).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1206,20 +1197,3 @@ class EconomicTaxonomyPublicationCoordinator:
     def _require_admin(principal: AdminPrincipal) -> None:
         if not principal.can_review_taxonomy:
             raise PublicationForbidden("taxonomy_publication_forbidden")
-
-
-__all__ = [
-    "BenchmarkRejected",
-    "CompatibilityNotAcknowledged",
-    "CompatibilityProjection",
-    "EconomicTaxonomyPublicationCoordinator",
-    "InjectedPublicationCrash",
-    "ManifestChanged",
-    "PreparationContext",
-    "PreparedGeneration",
-    "PublicationCutoff",
-    "PublicationError",
-    "PublicationForbidden",
-    "PublishedGeneration",
-    "ReaderCapabilityRejected",
-]

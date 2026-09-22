@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from hashlib import sha256
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -30,20 +28,11 @@ from app.models.economic_taxonomy_runtime import (
     TaxonomyAuthority,
 )
 from app.services.economic_taxonomy_fence import producer_write
+from app.utils.file_hashing import canonical_json_sha256 as _hash
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
-
-
-def _hash(value: Any) -> str:
-    encoded = json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    ).encode("utf-8")
-    return sha256(encoded).hexdigest()
 
 
 def _ordered(values) -> tuple[str, ...]:
@@ -505,12 +494,3 @@ class EconomicSourceAdmissionService:
             packet_hash=packet.packet_hash,
             evidence_content_fingerprint=packet.evidence_content_fingerprint,
         )
-
-
-__all__ = [
-    "AdmissionResult",
-    "EconomicSourceAdmissionService",
-    "EvidenceAdmission",
-    "LensEligibilityResult",
-    "decide_evidence_precedence",
-]

@@ -601,14 +601,3 @@ class EconomicThemeObservationService:
                     )
                 )
         return facts
-
-
-__all__ = [
-    "ConstituentFact",
-    "EconomicThemeObservationService",
-    "FactMaterializationError",
-    "MaterializationResult",
-    "ObservationFact",
-    "SignalFact",
-    "materialize_assignment_facts",
-]

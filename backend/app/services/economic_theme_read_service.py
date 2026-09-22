@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import json
 from copy import deepcopy
 from dataclasses import dataclass
-from hashlib import sha256
 from uuid import UUID
 
 from sqlalchemy import select, text
@@ -19,6 +17,7 @@ from app.models.economic_taxonomy_runtime import (
     ServingGenerationEvent,
     TaxonomyAuthority,
 )
+from app.utils.file_hashing import canonical_json_sha256 as _snapshot_hash
 
 
 class EconomicThemeReadError(ValueError):
@@ -485,27 +484,3 @@ class EconomicThemeReader:
             "source_name": "economic",
             "authority_epoch": authority.authority_epoch if is_current else None,
         }
-
-
-def _snapshot_hash(payload) -> str:
-    return sha256(
-        json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        ).encode("utf-8")
-    ).hexdigest()
-
-
-__all__ = [
-    "EconomicThemeReadError",
-    "EconomicThemeReader",
-    "GenerationNotFound",
-    "LegacyMappingAmbiguous",
-    "LegacyThemeAuthority",
-    "ReaderSnapshotCoherenceError",
-    "ReaderSnapshotUnavailable",
-    "ServingGenerationUnavailable",
-    "ThemeReadAuthority",
-]

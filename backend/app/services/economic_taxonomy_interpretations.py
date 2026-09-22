@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-from hashlib import sha256
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -36,18 +34,11 @@ from app.models.economic_taxonomy_runtime import (
     SourceLineage,
 )
 from app.services.economic_theme_observation_service import materialize_assignment_facts
+from app.utils.file_hashing import canonical_json_sha256 as _hash
 
 
 class InvalidInterpretation(ValueError):
     pass
-
-
-def _hash(payload) -> str:
-    return sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode(
-            "utf-8"
-        )
-    ).hexdigest()
 
 
 def create_interpretation_override(
@@ -535,11 +526,3 @@ def build_interpretation_set(
     return EconomicTaxonomyInterpretationService(
         session_factory
     ).build_interpretation_set(manifest_id, actor=actor)
-
-
-__all__ = [
-    "EconomicTaxonomyInterpretationService",
-    "InvalidInterpretation",
-    "build_interpretation_set",
-    "create_interpretation_override",
-]

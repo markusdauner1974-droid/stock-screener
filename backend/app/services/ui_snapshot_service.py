@@ -8,7 +8,6 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from hashlib import sha256
 from threading import Lock
 from typing import Any
 from uuid import UUID
@@ -124,6 +123,7 @@ from app.use_cases.scanning.get_scan_results import (
     GetScanResultsQuery,
     GetScanResultsUseCase,
 )
+from app.utils.file_hashing import canonical_json_sha256 as _snapshot_hash
 from app.wiring.bootstrap import get_stock_universe_service
 
 logger = logging.getLogger(__name__)
@@ -181,17 +181,6 @@ _ECONOMIC_RANKING_VIEWS = (
     "emerging",
     "broad_confirmation",
 )
-
-
-def _snapshot_hash(payload: Any) -> str:
-    return sha256(
-        json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        ).encode("utf-8")
-    ).hexdigest()
 
 
 def build_snapshot_bundle(

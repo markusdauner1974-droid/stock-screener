@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -34,6 +32,7 @@ from app.models.economic_taxonomy_runtime import (
     TaxonomyOperationRequest,
 )
 from app.services.economic_taxonomy_fence import producer_write
+from app.utils.file_hashing import canonical_json_sha256 as _hash
 
 
 class TaxonomyOperationError(ValueError):
@@ -96,13 +95,6 @@ def _clean_payload(value: Any) -> Any:
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     return value
-
-
-def _hash(payload: Any) -> str:
-    encoded = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), default=str
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _required_text(value: Any, name: str) -> str:
@@ -625,14 +617,3 @@ class EconomicTaxonomyOperationService:
             unallocated_claim_ids=(),
             validation_errors=tuple(preview.validation_errors),
         )
-
-
-__all__ = [
-    "EconomicTaxonomyOperationService",
-    "OperationApplyResult",
-    "OperationPreviewChanged",
-    "OperationPreviewInvalid",
-    "OperationPreviewResult",
-    "TaxonomyOperationError",
-    "TaxonomyReviewForbidden",
-]

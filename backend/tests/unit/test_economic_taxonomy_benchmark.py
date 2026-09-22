@@ -4,8 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
-
-from app.services.economic_taxonomy_migration import (
+from app.services.economic_taxonomy_benchmark import (
     BenchmarkFailure,
     evaluate_benchmark,
 )

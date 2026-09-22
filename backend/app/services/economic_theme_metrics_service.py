@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -28,6 +26,7 @@ from app.models.economic_taxonomy_runtime import (
 from app.services.economic_theme_observation_service import (
     EconomicThemeObservationService,
 )
+from app.utils.file_hashing import canonical_json_sha256 as _hash
 
 FORMULA_VERSION = "economic-theme-metrics-v1"
 _CHANNELS = ("technical", "fundamental", "narrative")
@@ -95,13 +94,6 @@ def _utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
-
-
-def _hash(payload: Any) -> str:
-    encoded = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), default=str
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _unavailable(**components: Any) -> MetricValue:
@@ -634,15 +626,3 @@ class EconomicThemeMetricsService:
             for theme_id in theme_ids:
                 result[theme_id].add(token)
         return result
-
-
-__all__ = [
-    "FORMULA_VERSION",
-    "EconomicThemeMetricsService",
-    "MetricObservation",
-    "MetricSignal",
-    "MetricValue",
-    "MetricsCalculationError",
-    "ThemeMetricInput",
-    "ThemeMetricsCalculation",
-]

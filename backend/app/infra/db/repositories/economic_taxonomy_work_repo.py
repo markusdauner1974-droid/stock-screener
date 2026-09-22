@@ -423,6 +423,3 @@ class EconomicTaxonomyWorkRepository:
         )
         self.session.add(event)
         return event
-
-
-__all__ = ["EconomicTaxonomyWorkRepository", "WorkLeaseError"]

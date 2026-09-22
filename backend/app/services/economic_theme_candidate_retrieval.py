@@ -198,29 +198,3 @@ def retrieve_candidates(
         )
         for theme_id, (score, reasons) in ordered
     ]
-
-
-class EconomicThemeCandidateRetriever:
-    def retrieve_candidates(
-        self,
-        session: Session,
-        *,
-        taxonomy_version_id: UUID,
-        proposed: Mapping,
-        limit: int = 20,
-        proposed_embedding: Sequence[float] | None = None,
-    ) -> list[RetrievedThemeCandidate]:
-        return retrieve_candidates(
-            session,
-            taxonomy_version_id=taxonomy_version_id,
-            proposed=proposed,
-            limit=limit,
-            proposed_embedding=proposed_embedding,
-        )
-
-
-__all__ = [
-    "EconomicThemeCandidateRetriever",
-    "RetrievedThemeCandidate",
-    "retrieve_candidates",
-]

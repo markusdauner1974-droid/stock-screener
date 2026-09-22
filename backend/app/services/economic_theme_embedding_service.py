@@ -125,35 +125,3 @@ def get_or_recompute_embedding(
             return row
     except IntegrityError:
         return session.execute(select(EconomicThemeEmbedding).where(*key)).scalar_one()
-
-
-class EconomicThemeEmbeddingService:
-    def __init__(
-        self,
-        *,
-        embedding_model: str,
-        model_version: str,
-        provider: EmbeddingProvider,
-    ):
-        self.embedding_model = embedding_model
-        self.model_version = model_version
-        self.provider = provider
-
-    def get_or_recompute_embedding(
-        self, session: Session, taxonomy_version_id: UUID, theme_id: UUID
-    ) -> EconomicThemeEmbedding | None:
-        return get_or_recompute_embedding(
-            session,
-            taxonomy_version_id=taxonomy_version_id,
-            theme_id=theme_id,
-            embedding_model=self.embedding_model,
-            model_version=self.model_version,
-            provider=self.provider,
-        )
-
-
-__all__ = [
-    "EconomicThemeEmbeddingService",
-    "EmbeddingProvider",
-    "get_or_recompute_embedding",
-]

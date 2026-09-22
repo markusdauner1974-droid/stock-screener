@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -29,6 +27,7 @@ from app.models.economic_taxonomy_runtime import (
     TaxonomySourceRevisionLog,
 )
 from app.services.economic_taxonomy_fence import producer_write
+from app.utils.file_hashing import canonical_json_sha256 as _payload_hash
 
 
 class ProjectionRuntimeError(ValueError):
@@ -73,13 +72,6 @@ def _utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
-
-
-def _payload_hash(payload: Mapping[str, Any]) -> str:
-    encoded = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), default=str
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 class _LegacyWrite:
@@ -630,14 +622,3 @@ class EconomicTaxonomyRuntimeService:
     def notify_delivery_workers(notify: Callable[[], Any] | None = None) -> None:
         if notify is not None:
             notify()
-
-
-__all__ = [
-    "DeliveryLeaseError",
-    "EconomicTaxonomyRuntimeService",
-    "ProjectionDeliveryClaim",
-    "ProjectionDeliveryResult",
-    "ProjectionPayloadConflict",
-    "ProjectionRevisionError",
-    "ProjectionRuntimeError",
-]

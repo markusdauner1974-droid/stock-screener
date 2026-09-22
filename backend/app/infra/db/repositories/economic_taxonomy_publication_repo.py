@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from hashlib import sha256
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -24,6 +23,7 @@ from app.models.economic_taxonomy_runtime import (
     TaxonomyAuthority,
     TaxonomySourceRevisionLog,
 )
+from app.utils.file_hashing import canonical_json_sha256 as _hash_payload
 
 
 class PublicationInvariantError(ValueError):
@@ -34,13 +34,6 @@ class PublicationInvariantError(ValueError):
 class ManifestValidation:
     valid: bool
     error: str | None = None
-
-
-def _hash_payload(payload) -> str:
-    encoded = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), default=str
-    ).encode("utf-8")
-    return sha256(encoded).hexdigest()
 
 
 class EconomicTaxonomyPublicationRepository:

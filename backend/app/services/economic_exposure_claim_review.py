@@ -455,6 +455,3 @@ class EconomicExposureClaimReviewer:
         if row is not None:
             session.expunge(row)
         return row
-
-
-__all__ = ["ClaimReviewSchemaError", "EconomicExposureClaimReviewer"]

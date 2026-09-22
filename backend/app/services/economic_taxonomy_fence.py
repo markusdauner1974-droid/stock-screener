@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from threading import Condition
+from threading import RLock
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -42,37 +42,7 @@ class AuthorityWritesFenced(TaxonomyWriteRejected):
     code = "authority_writes_fenced"
 
 
-class _ProcessReadWriteLock:
-    def __init__(self):
-        self._condition = Condition()
-        self._readers = 0
-        self._writer = False
-
-    def acquire_shared(self):
-        with self._condition:
-            while self._writer:
-                self._condition.wait()
-            self._readers += 1
-
-    def release_shared(self):
-        with self._condition:
-            self._readers -= 1
-            if self._readers == 0:
-                self._condition.notify_all()
-
-    def acquire_exclusive(self):
-        with self._condition:
-            while self._writer or self._readers:
-                self._condition.wait()
-            self._writer = True
-
-    def release_exclusive(self):
-        with self._condition:
-            self._writer = False
-            self._condition.notify_all()
-
-
-_SQLITE_FENCE = _ProcessReadWriteLock()
+_SQLITE_FENCE = RLock()
 
 
 def _mode_value(mode: AuthorityMode | str) -> str:
@@ -111,7 +81,7 @@ def producer_write(
             {"key": ECONOMIC_TAXONOMY_FENCE_KEY},
         )
     else:
-        _SQLITE_FENCE.acquire_shared()
+        _SQLITE_FENCE.acquire()
         sqlite_acquired = True
     try:
         authority = EconomicTaxonomyPublicationRepository(session).lock_authority()
@@ -123,7 +93,7 @@ def producer_write(
         yield authority
     finally:
         if sqlite_acquired:
-            _SQLITE_FENCE.release_shared()
+            _SQLITE_FENCE.release()
 
 
 @contextmanager
@@ -138,11 +108,10 @@ def exclusive_publication(session: Session) -> Iterator[TaxonomyAuthority]:
             {"key": ECONOMIC_TAXONOMY_FENCE_KEY},
         )
     else:
-        _SQLITE_FENCE.acquire_exclusive()
+        _SQLITE_FENCE.acquire()
         sqlite_acquired = True
     try:
         yield EconomicTaxonomyPublicationRepository(session).lock_authority()
     finally:
         if sqlite_acquired:
-            _SQLITE_FENCE.release_exclusive()
-
+            _SQLITE_FENCE.release()

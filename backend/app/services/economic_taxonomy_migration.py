@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -37,11 +35,8 @@ from app.models.theme_intelligence import (
     ThemeDevelopmentObservation,
     ThemeDevelopmentTheme,
 )
-from app.services.economic_taxonomy_benchmark import (
-    BenchmarkFailure,
-    evaluate_benchmark,
-)
 from app.services.economic_taxonomy_fence import producer_write
+from app.utils.file_hashing import canonical_json_sha256 as _hash
 
 
 class EconomicTaxonomyMigrationError(ValueError):
@@ -70,15 +65,6 @@ _DISPOSITIONS = {
     "not_a_theme",
     "deferred",
 }
-def _hash(value: Any) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            value,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        ).encode("utf-8")
-    ).hexdigest()
 
 
 def _required_text(value: Any, name: str) -> str:
@@ -953,14 +939,3 @@ class EconomicTaxonomyMigrationService:
     @staticmethod
     def _raise(message):
         raise MigrationInputError(message)
-
-
-__all__ = [
-    "BenchmarkFailure",
-    "EconomicTaxonomyMigrationError",
-    "EconomicTaxonomyMigrationService",
-    "MigrationInputError",
-    "MigrationReviewForbidden",
-    "ReplayManifest",
-    "evaluate_benchmark",
-]

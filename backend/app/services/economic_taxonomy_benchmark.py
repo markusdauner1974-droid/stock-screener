@@ -116,6 +116,3 @@ def evaluate_benchmark(
     if fail_closed and not report["passed"]:
         raise BenchmarkFailure(report)
     return report
-
-
-__all__ = ["BenchmarkFailure", "evaluate_benchmark"]
