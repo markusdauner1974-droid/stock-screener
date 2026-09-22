@@ -25,6 +25,7 @@ from app.models.economic_taxonomy_runtime import (
     ExtractionArtifact,
     ProcessingRequest,
 )
+from app.services.theme_identity_normalization import social_membership_key
 
 
 class EvidenceSchemaError(ValueError):
@@ -399,7 +400,11 @@ class EconomicExposureExtractor:
             if value
         )
         normalized = [
-            self._normalize_candidate(candidate, evidence_text=evidence_text)
+            self._normalize_candidate(
+                candidate,
+                evidence=evidence,
+                evidence_text=evidence_text,
+            )
             for candidate in candidates
         ]
         has_review = status == "review_required" or any(
@@ -415,7 +420,11 @@ class EconomicExposureExtractor:
         }
 
     def _normalize_candidate(
-        self, candidate: Any, *, evidence_text: str
+        self,
+        candidate: Any,
+        *,
+        evidence: Mapping[str, Any],
+        evidence_text: str,
     ) -> dict[str, Any]:
         if not isinstance(candidate, Mapping):
             raise EvidenceSchemaError("candidate_must_be_object")
@@ -466,6 +475,30 @@ class EconomicExposureExtractor:
             ExposureSupport.UNRESOLVED.value,
         }:
             reasons.append("exposure_support_review_required")
+        source_memberships = (
+            (evidence.get("source_metadata") or {}).get("social_memberships") or []
+        )
+        if not isinstance(source_memberships, list):
+            raise EvidenceSchemaError("social_memberships_must_be_list")
+        raw_membership_keys = candidate.get("source_membership_keys") or []
+        if not isinstance(raw_membership_keys, list):
+            raise EvidenceSchemaError("source_membership_keys_must_be_list")
+        source_membership_keys = sorted(
+            {str(value).strip() for value in raw_membership_keys if str(value).strip()}
+        )
+        known_membership_keys = {
+            str(row.get("membership_key") or social_membership_key(
+                str(row.get("theme_key") or ""), row.get("security_id")
+            ))
+            for row in source_memberships
+            if isinstance(row, Mapping)
+            and isinstance(row.get("security_id"), int)
+            and not isinstance(row.get("security_id"), bool)
+        }
+        if source_memberships and not source_membership_keys:
+            reasons.append("social_membership_link_required")
+        elif set(source_membership_keys) - known_membership_keys:
+            reasons.append("unknown_social_membership_link")
         return {
             "candidate_key": key,
             "display_name": display_name,
@@ -479,6 +512,7 @@ class EconomicExposureExtractor:
                 candidate.get("candidate_kind") or "economic_exposure"
             ),
             "securities": jsonable(candidate.get("securities") or []),
+            "source_membership_keys": source_membership_keys,
             "unknown_dimensions": unknown,
             "review_reasons": reasons,
         }

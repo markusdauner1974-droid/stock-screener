@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from app.database import SessionLocal
@@ -33,6 +33,7 @@ from app.models.economic_taxonomy_runtime import (
 )
 from app.models.stock_universe import StockUniverse
 from app.models.theme import ContentItem
+from app.services.economic_social_taxonomy_adapter import EconomicSocialTaxonomyAdapter
 from app.services.economic_source_admission import (
     EconomicSourceAdmissionService,
     EvidenceAdmission,
@@ -423,7 +424,9 @@ def test_successful_empty_completes_without_assignment_or_head_change(db_session
     assert result.output_taxonomy_version_id is None
 
 
-def test_economic_mode_social_assignment_creates_global_membership(db_session):
+def test_economic_mode_social_assignment_preserves_source_identity_and_recaptures(
+    db_session,
+):
     _seed_head(db_session, with_memory=True)
     authority = db_session.get(TaxonomyAuthority, 1)
     authority.mode = "economic"
@@ -462,7 +465,8 @@ def test_economic_mode_social_assignment_creates_global_membership(db_session):
                 "social_work_id": work.id,
                 "social_memberships": [
                     {
-                        "theme_key": "memory",
+                        "membership_key": f"hbm_memory:{security.id}",
+                        "theme_key": "hbm_memory",
                         "security_id": security.id,
                         "state": "accepted",
                     }
@@ -481,8 +485,9 @@ def test_economic_mode_social_assignment_creates_global_membership(db_session):
         worker_id="worker:economic-social", now=NOW
     )
     db_session.commit()
-    candidate = _candidate("Memory", {"industry": "Memory"})
+    candidate = _candidate("High Bandwidth Memory", {"industry": "Memory"})
     candidate["securities"] = [{"security_id": security.id, "symbol": "MU"}]
+    candidate["source_membership_keys"] = [f"hbm_memory:{security.id}"]
     _reviewed(db_session, request, candidate)
     lease_token = request.lease_token
 
@@ -508,3 +513,48 @@ def test_economic_mode_social_assignment_creates_global_membership(db_session):
             .select_from(TaxonomySourceRevisionLog)
             .where(TaxonomySourceRevisionLog.producer_kind == "economic_social")
         ) == 1
+
+    with SessionLocal.begin() as session:
+        recaptured = EconomicSourceAdmissionService(session).admit_social_work(
+            EvidenceAdmission(
+                provider="x",
+                canonical_item_id="economic-social-post",
+                capture_route="social",
+                original_text="Memory pricing rose.",
+                preparation_version="social-prep-v1",
+                captured_at=NOW + timedelta(hours=1),
+                available_at=NOW + timedelta(hours=1),
+                evidence_channels=("narrative",),
+                source_metadata={
+                    "social_work_id": work.id,
+                    "social_memberships": [
+                        {
+                            "membership_key": f"hbm_memory:{security.id}",
+                            "theme_key": "hbm_memory",
+                            "security_id": security.id,
+                            "state": "rejected",
+                        }
+                    ],
+                },
+            )
+        )
+        assert recaptured.precedence_state == "equivalent"
+        authority = session.get(TaxonomyAuthority, 1)
+        revisions = EconomicSocialTaxonomyAdapter(
+            session
+        ).project_equivalent_social_packet(
+            evidence_packet_id=recaptured.packet_id,
+            effective_packet_id=recaptured.effective_packet_id,
+            authority_epoch=authority.authority_epoch,
+        )
+        assert len(revisions) == 1
+
+    with SessionLocal() as session:
+        latest = session.scalar(
+            select(EconomicSocialAssociationRevision)
+            .order_by(EconomicSocialAssociationRevision.revision_number.desc())
+            .limit(1)
+        )
+        assert latest.state == "rejected"
+        assert latest.evidence_packet_id == recaptured.packet_id
+        assert session.scalar(select(func.count()).select_from(ClassificationAttempt)) == 1

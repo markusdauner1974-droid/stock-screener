@@ -106,7 +106,7 @@ def _payload(*candidates, status="accepted_candidates"):
     }
 
 
-def _request(db_session, *, text="Memory pricing rose."):
+def _request(db_session, *, text="Memory pricing rose.", source_metadata=None):
     db_session.add(
         TaxonomyAuthority(
             id=1,
@@ -128,6 +128,7 @@ def _request(db_session, *, text="Memory pricing rose."):
             captured_at=NOW,
             available_at=NOW,
             evidence_channels=("narrative",),
+            source_metadata=source_metadata or {},
         )
     )
     request = EconomicTaxonomyWorkRepository(db_session).enqueue_request(
@@ -138,6 +139,55 @@ def _request(db_session, *, text="Memory pricing rose."):
     )
     db_session.commit()
     return request
+
+
+def test_social_candidate_preserves_explicit_source_membership_link(db_session):
+    request = _request(
+        db_session,
+        source_metadata={
+            "social_memberships": [
+                {
+                    "membership_key": "hbm_memory:42",
+                    "theme_key": "hbm_memory",
+                    "security_id": 42,
+                    "state": "accepted",
+                }
+            ]
+        },
+    )
+    candidate = _candidate("High Bandwidth Memory")
+    candidate["source_membership_keys"] = ["hbm_memory:42"]
+
+    result = _extractor(FakeProvider(_payload(candidate))).extract(request)
+
+    assert result.result_payload["candidates"][0]["source_membership_keys"] == [
+        "hbm_memory:42"
+    ]
+
+
+def test_social_candidate_without_source_membership_link_requires_review(db_session):
+    request = _request(
+        db_session,
+        source_metadata={
+            "social_memberships": [
+                {
+                    "membership_key": "hbm_memory:42",
+                    "theme_key": "hbm_memory",
+                    "security_id": 42,
+                    "state": "accepted",
+                }
+            ]
+        },
+    )
+
+    result = _extractor(
+        FakeProvider(_payload(_candidate("High Bandwidth Memory")))
+    ).extract(request)
+
+    assert result.result_status == "review_required"
+    assert "social_membership_link_required" in result.result_payload["candidates"][
+        0
+    ]["review_reasons"]
 
 
 def _extractor(provider, reservations=None):

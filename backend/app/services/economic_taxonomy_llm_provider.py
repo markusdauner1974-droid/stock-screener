@@ -38,7 +38,9 @@ _EXTRACTION_SYSTEM = """You extract investable economic themes from supplied evi
 Return one JSON object only. Use status successful_empty with candidates [] when no
 economic exposure is supported. Otherwise use status accepted_candidates and candidates
 with: candidate_key, display_name, raw_facets, mechanism, evidence_spans,
-relationship_evidence, exposure_support, development_support, candidate_kind, securities.
+relationship_evidence, exposure_support, development_support, candidate_kind, securities,
+and source_membership_keys. For Social evidence, copy the relevant membership_key values
+from source_metadata.social_memberships into each candidate's source_membership_keys.
 Evidence spans must be verbatim substrings. Do not invent securities or facts."""
 
 _REVIEW_SYSTEM = """You review extracted economic-theme candidates against their evidence.

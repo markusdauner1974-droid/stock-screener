@@ -48,6 +48,7 @@ from app.services.theme_identity_normalization import (
     UNKNOWN_THEME_KEY,
     canonical_theme_key,
     display_theme_name,
+    social_membership_key,
 )
 from app.services.theme_lifecycle_service import (
     apply_lifecycle_transition,
@@ -338,6 +339,9 @@ class SocialThemeProjectionService:
                         state = "rejected"
                 social_memberships.append(
                     {
+                        "membership_key": social_membership_key(
+                            theme_key, int(resolution.security_id)
+                        ),
                         "theme_key": theme_key,
                         "security_id": int(resolution.security_id),
                         "state": state,
@@ -403,6 +407,18 @@ class SocialThemeProjectionService:
                 and admission.precedence_state != "equivalent"
             ):
                 raise ValueError("social_evidence_live_admission_required")
+            authority = self.db.get(TaxonomyAuthority, 1)
+            if (
+                admission.precedence_state == "equivalent"
+                and admission.effective_packet_id is not None
+                and authority is not None
+                and authority.mode == "economic"
+            ):
+                adapter.project_equivalent_social_packet(
+                    evidence_packet_id=admission.packet_id,
+                    effective_packet_id=admission.effective_packet_id,
+                    authority_epoch=authority.authority_epoch,
+                )
 
     def apply_live(
         self,

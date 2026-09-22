@@ -25,7 +25,10 @@ from app.infra.db.repositories.economic_taxonomy_publication_repo import (
     EconomicTaxonomyPublicationRepository,
 )
 from app.models.economic_taxonomy_runtime import (
+    ClaimAssignment,
+    ClassificationAttempt,
     EvidencePacket,
+    ProcessingRequest,
     SocialAssociationRevisionRef,
     TaxonomyAuthority,
 )
@@ -38,7 +41,10 @@ from app.services.economic_source_admission import (
 )
 from app.services.economic_taxonomy_fence import producer_write
 from app.services.economic_taxonomy_runtime import EconomicTaxonomyRuntimeService
-from app.services.theme_identity_normalization import canonical_theme_key
+from app.services.theme_identity_normalization import (
+    canonical_theme_key,
+    social_membership_key,
+)
 from app.utils.file_hashing import canonical_json_sha256 as _semantic_hash
 
 
@@ -70,6 +76,7 @@ class SocialEvidenceAdmissionResult:
     source_family_id: UUID
     source_lineage_id: UUID
     packet_id: UUID
+    effective_packet_id: UUID | None
     evidence_revision_ordinal: int
     precedence_state: str
     admission_state: str
@@ -331,7 +338,12 @@ class EconomicSocialTaxonomyAdapter:
         evidence_packet_id: UUID | None,
         authority_epoch: int,
     ) -> EconomicSocialAssociationRevision:
-        if state not in {"proposed", "accepted", "rejected"}:
+        if state not in {
+            "proposed",
+            "accepted",
+            "rejected",
+            "conflict_review_required",
+        }:
             raise ValueError("invalid_economic_social_decision")
         existing_decision = self.db.scalar(
             select(EconomicSocialDecisionRevision).where(
@@ -428,29 +440,46 @@ class EconomicSocialTaxonomyAdapter:
         *,
         evidence_packet_id: UUID,
         authority_epoch: int,
+        social_evidence_packet_id: UUID | None = None,
     ) -> tuple[EconomicSocialAssociationRevision, ...]:
         """Project classified Social claims while the processor fence is held."""
 
         packet = self.db.get(EvidencePacket, evidence_packet_id)
         if packet is None:
             raise KeyError(f"evidence packet {evidence_packet_id} not found")
-        social_packets = [
-            row
-            for row in self.db.scalars(
-                select(EvidencePacket)
-                .where(EvidencePacket.source_lineage_id == packet.source_lineage_id)
-                .order_by(
-                    EvidencePacket.evidence_revision_ordinal.desc(),
-                    EvidencePacket.id,
-                )
-            ).all()
-            if isinstance(row.source_metadata, dict)
-            and row.source_metadata.get("social_work_id") is not None
-            and row.precedence_state in {"effective", "equivalent"}
-        ]
+        social_packets = []
+        if social_evidence_packet_id is not None:
+            social_packet = self.db.get(EvidencePacket, social_evidence_packet_id)
+            if (
+                social_packet is None
+                or social_packet.source_lineage_id != packet.source_lineage_id
+            ):
+                raise ValueError("social_evidence_packet_lineage_mismatch")
+            social_packets = [social_packet]
+        else:
+            social_packets = [
+                row
+                for row in self.db.scalars(
+                    select(EvidencePacket)
+                    .where(EvidencePacket.source_lineage_id == packet.source_lineage_id)
+                    .order_by(
+                        EvidencePacket.evidence_revision_ordinal.desc(),
+                        EvidencePacket.id,
+                    )
+                ).all()
+                if isinstance(row.source_metadata, dict)
+                and row.source_metadata.get("social_work_id") is not None
+                and row.precedence_state in {"effective", "equivalent"}
+            ]
         if not social_packets:
             return ()
         social_packet = social_packets[0]
+        if (
+            not isinstance(social_packet.source_metadata, dict)
+            or social_packet.source_metadata.get("social_work_id") is None
+            or social_packet.precedence_state not in {"effective", "equivalent"}
+        ):
+            return ()
         metadata = dict(social_packet.source_metadata or {})
         if metadata.get("social_admission_state", "live") != "live":
             return ()
@@ -463,6 +492,18 @@ class EconomicSocialTaxonomyAdapter:
             )
             for row in metadata.get("social_memberships") or ()
             if isinstance(row, dict)
+        }
+        membership_by_key = {
+            str(
+                row.get("membership_key")
+                or social_membership_key(
+                    str(row.get("theme_key") or ""), row.get("security_id")
+                )
+            ): row
+            for row in metadata.get("social_memberships") or ()
+            if isinstance(row, dict)
+            and isinstance(row.get("security_id"), int)
+            and not isinstance(row.get("security_id"), bool)
         }
         revisions = []
         for assignment in assignments:
@@ -502,10 +543,25 @@ class EconomicSocialTaxonomyAdapter:
                         )
                     )
                     self.db.flush()
-                requested_state = state_by_pair.get(
-                    (theme_key, security_id), "proposed"
+                linked_states = [
+                    str(membership_by_key[key].get("state") or "proposed")
+                    for key in assignment.claim_payload.get(
+                        "source_membership_keys"
+                    ) or ()
+                    if key in membership_by_key
+                    and membership_by_key[key].get("security_id") == security_id
+                ]
+                requested_state = (
+                    reconcile_social_decisions(linked_states).state
+                    if linked_states
+                    else state_by_pair.get((theme_key, security_id), "proposed")
                 )
-                if requested_state not in {"proposed", "accepted", "rejected"}:
+                if requested_state not in {
+                    "proposed",
+                    "accepted",
+                    "rejected",
+                    "conflict_review_required",
+                }:
                     requested_state = "proposed"
                 current = self.db.scalar(
                     select(EconomicSocialAssociationRevision)
@@ -549,6 +605,55 @@ class EconomicSocialTaxonomyAdapter:
                     )
                 )
         return tuple(revisions)
+
+    def project_equivalent_social_packet(
+        self,
+        *,
+        evidence_packet_id: UUID,
+        effective_packet_id: UUID,
+        authority_epoch: int,
+    ) -> tuple[EconomicSocialAssociationRevision, ...]:
+        """Reuse completed classification while applying new Social decisions."""
+
+        packet = self.db.get(EvidencePacket, evidence_packet_id)
+        effective = self.db.get(EvidencePacket, effective_packet_id)
+        if (
+            packet is None
+            or effective is None
+            or packet.source_lineage_id != effective.source_lineage_id
+            or packet.precedence_state != "equivalent"
+        ):
+            raise ValueError("equivalent_social_packet_mismatch")
+        attempt_id = self.db.scalar(
+            select(ClassificationAttempt.id)
+            .join(
+                ProcessingRequest,
+                ProcessingRequest.id == ClassificationAttempt.processing_request_id,
+            )
+            .where(
+                ProcessingRequest.evidence_packet_id == effective.id,
+                ProcessingRequest.status == "completed",
+                ClassificationAttempt.result_status == "completed",
+            )
+            .order_by(
+                ClassificationAttempt.created_at.desc(),
+                ClassificationAttempt.id.desc(),
+            )
+            .limit(1)
+        )
+        if attempt_id is None:
+            return ()
+        assignments = self.db.scalars(
+            select(ClaimAssignment)
+            .where(ClaimAssignment.classification_attempt_id == attempt_id)
+            .order_by(ClaimAssignment.created_at, ClaimAssignment.id)
+        ).all()
+        return self.project_native_assignments(
+            assignments,
+            evidence_packet_id=effective.id,
+            social_evidence_packet_id=packet.id,
+            authority_epoch=authority_epoch,
+        )
 
     def apply_legacy_mirror(
         self,
@@ -802,6 +907,7 @@ class EconomicSocialTaxonomyAdapter:
             source_family_id=admitted.source_family_id,
             source_lineage_id=admitted.source_lineage_id,
             packet_id=admitted.packet_id,
+            effective_packet_id=admitted.effective_packet_id,
             evidence_revision_ordinal=admitted.evidence_revision_ordinal,
             precedence_state=admitted.precedence_state,
             admission_state="live" if live else "review_only",
