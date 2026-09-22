@@ -35,6 +35,7 @@ from app.models.stock_universe import StockUniverse
 from app.models.theme import ThemeAlias, ThemeCluster, ThemeConstituent, ThemeMention
 from app.services.economic_social_taxonomy_adapter import EconomicSocialTaxonomyAdapter
 from app.services.economic_source_admission import EvidenceAdmission
+from app.services.economic_taxonomy_fence import producer_write
 from app.services.economic_taxonomy_runtime import EconomicTaxonomyRuntimeService
 from app.services.social_company_identity_service import SocialCompanyIdentityService
 from app.services.social_extraction_service import (
@@ -338,7 +339,10 @@ class SocialThemeProjectionService:
                     evidence_channels=("narrative",),
                 ),
             )
-            if not admission.live:
+            if (
+                not admission.live
+                and admission.precedence_state != "equivalent"
+            ):
                 raise ValueError("social_evidence_live_admission_required")
 
     def apply_live(
@@ -347,9 +351,21 @@ class SocialThemeProjectionService:
         expected_mode_version: int,
         *,
         prepared=None,
-    ) -> None:
+    ) -> bool:
         authority = self.db.get(TaxonomyAuthority, 1)
         expected_epoch = authority.authority_epoch if authority is not None else 1
+        if authority is not None and authority.mode == "economic":
+            with producer_write(
+                self.db,
+                expected_epoch=expected_epoch,
+                allowed_modes={"economic"},
+            ):
+                self._validate_application(
+                    projection,
+                    expected_mode_version,
+                    prepared=prepared,
+                )
+            return False
         payload = {
             "run_id": projection.run_id,
             "pipeline": self.pipeline,
@@ -376,6 +392,42 @@ class SocialThemeProjectionService:
                 target="economic",
                 payload=payload,
             )
+        return True
+
+    def _validate_application(
+        self,
+        projection: ThemeProjection,
+        expected_mode_version: int,
+        *,
+        prepared=None,
+    ) -> ThemeProjection:
+        self._lock_live(expected_mode_version)
+        run = self.db.get(SocialSignalRun, projection.run_id)
+        if (
+            run is None
+            or run.mode != "live"
+            or run.registry_version != expected_mode_version
+        ):
+            raise ValueError("social_live_run_required")
+        if prepared is not None:
+            if (
+                prepared.projection != projection
+                or prepared.fingerprint
+                != self._fingerprint(
+                    projection, tuple(b.theme_key for b in prepared.baskets)
+                )
+            ):
+                raise ValueError("social_projection_version_conflict")
+            self._prepared_decoded = {
+                wid: (post, result) for wid, post, result in prepared.decoded_work
+            }
+            current = projection
+        else:
+            self._prepared_decoded = {}
+            current = self.prepare(projection.run_id, projection.prepared_at)
+        if current != projection or projection.registry_version != expected_mode_version:
+            raise ValueError("social_projection_version_conflict")
+        return current
 
     def _apply_live(
         self,
@@ -384,20 +436,11 @@ class SocialThemeProjectionService:
         *,
         prepared=None,
     ) -> int:
-        self._lock_live(expected_mode_version)
-        run = self.db.get(SocialSignalRun, projection.run_id)
-        if run.mode != "live" or run.registry_version != expected_mode_version:
-            raise ValueError("social_live_run_required")
-        if prepared is not None:
-            if prepared.projection != projection or prepared.fingerprint != self._fingerprint(projection, tuple(b.theme_key for b in prepared.baskets)):
-                raise ValueError("social_projection_version_conflict")
-            self._prepared_decoded = {wid: (post, result) for wid, post, result in prepared.decoded_work}
-            current = projection
-        else:
-            self._prepared_decoded = {}
-            current = self.prepare(projection.run_id, projection.prepared_at)
-        if current != projection or projection.registry_version != expected_mode_version:
-            raise ValueError("social_projection_version_conflict")
+        self._validate_application(
+            projection,
+            expected_mode_version,
+            prepared=prepared,
+        )
         identity = SocialCompanyIdentityService(self.db).read()
         resolver = SocialTickerResolver(self.db, verified_company_ids=identity.verified_company_ids)
         touched = set()

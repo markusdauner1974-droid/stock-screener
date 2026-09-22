@@ -805,14 +805,15 @@ class SocialSignalWriter:
                 if utc(prior.created_at) >= utc(run.created_at):
                     raise ValueError("publication_generation_superseded")
             projection_service = SocialThemeProjectionService(db)
-            projection_service.apply_live(
+            legacy_projection_applied = projection_service.apply_live(
                 projection, expected_mode_version, prepared=application
             )
-            from app.services.social_theme_market_service import LiveAcceptedBasketReader
-            basket_reader = LiveAcceptedBasketReader(db)
-            for expected in application.baskets:
-                if basket_reader.read(expected.theme_key, expected.market) != expected:
-                    raise ValueError("publication_basket_changed")
+            if legacy_projection_applied:
+                from app.services.social_theme_market_service import LiveAcceptedBasketReader
+                basket_reader = LiveAcceptedBasketReader(db)
+                for expected in application.baskets:
+                    if basket_reader.read(expected.theme_key, expected.market) != expected:
+                        raise ValueError("publication_basket_changed")
             now = self.clock()
             if pointer is None:
                 db.add(SocialSignalRunPointer(key="latest_published", run_id=run_id, updated_at=now))
