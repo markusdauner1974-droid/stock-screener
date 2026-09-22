@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import hmac
+import os
 import sys
 from pathlib import Path
 from uuid import UUID
@@ -16,8 +18,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mode", choices=("legacy", "shadow", "dual", "economic"), required=True
     )
-    parser.add_argument("--actor", required=True)
-    parser.add_argument("--auth-method", default="admin_api_key")
     parser.add_argument(
         "--prepare-only",
         action="store_true",
@@ -26,18 +26,30 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _publication_principal(config, credential: str | None):
+    from app.domain.economic_taxonomy.contracts import AdminPrincipal
+
+    if not config.admin_api_key or not config.admin_principal_id:
+        raise RuntimeError("admin_identity_not_configured")
+    if not credential or not hmac.compare_digest(credential, config.admin_api_key):
+        raise PermissionError("admin_authentication_failed")
+    return AdminPrincipal(
+        subject=config.admin_principal_id,
+        auth_method="admin_api_key",
+        roles=frozenset({"taxonomy:review"}),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    from app.config import settings
     from app.database import SessionLocal
-    from app.domain.economic_taxonomy.contracts import AdminPrincipal
     from app.services.economic_taxonomy_publication import (
         EconomicTaxonomyPublicationCoordinator,
     )
 
-    principal = AdminPrincipal(
-        subject=args.actor,
-        auth_method=args.auth_method,
-        roles=frozenset({"taxonomy:review"}),
+    principal = _publication_principal(
+        settings, os.environ.get("TAXONOMY_ADMIN_KEY")
     )
     coordinator = EconomicTaxonomyPublicationCoordinator(SessionLocal)
     cutoff = coordinator.capture_cutoff(principal=principal)

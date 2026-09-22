@@ -16,7 +16,11 @@ from app.infra.db.models.social_analysis import (
 from app.infra.db.models.social_signals import SocialSignalRun, SocialSourceRegistry
 from app.infra.db.repositories.economic_taxonomy_repo import EconomicTaxonomyRepository
 from app.models.economic_taxonomy import EconomicTheme
-from app.models.economic_taxonomy_runtime import EvidencePacket, TaxonomyAuthority
+from app.models.economic_taxonomy_runtime import (
+    EvidencePacket,
+    TaxonomyAuthority,
+    TaxonomySourceRevisionLog,
+)
 from app.models.stock_universe import StockUniverse
 from app.models.theme import ContentItem, ThemeCluster
 from app.services.economic_social_taxonomy_adapter import EconomicSocialTaxonomyAdapter
@@ -108,6 +112,9 @@ def test_conflicting_admin_decisions_are_order_independent_and_not_live(db_sessi
     assert first.state == second.state == "conflict_review_required"
     assert first.live is second.live is False
     assert db_session.query(EconomicSocialAssociationRevision).count() == 1
+    assert db_session.query(TaxonomySourceRevisionLog).one().revision_kind == (
+        "social_conflict"
+    )
 
 
 def test_admin_rejection_prevents_system_acceptance(db_session):
@@ -203,6 +210,16 @@ def test_native_membership_waits_for_legacy_mirror_before_becoming_live(db_sessi
     assert acknowledged.mirror_state == "acknowledged"
     assert db_session.query(SocialThemeAssociation).count() == 1
     assert db_session.query(EconomicSocialAssociationSource).count() == 1
+    revisions = db_session.scalars(
+        select(TaxonomySourceRevisionLog)
+        .where(TaxonomySourceRevisionLog.producer_kind == "economic_social")
+        .order_by(TaxonomySourceRevisionLog.revision_number)
+    ).all()
+    assert [row.revision_number for row in revisions] == [1, 2]
+    assert [row.content_hash for row in revisions] == [
+        pending.reconciliation_hash,
+        acknowledged.reconciliation_hash,
+    ]
 
 
 def test_social_membership_delivery_applies_legacy_mirror_before_success(db_session):
@@ -263,17 +280,10 @@ def test_native_legacy_mirror_respects_authority_write_fence(db_session):
         reason="reviewed native membership",
         mirror_acknowledged=False,
     )
-    authority = TaxonomyAuthority(
-        id=1,
-        mode="economic",
-        processing_head_revision=0,
-        authority_epoch=4,
-        writes_fenced=True,
-        semantic_invalidation_revision=0,
-        cutover_catch_up_cursor=[],
-        rollback_state="ready",
-    )
-    db_session.add(authority)
+    authority = db_session.get(TaxonomyAuthority, 1)
+    authority.mode = "economic"
+    authority.authority_epoch = 4
+    authority.writes_fenced = True
     db_session.flush()
 
     with pytest.raises(AuthorityWritesFenced, match="authority_writes_fenced"):

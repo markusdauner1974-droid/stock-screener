@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
@@ -46,6 +47,32 @@ def test_economic_request_resolves_one_generation(db_session, monkeypatch):
 
     assert payload["generation_id"] == str(seeded["generation"].id)
     assert calls == [seeded["generation"].id]
+
+
+def test_historical_generation_keeps_original_publication_timestamp(db_session):
+    seeded = seed_generation(db_session)
+    generation = seeded["generation"]
+    published = db_session.query(ServingGenerationEvent).filter_by(
+        serving_generation_id=generation.id,
+        event_type="published",
+    ).one()
+    published_at = published.created_at
+    db_session.add(
+        ServingGenerationEvent(
+            serving_generation_id=generation.id,
+            sequence_number=3,
+            event_type="superseded",
+            actor="test:reader",
+            details={},
+            created_at=datetime.now(timezone.utc) + timedelta(hours=2),
+        )
+    )
+    db_session.commit()
+
+    metadata = EconomicThemeReader(db_session).generation_metadata(generation.id)
+
+    assert metadata["status"] == "superseded"
+    assert metadata["published_at"] == published_at.isoformat()
 
 
 def test_non_economic_modes_do_not_read_generation_payload(db_session):

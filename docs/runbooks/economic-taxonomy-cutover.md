@@ -30,12 +30,18 @@ cd backend
 export TARGET_DATABASE_URL='postgresql://operator:REDACTED@db.example/stockscanner'
 export RELEASE_TEST_DATABASE_URL='postgresql://ci:REDACTED@test-db.example/economic_taxonomy_release'
 export STOCKSCANNER_TEST_ALLOW_POSTGRES=1
-export TAXONOMY_ACTOR='admin:release-operator'
+export TAXONOMY_ACTOR='release-artifact:operator'
 export RELEASE_DIR='../release-artifacts/economic-taxonomy'
 mkdir -p "$RELEASE_DIR"
+read -rsp 'Taxonomy admin key: ' TAXONOMY_ADMIN_KEY && echo
+export TAXONOMY_ADMIN_KEY
 ```
 
-Do not put credentials in the release artifact.
+The deployment must already configure `ADMIN_API_KEY` and
+`ADMIN_PRINCIPAL_ID`. The publication command compares the separately supplied
+`TAXONOMY_ADMIN_KEY` credential to that configured key and records the configured
+principal; it never accepts a caller-supplied audit identity. Do not put
+credentials in the release artifact or command arguments.
 `RELEASE_TEST_DATABASE_URL` must name an empty, disposable database: the pytest
 fixture drops and recreates application tables for every test. Never point the
 required PostgreSQL gate at `TARGET_DATABASE_URL`.
@@ -211,8 +217,7 @@ Read `reader_capability_manifest_id` from the JSON:
 ```bash
 export READER_CAPABILITY_ID='00000000-0000-0000-0000-000000000000'
 ./venv/bin/python scripts/publish_economic_taxonomy.py \
-  --capability-id "$READER_CAPABILITY_ID" --mode shadow \
-  --actor "$TAXONOMY_ACTOR"
+  --capability-id "$READER_CAPABILITY_ID" --mode shadow
 ```
 
 This publication verifies the reader capability and performs its final
@@ -279,8 +284,7 @@ provenance, benchmark, and shadow comparisons pass:
 
 ```bash
 ./venv/bin/python scripts/publish_economic_taxonomy.py \
-  --capability-id "$READER_CAPABILITY_ID" --mode dual \
-  --actor "$TAXONOMY_ACTOR"
+  --capability-id "$READER_CAPABILITY_ID" --mode dual
 ```
 
 Dual still serves legacy readers while both producer routes use the shared
@@ -311,8 +315,7 @@ a recursive event back to its origin.
 
 ```bash
 ./venv/bin/python scripts/publish_economic_taxonomy.py \
-  --capability-id "$READER_CAPABILITY_ID" --mode economic \
-  --actor "$TAXONOMY_ACTOR"
+  --capability-id "$READER_CAPABILITY_ID" --mode economic
 ```
 
 Record the printed generation UUID. If the command reports a changed parent,
@@ -372,12 +375,13 @@ publication back to legacy authority:
 ```bash
 TAXONOMY_ACTOR="$TAXONOMY_ACTOR" ./venv/bin/python - <<'PY'
 import os
+from app.config import settings
 from app.database import SessionLocal
-from app.domain.economic_taxonomy.contracts import AdminPrincipal
 from app.services.economic_taxonomy_publication import EconomicTaxonomyPublicationCoordinator
+from scripts.publish_economic_taxonomy import _publication_principal
 
-principal = AdminPrincipal(subject=os.environ["TAXONOMY_ACTOR"],
-    auth_method="admin_api_key", roles=frozenset({"taxonomy:review"}))
+principal = _publication_principal(
+    settings, os.environ.get("TAXONOMY_ADMIN_KEY"))
 result = EconomicTaxonomyPublicationCoordinator(SessionLocal).rollback(
     principal=principal, reason="operator requested rollback")
 print(result.id, result.authority_epoch, result.mode, result.rollback_state)

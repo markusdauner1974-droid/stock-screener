@@ -248,6 +248,7 @@ def test_published_social_work_is_admitted_to_economic_processing(store):
 def test_social_publication_uses_economic_native_path_after_cutover(store):
     from app.infra.db.models.social_signals import SocialSignalRunPointer
     from app.models.economic_taxonomy_runtime import (
+        EvidencePacket,
         SourceLineage,
         TaxonomyAuthority,
         TaxonomyProjectionEvent,
@@ -279,6 +280,9 @@ def test_social_publication_uses_economic_native_path_after_cutover(store):
             "economic-native"
         )
         assert db.query(SourceLineage).count() == 1
+        packet = db.query(EvidencePacket).one()
+        assert packet.source_metadata["social_admission_state"] == "live"
+        assert packet.source_metadata["social_memberships"] == []
         assert db.query(ThemeCluster).count() == 0
         assert db.query(TaxonomyProjectionEvent).count() == 0
 

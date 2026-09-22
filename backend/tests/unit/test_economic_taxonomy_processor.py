@@ -4,6 +4,12 @@ from datetime import datetime, timezone
 
 import pytest
 from app.database import SessionLocal
+from app.infra.db.models.social_analysis import (
+    EconomicSocialAssociation,
+    EconomicSocialAssociationRevision,
+    EconomicSocialAssociationSource,
+    SocialExtractionWork,
+)
 from app.infra.db.repositories.economic_taxonomy_repo import EconomicTaxonomyRepository
 from app.infra.db.repositories.economic_taxonomy_work_repo import (
     EconomicTaxonomyWorkRepository,
@@ -25,6 +31,8 @@ from app.models.economic_taxonomy_runtime import (
     TaxonomyAuthority,
     TaxonomySourceRevisionLog,
 )
+from app.models.stock_universe import StockUniverse
+from app.models.theme import ContentItem
 from app.services.economic_source_admission import (
     EconomicSourceAdmissionService,
     EvidenceAdmission,
@@ -413,3 +421,90 @@ def test_successful_empty_completes_without_assignment_or_head_change(db_session
         assert session.scalar(select(func.count()).select_from(ClaimAssignment)) == 0
         assert event_types == ["started", "completed"]
     assert result.output_taxonomy_version_id is None
+
+
+def test_economic_mode_social_assignment_creates_global_membership(db_session):
+    _seed_head(db_session, with_memory=True)
+    authority = db_session.get(TaxonomyAuthority, 1)
+    authority.mode = "economic"
+    security = StockUniverse(symbol="MU", market="US", is_active=True)
+    item = ContentItem(
+        source_type="twitter",
+        external_id="economic-social-post",
+        content="Memory pricing rose.",
+        published_at=NOW,
+    )
+    db_session.add_all([security, item])
+    db_session.flush()
+    work = SocialExtractionWork(
+        content_item_id=item.id,
+        input_hash="economic-social-input",
+        prompt_version="social-v1",
+        schema_version="social-v1",
+        selected_model="synthetic/model",
+        input_snapshot_json={},
+        result_json={"status": "accepted_candidates"},
+        state="succeeded",
+    )
+    db_session.add(work)
+    db_session.flush()
+    admitted = EconomicSourceAdmissionService(db_session).admit_social_work(
+        EvidenceAdmission(
+            provider="x",
+            canonical_item_id="economic-social-post",
+            capture_route="social",
+            original_text="Memory pricing rose.",
+            preparation_version="social-prep-v1",
+            captured_at=NOW,
+            available_at=NOW,
+            evidence_channels=("narrative",),
+            source_metadata={
+                "social_work_id": work.id,
+                "social_memberships": [
+                    {
+                        "theme_key": "memory",
+                        "security_id": security.id,
+                        "state": "accepted",
+                    }
+                ],
+            },
+        )
+    )
+    request = EconomicTaxonomyWorkRepository(db_session).enqueue_request(
+        source_lineage_id=admitted.source_lineage_id,
+        evidence_packet_id=admitted.packet_id,
+        policy_bundle_version="bundle-v1",
+        available_at=NOW,
+    )
+    db_session.commit()
+    request = EconomicTaxonomyWorkRepository(db_session).claim_next(
+        worker_id="worker:economic-social", now=NOW
+    )
+    db_session.commit()
+    candidate = _candidate("Memory", {"industry": "Memory"})
+    candidate["securities"] = [{"security_id": security.id, "symbol": "MU"}]
+    _reviewed(db_session, request, candidate)
+    lease_token = request.lease_token
+
+    processor = _processor()
+    processor.process(request.id, lease_token)
+    assert processor.process(request.id, lease_token).reused is True
+
+    with SessionLocal() as session:
+        association = session.scalar(select(EconomicSocialAssociation))
+        revision = session.scalar(select(EconomicSocialAssociationRevision))
+        source = session.scalar(select(EconomicSocialAssociationSource))
+        assert association.security_id == security.id
+        assert revision.state == "pending_legacy_mirror"
+        assert revision.live is False
+        assert revision.evidence_packet_id == admitted.packet_id
+        assert source.social_work_id == work.id
+        assert source.evidence_packet_id == admitted.packet_id
+        assert session.scalar(
+            select(func.count()).select_from(EconomicSocialAssociationRevision)
+        ) == 1
+        assert session.scalar(
+            select(func.count())
+            .select_from(TaxonomySourceRevisionLog)
+            .where(TaxonomySourceRevisionLog.producer_kind == "economic_social")
+        ) == 1

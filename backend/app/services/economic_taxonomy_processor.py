@@ -34,6 +34,9 @@ from app.models.economic_taxonomy_runtime import (
     ProcessingRequest,
     TaxonomyAuthority,
 )
+from app.services.economic_social_taxonomy_adapter import (
+    EconomicSocialTaxonomyAdapter,
+)
 from app.services.economic_taxonomy_fence import producer_write
 from app.services.economic_theme_candidate_retrieval import (
     RetrievedThemeCandidate,
@@ -396,6 +399,12 @@ class EconomicTaxonomyProcessor:
             assignments = self._persist_assignments(
                 session, plan, attempt.id, theme_ids
             )
+            if authority.mode == "economic":
+                EconomicSocialTaxonomyAdapter(session).project_native_assignments(
+                    assignments,
+                    evidence_packet_id=request.evidence_packet_id,
+                    authority_epoch=authority.authority_epoch,
+                )
             EconomicTaxonomyPublicationRepository(session).append_source_revision(
                 producer_kind="economic_taxonomy",
                 logical_source_key=f"processing_request:{plan.request_id}",

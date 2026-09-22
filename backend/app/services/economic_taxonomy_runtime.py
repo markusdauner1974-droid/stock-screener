@@ -414,7 +414,7 @@ class EconomicTaxonomyRuntimeService:
             self.session,
             expected_epoch=expected_epoch,
             allowed_modes={"legacy", "shadow", "dual", "economic"},
-        ):
+        ) as authority:
             attempt = self.session.execute(
                 select(TaxonomyProjectionDeliveryAttempt)
                 .where(
@@ -480,6 +480,7 @@ class EconomicTaxonomyRuntimeService:
                 EconomicSocialTaxonomyAdapter(self.session)._apply_legacy_mirror(
                     pending_revision.id,
                     now=now,
+                    authority_epoch=authority.authority_epoch,
                 )
             outcome = "success" if applied else "stale_noop"
             self.session.add(

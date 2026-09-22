@@ -21,7 +21,11 @@ from app.infra.db.models.social_analysis import (
     SocialThemeDecision,
 )
 from app.infra.db.models.social_signals import SocialSignalRun
+from app.infra.db.repositories.economic_taxonomy_publication_repo import (
+    EconomicTaxonomyPublicationRepository,
+)
 from app.models.economic_taxonomy_runtime import (
+    EvidencePacket,
     SocialAssociationRevisionRef,
     TaxonomyAuthority,
 )
@@ -34,6 +38,7 @@ from app.services.economic_source_admission import (
 )
 from app.services.economic_taxonomy_fence import producer_write
 from app.services.economic_taxonomy_runtime import EconomicTaxonomyRuntimeService
+from app.services.theme_identity_normalization import canonical_theme_key
 from app.utils.file_hashing import canonical_json_sha256 as _semantic_hash
 
 
@@ -112,6 +117,27 @@ class EconomicSocialTaxonomyAdapter:
         economic_theme_id: UUID,
         security_id: int,
         legacy_association_ids: tuple[int, ...],
+    ) -> EconomicSocialProjectionResult:
+        expected_epoch = self._current_epoch()
+        with producer_write(
+            self.db,
+            expected_epoch=expected_epoch,
+            allowed_modes={"legacy", "shadow", "dual", "economic"},
+        ) as authority:
+            return self._project_legacy_associations(
+                economic_theme_id=economic_theme_id,
+                security_id=security_id,
+                legacy_association_ids=legacy_association_ids,
+                authority_epoch=authority.authority_epoch,
+            )
+
+    def _project_legacy_associations(
+        self,
+        *,
+        economic_theme_id: UUID,
+        security_id: int,
+        legacy_association_ids: tuple[int, ...],
+        authority_epoch: int,
     ) -> EconomicSocialProjectionResult:
         if not legacy_association_ids:
             raise ValueError("legacy_association_ids_required")
@@ -243,6 +269,7 @@ class EconomicSocialTaxonomyAdapter:
                 reconciliation_hash=digest,
                 decision_revision_id=decision.id,
                 details=source_payload,
+                authority_epoch=authority_epoch,
             )
         bridge_count = self.db.scalar(
             select(func.count())
@@ -272,6 +299,37 @@ class EconomicSocialTaxonomyAdapter:
         mirror_acknowledged: bool,
         admission_state: str = "live",
         evidence_packet_id: UUID | None = None,
+    ) -> EconomicSocialAssociationRevision:
+        expected_epoch = self._current_epoch()
+        with producer_write(
+            self.db,
+            expected_epoch=expected_epoch,
+            allowed_modes={"legacy", "shadow", "dual", "economic"},
+        ) as authority:
+            return self._revise(
+                association_id,
+                state=state,
+                idempotency_key=idempotency_key,
+                actor=actor,
+                reason=reason,
+                mirror_acknowledged=mirror_acknowledged,
+                admission_state=admission_state,
+                evidence_packet_id=evidence_packet_id,
+                authority_epoch=authority.authority_epoch,
+            )
+
+    def _revise(
+        self,
+        association_id: UUID,
+        *,
+        state: str,
+        idempotency_key: str,
+        actor: str,
+        reason: str,
+        mirror_acknowledged: bool,
+        admission_state: str,
+        evidence_packet_id: UUID | None,
+        authority_epoch: int,
     ) -> EconomicSocialAssociationRevision:
         if state not in {"proposed", "accepted", "rejected"}:
             raise ValueError("invalid_economic_social_decision")
@@ -344,7 +402,11 @@ class EconomicSocialTaxonomyAdapter:
             state=effective_state,
             live=live,
             admission_state=admission_state,
-            mirror_state="acknowledged" if mirror_acknowledged else "pending",
+            mirror_state=(
+                "pending"
+                if pending_mirror
+                else "acknowledged" if state == "accepted" else "not_required"
+            ),
             reconciliation_hash=_semantic_hash(
                 {
                     "decision_revision_id": decision.id,
@@ -357,7 +419,136 @@ class EconomicSocialTaxonomyAdapter:
             evidence_packet_id=evidence_packet_id,
             projection_event_id=projection_event_id,
             details={"requested_state": state},
+            authority_epoch=authority_epoch,
         )
+
+    def project_native_assignments(
+        self,
+        assignments,
+        *,
+        evidence_packet_id: UUID,
+        authority_epoch: int,
+    ) -> tuple[EconomicSocialAssociationRevision, ...]:
+        """Project classified Social claims while the processor fence is held."""
+
+        packet = self.db.get(EvidencePacket, evidence_packet_id)
+        if packet is None:
+            raise KeyError(f"evidence packet {evidence_packet_id} not found")
+        social_packets = [
+            row
+            for row in self.db.scalars(
+                select(EvidencePacket)
+                .where(EvidencePacket.source_lineage_id == packet.source_lineage_id)
+                .order_by(
+                    EvidencePacket.evidence_revision_ordinal.desc(),
+                    EvidencePacket.id,
+                )
+            ).all()
+            if isinstance(row.source_metadata, dict)
+            and row.source_metadata.get("social_work_id") is not None
+            and row.precedence_state in {"effective", "equivalent"}
+        ]
+        if not social_packets:
+            return ()
+        social_packet = social_packets[0]
+        metadata = dict(social_packet.source_metadata or {})
+        if metadata.get("social_admission_state", "live") != "live":
+            return ()
+        work_id = metadata.get("social_work_id")
+        if not isinstance(work_id, int) or isinstance(work_id, bool):
+            return ()
+        state_by_pair = {
+            (str(row.get("theme_key") or ""), row.get("security_id")): str(
+                row.get("state") or "proposed"
+            )
+            for row in metadata.get("social_memberships") or ()
+            if isinstance(row, dict)
+        }
+        revisions = []
+        for assignment in assignments:
+            theme_key = canonical_theme_key(
+                str(assignment.claim_payload.get("display_name") or "")
+            )
+            for security_payload in assignment.claim_payload.get("securities") or ():
+                if not isinstance(security_payload, dict):
+                    continue
+                security_id = security_payload.get("security_id")
+                if (
+                    not isinstance(security_id, int)
+                    or isinstance(security_id, bool)
+                    or self.db.get(StockUniverse, security_id) is None
+                ):
+                    continue
+                association = self.get_or_create_association(
+                    assignment.economic_theme_id, security_id
+                )
+                source_key = f"social_work:{work_id}:packet:{social_packet.id}"
+                source = self.db.scalar(
+                    select(EconomicSocialAssociationSource).where(
+                        EconomicSocialAssociationSource.association_id
+                        == association.id,
+                        EconomicSocialAssociationSource.source_kind == "social_work",
+                        EconomicSocialAssociationSource.source_key == source_key,
+                    )
+                )
+                if source is None:
+                    self.db.add(
+                        EconomicSocialAssociationSource(
+                            association_id=association.id,
+                            source_kind="social_work",
+                            source_key=source_key,
+                            social_work_id=work_id,
+                            evidence_packet_id=social_packet.id,
+                        )
+                    )
+                    self.db.flush()
+                requested_state = state_by_pair.get(
+                    (theme_key, security_id), "proposed"
+                )
+                if requested_state not in {"proposed", "accepted", "rejected"}:
+                    requested_state = "proposed"
+                current = self.db.scalar(
+                    select(EconomicSocialAssociationRevision)
+                    .where(
+                        EconomicSocialAssociationRevision.association_id
+                        == association.id
+                    )
+                    .order_by(
+                        EconomicSocialAssociationRevision.revision_number.desc()
+                    )
+                    .limit(1)
+                )
+                current_state = (
+                    str((current.details or {}).get("requested_state") or current.state)
+                    if current is not None
+                    else None
+                )
+                if current_state == "conflict_review_required":
+                    continue
+                if current_state in {"accepted", "rejected"} and requested_state == "proposed":
+                    continue
+                if current_state == "rejected" and requested_state == "accepted":
+                    continue
+                if current_state == requested_state:
+                    continue
+                revisions.append(
+                    self._revise(
+                        association.id,
+                        state=requested_state,
+                        idempotency_key=(
+                            f"classification:{assignment.classification_attempt_id}:"
+                            f"assignment:{assignment.id}:security:{security_id}:"
+                            f"social-packet:{social_packet.id}"
+                        ),
+                        actor="system:economic-taxonomy-refresh",
+                        reason="classified_social_membership",
+                        mirror_acknowledged=requested_state != "accepted",
+                        admission_state="live",
+                        evidence_packet_id=social_packet.id,
+                        authority_epoch=authority_epoch,
+                    )
+                )
+        return tuple(revisions)
 
     def apply_legacy_mirror(
         self,
@@ -373,10 +564,11 @@ class EconomicSocialTaxonomyAdapter:
             self.db,
             expected_epoch=expected_epoch,
             allowed_modes={"legacy", "shadow", "dual", "economic"},
-        ):
+        ) as authority:
             return self._apply_legacy_mirror(
                 association_revision_id,
                 now=now,
+                authority_epoch=authority.authority_epoch,
             )
 
     def _apply_legacy_mirror(
@@ -384,6 +576,7 @@ class EconomicSocialTaxonomyAdapter:
         association_revision_id: UUID,
         *,
         now: datetime | None = None,
+        authority_epoch: int,
     ) -> EconomicSocialAssociationRevision:
         """Apply the mirror while the shared authority fence is held."""
 
@@ -494,6 +687,7 @@ class EconomicSocialTaxonomyAdapter:
                 "acknowledges_revision_id": str(revision.id),
                 "legacy_association_id": legacy.id,
             },
+            authority_epoch=authority_epoch,
         )
 
     def pin_revision(self, revision_id: UUID) -> SocialAssociationRevisionRef:
@@ -688,6 +882,7 @@ class EconomicSocialTaxonomyAdapter:
         reconciliation_hash: str,
         decision_revision_id: UUID | None,
         details: dict,
+        authority_epoch: int,
         evidence_packet_id: UUID | None = None,
         projection_event_id: UUID | None = None,
     ) -> EconomicSocialAssociationRevision:
@@ -711,4 +906,20 @@ class EconomicSocialTaxonomyAdapter:
         )
         self.db.add(revision)
         self.db.flush()
+        EconomicTaxonomyPublicationRepository(self.db).append_source_revision(
+            producer_kind="economic_social",
+            logical_source_key=f"economic_social_association:{association_id}",
+            revision_kind=(
+                "social_conflict"
+                if state == "conflict_review_required"
+                else "association_revision"
+            ),
+            revision_number=revision.revision_number,
+            content_hash=reconciliation_hash,
+            authority_epoch=authority_epoch,
+        )
         return revision
+
+    def _current_epoch(self) -> int:
+        authority = self.db.get(TaxonomyAuthority, 1)
+        return authority.authority_epoch if authority is not None else 1

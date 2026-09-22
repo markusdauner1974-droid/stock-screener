@@ -272,7 +272,12 @@ class SocialThemeProjectionService:
             raise ValueError("social_projection_version_conflict")
         return registry
 
-    def admit_economic_evidence(self, projection: ThemeProjection) -> None:
+    def admit_economic_evidence(
+        self,
+        projection: ThemeProjection,
+        *,
+        prepared: PreparedThemeApplication | None = None,
+    ) -> None:
         """Admit the exact saved inputs after their Social run becomes published."""
 
         run = self.db.get(SocialSignalRun, projection.run_id)
@@ -296,7 +301,49 @@ class SocialThemeProjectionService:
                 claim.company_token: resolver.resolve(claim.company_token)
                 for claim in result.claims
             }
-            prepared = tuple(post.prepared_evidence)
+            accepted_pairs = {
+                (basket.theme_key, basket.market, member.canonical_symbol)
+                for basket in (prepared.baskets if prepared is not None else ())
+                for member in basket.membership
+            }
+            social_memberships = []
+            for claim in result.claims:
+                resolution = resolutions[claim.company_token]
+                if claim.support == "unsupported" or resolution.status != "resolved":
+                    continue
+                matched = find_read_only_theme_match(
+                    self.db, claim.raw_theme, self.pipeline
+                )
+                theme_key = (
+                    matched.canonical_key
+                    if matched is not None
+                    else canonical_theme_key(claim.raw_theme)
+                )
+                state = (
+                    "accepted"
+                    if (theme_key, resolution.market, resolution.symbol)
+                    in accepted_pairs
+                    else "proposed"
+                )
+                if matched is not None and state != "accepted":
+                    legacy = self.db.scalar(
+                        select(SocialThemeAssociation).where(
+                            SocialThemeAssociation.theme_cluster_id == matched.id,
+                            SocialThemeAssociation.market == resolution.market,
+                            SocialThemeAssociation.canonical_symbol
+                            == resolution.symbol,
+                        )
+                    )
+                    if legacy is not None and legacy.state == "rejected":
+                        state = "rejected"
+                social_memberships.append(
+                    {
+                        "theme_key": theme_key,
+                        "security_id": int(resolution.security_id),
+                        "state": state,
+                    }
+                )
+            prepared_evidence = tuple(post.prepared_evidence)
             admission = adapter.admit_saved_work(
                 work.id,
                 EvidenceAdmission(
@@ -307,9 +354,11 @@ class SocialThemeProjectionService:
                     route_record_id=str(work.id),
                     original_text=post.text,
                     attachment_hashes=tuple(
-                        item.original_text_sha256 for item in prepared
+                        item.original_text_sha256 for item in prepared_evidence
                     ),
-                    extracted_text_hashes=tuple(item.text_sha256 for item in prepared),
+                    extracted_text_hashes=tuple(
+                        item.text_sha256 for item in prepared_evidence
+                    ),
                     grounding_snapshot={
                         "company_resolutions": [
                             asdict(resolutions[token]) for token in sorted(resolutions)
@@ -330,11 +379,21 @@ class SocialThemeProjectionService:
                         "schema_version": work.schema_version,
                         "actual_provider": work.actual_provider,
                         "actual_model": work.actual_model,
+                        "social_admission_state": "live",
+                        "social_memberships": sorted(
+                            social_memberships,
+                            key=lambda row: (
+                                row["theme_key"], row["security_id"], row["state"]
+                            ),
+                        ),
                     },
                     captured_at=post.observed_at,
                     observed_at=post.created_at,
                     available_at=max(
-                        (post.observed_at, *(item.available_at for item in prepared))
+                        (
+                            post.observed_at,
+                            *(item.available_at for item in prepared_evidence),
+                        )
                     ),
                     evidence_channels=("narrative",),
                 ),

@@ -75,6 +75,7 @@ PUBLICATION_COALESCE_WINDOW = timedelta(minutes=5)
 _ROUTINE_REVISION_KINDS = frozenset(
     {
         "administrator_decision",
+        "association_revision",
         "classification_attempt",
         "development_observation",
         "evidence",

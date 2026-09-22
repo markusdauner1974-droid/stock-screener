@@ -468,6 +468,12 @@ class EconomicThemeReader:
             .order_by(ServingGenerationEvent.sequence_number.desc())
             .limit(1)
         )
+        published_event = self.db.scalar(
+            select(ServingGenerationEvent).where(
+                ServingGenerationEvent.serving_generation_id == generation.id,
+                ServingGenerationEvent.event_type == "published",
+            )
+        )
         authority = self.select_authority()
         is_current = authority.preview_generation_id == generation.id
         return {
@@ -476,7 +482,9 @@ class EconomicThemeReader:
             if latest_event is not None
             else "unknown",
             "published_at": (
-                latest_event.created_at.isoformat() if latest_event is not None else None
+                published_event.created_at.isoformat()
+                if published_event is not None
+                else None
             ),
             "taxonomy_version_id": str(generation.taxonomy_version_id),
             "interpretation_set_id": str(generation.interpretation_set_id),

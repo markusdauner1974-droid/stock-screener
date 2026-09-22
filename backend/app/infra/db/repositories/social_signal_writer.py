@@ -820,5 +820,7 @@ class SocialSignalWriter:
             else:
                 pointer.run_id, pointer.updated_at = run_id, now
             run.status, run.published_at = "published", now
-            projection_service.admit_economic_evidence(projection)
+            projection_service.admit_economic_evidence(
+                projection, prepared=application
+            )
         return SocialRunResult(run_id, "live", "complete", True, summary)

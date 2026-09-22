@@ -359,16 +359,17 @@ def test_processing_pipeline_runs_extract_review_then_fenced_processor(monkeypat
 def test_dirty_revision_classification_holds_structural_work():
     rows = [
         SimpleNamespace(id=uuid4(), revision_kind="classification_attempt"),
+        SimpleNamespace(id=uuid4(), revision_kind="association_revision"),
         SimpleNamespace(id=uuid4(), revision_kind="structural_operation"),
         SimpleNamespace(id=uuid4(), revision_kind="dimension_proposal"),
     ]
 
     classified = classify_dirty_revisions(rows)
 
-    assert classified.routine_revision_ids == (str(rows[0].id),)
+    assert classified.routine_revision_ids == (str(rows[0].id), str(rows[1].id))
     assert classified.held_revision_ids == (
-        str(rows[1].id),
         str(rows[2].id),
+        str(rows[3].id),
     )
 
 
