@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
+from sqlalchemy import select
+
 from app.infra.db.models.social_analysis import (
     EconomicSocialAssociation,
     EconomicSocialAssociationRevision,
@@ -20,11 +22,13 @@ from app.models.theme import ContentItem, ThemeCluster
 from app.services.economic_social_taxonomy_adapter import EconomicSocialTaxonomyAdapter
 from app.services.economic_source_admission import EvidenceAdmission
 from app.services.economic_taxonomy_fence import AuthorityWritesFenced
+from app.services.economic_taxonomy_runtime import EconomicTaxonomyRuntimeService
 from app.services.social_theme_market_service import EconomicAcceptedBasketReader
 from app.services.social_theme_projection_service import (
     SocialThemeProjectionService,
 )
-from sqlalchemy import select
+
+from .economic_taxonomy_reader_helpers import seed_generation
 
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=timezone.utc)
 
@@ -199,6 +203,52 @@ def test_native_membership_waits_for_legacy_mirror_before_becoming_live(db_sessi
     assert acknowledged.mirror_state == "acknowledged"
     assert db_session.query(SocialThemeAssociation).count() == 1
     assert db_session.query(EconomicSocialAssociationSource).count() == 1
+
+
+def test_social_membership_delivery_applies_legacy_mirror_before_success(db_session):
+    seeded = seed_generation(db_session)
+    theme, security = _global_pair(db_session)
+    adapter = EconomicSocialTaxonomyAdapter(db_session)
+    association = adapter.get_or_create_association(theme.id, security.id)
+    pending = adapter.revise(
+        association.id,
+        state="accepted",
+        idempotency_key="delivered-native-decision",
+        actor="admin:test",
+        reason="reviewed native membership",
+        mirror_acknowledged=False,
+    )
+    db_session.commit()
+    authority = db_session.get(TaxonomyAuthority, 1)
+    runtime = EconomicTaxonomyRuntimeService(db_session)
+    claim = runtime.claim_deliveries_from_published_generations(
+        worker_id="worker:social-mirror",
+        expected_epoch=authority.authority_epoch,
+        now=NOW,
+        limit=1,
+    )[0]
+    db_session.commit()
+
+    result = runtime.apply_delivery(
+        claim,
+        expected_epoch=authority.authority_epoch,
+        now=NOW,
+    )
+    db_session.commit()
+
+    latest = db_session.scalar(
+        select(EconomicSocialAssociationRevision)
+        .where(EconomicSocialAssociationRevision.association_id == association.id)
+        .order_by(EconomicSocialAssociationRevision.revision_number.desc())
+        .limit(1)
+    )
+    assert claim.projection_event_id == pending.projection_event_id
+    assert seeded["generation"].id == authority.serving_generation_id
+    assert result.outcome == "success"
+    assert latest.state == "accepted"
+    assert latest.live is True
+    assert latest.mirror_state == "acknowledged"
+    assert db_session.query(SocialThemeAssociation).count() == 1
 
 
 def test_native_legacy_mirror_respects_authority_write_fence(db_session):

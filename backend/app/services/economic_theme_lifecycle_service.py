@@ -16,6 +16,7 @@ from app.models.economic_taxonomy import EconomicThemeRevision
 from app.models.economic_taxonomy_runtime import (
     ClaimAssignment,
     InterpretationSelection,
+    InterpretationSet,
     TaxonomyAuthority,
     TaxonomyOperationEvent,
     TaxonomyOperationRequest,
@@ -278,8 +279,13 @@ class EconomicThemeLifecycleService:
                 EconomicThemeRevision.taxonomy_version_id == version_id
             )
         ).all()
+        interpretation = self.session.get(InterpretationSet, interpretation_set_id)
+        if interpretation is None:
+            raise LifecycleEvaluationError("interpretation_set_not_found")
         facts = EconomicThemeObservationService._observations_for_set(
-            self.session, interpretation_set_id
+            self.session,
+            interpretation_set_id,
+            interpretation.generation_input_manifest_id,
         )
         roots: dict[UUID, list[LifecycleRoot]] = defaultdict(list)
         for fact in facts:

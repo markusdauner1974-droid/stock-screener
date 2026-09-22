@@ -313,6 +313,7 @@ class EconomicThemeMetricsService:
             inputs = self._load_inputs(
                 taxonomy_version_id=taxonomy_version_id,
                 interpretation_set_id=interpretation_set_id,
+                generation_input_manifest_id=generation_input_manifest_id,
                 pinned_eligibility_revisions=pinned,
             )
         if len({item.theme_id for item in inputs}) != len(inputs):
@@ -515,6 +516,7 @@ class EconomicThemeMetricsService:
         *,
         taxonomy_version_id: UUID,
         interpretation_set_id: UUID,
+        generation_input_manifest_id: UUID,
         pinned_eligibility_revisions: Mapping[UUID, Iterable[str]],
     ) -> list[ThemeMetricInput]:
         revisions = self.session.scalars(
@@ -523,7 +525,9 @@ class EconomicThemeMetricsService:
             )
         ).all()
         observation_facts = EconomicThemeObservationService._observations_for_set(
-            self.session, interpretation_set_id
+            self.session,
+            interpretation_set_id,
+            generation_input_manifest_id,
         )
         observations: dict[UUID, list[MetricObservation]] = defaultdict(list)
         for fact in observation_facts:

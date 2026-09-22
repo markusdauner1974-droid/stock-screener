@@ -450,6 +450,37 @@ class EconomicTaxonomyRuntimeService:
                 origin_representation=event.origin_representation,
                 projection_event_id=event.id,
             )
+            if (
+                applied
+                and event.target_representation == "legacy"
+                and event.projection_kind == "social_membership"
+            ):
+                from app.infra.db.models.social_analysis import (
+                    EconomicSocialAssociationRevision,
+                )
+                from app.services.economic_social_taxonomy_adapter import (
+                    EconomicSocialTaxonomyAdapter,
+                )
+
+                pending_revision = self.session.scalar(
+                    select(EconomicSocialAssociationRevision)
+                    .where(
+                        EconomicSocialAssociationRevision.projection_event_id
+                        == event.id,
+                        EconomicSocialAssociationRevision.state
+                        == "pending_legacy_mirror",
+                    )
+                    .order_by(
+                        EconomicSocialAssociationRevision.revision_number.desc()
+                    )
+                    .limit(1)
+                )
+                if pending_revision is None:
+                    raise ProjectionRuntimeError("social_mirror_revision_missing")
+                EconomicSocialTaxonomyAdapter(self.session)._apply_legacy_mirror(
+                    pending_revision.id,
+                    now=now,
+                )
             outcome = "success" if applied else "stale_noop"
             self.session.add(
                 TaxonomyProjectionDeliveryEvent(

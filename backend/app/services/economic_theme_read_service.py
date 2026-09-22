@@ -372,13 +372,23 @@ class EconomicThemeReader:
     def resolve_generation(
         self, generation_id: UUID | None = None
     ) -> ServingGeneration:
-        if generation_id is None:
+        explicit_generation = generation_id is not None
+        if not explicit_generation:
             generation_id = self.select_authority().preview_generation_id
             if generation_id is None:
                 raise ServingGenerationUnavailable("serving_generation_unavailable")
         generation = self.db.get(ServingGeneration, generation_id)
         if generation is None:
             raise GenerationNotFound("generation_not_found")
+        if explicit_generation:
+            published = self.db.scalar(
+                select(ServingGenerationEvent.id).where(
+                    ServingGenerationEvent.serving_generation_id == generation.id,
+                    ServingGenerationEvent.event_type == "published",
+                )
+            )
+            if published is None:
+                raise GenerationNotFound("generation_not_published")
         return generation
 
     def _read_entry(self, generation, snapshot_kind, resource_key):

@@ -1,11 +1,18 @@
 from __future__ import annotations
 
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
-from app.models.economic_taxonomy_runtime import TaxonomyAuthority
-from app.services.economic_theme_read_service import EconomicThemeReader
+from app.models.economic_taxonomy_runtime import (
+    ServingGeneration,
+    ServingGenerationEvent,
+    TaxonomyAuthority,
+)
+from app.services.economic_theme_read_service import (
+    EconomicThemeReader,
+    GenerationNotFound,
+)
 
 from .economic_taxonomy_reader_helpers import seed_generation
 
@@ -51,6 +58,48 @@ def test_non_economic_modes_do_not_read_generation_payload(db_session):
 
     assert selection.source_name == "legacy"
     assert selection.generation_id is None
+
+
+@pytest.mark.parametrize("final_event", (None, "abandoned"))
+def test_explicit_read_rejects_generation_without_publication(db_session, final_event):
+    seeded = seed_generation(db_session)
+    source = seeded["generation"]
+    generation = ServingGeneration(
+        taxonomy_version_id=source.taxonomy_version_id,
+        interpretation_set_id=source.interpretation_set_id,
+        metrics_revision_id=source.metrics_revision_id,
+        generation_input_manifest_id=source.generation_input_manifest_id,
+        reader_snapshot_bundle_id=source.reader_snapshot_bundle_id,
+        reader_capability_manifest_id=source.reader_capability_manifest_id,
+        semantic_hash=f"unpublished:{uuid4()}",
+        artifact_integrity_hash=f"unpublished-artifact:{uuid4()}",
+        created_by="test:reader",
+    )
+    db_session.add(generation)
+    db_session.flush()
+    db_session.add(
+        ServingGenerationEvent(
+            serving_generation_id=generation.id,
+            sequence_number=1,
+            event_type="prepared",
+            actor="test:reader",
+            details={},
+        )
+    )
+    if final_event is not None:
+        db_session.add(
+            ServingGenerationEvent(
+                serving_generation_id=generation.id,
+                sequence_number=2,
+                event_type=final_event,
+                actor="test:reader",
+                details={},
+            )
+        )
+    db_session.commit()
+
+    with pytest.raises(GenerationNotFound, match="generation_not_published"):
+        EconomicThemeReader(db_session).read_catalog(generation.id)
 
 
 def test_legacy_compatibility_uses_reviewed_mapping_not_name(db_session):

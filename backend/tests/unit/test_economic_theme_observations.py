@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
+from sqlalchemy import func, select
+
 from app.database import SessionLocal
 from app.infra.db.repositories.economic_taxonomy_repo import EconomicTaxonomyRepository
 from app.infra.db.repositories.economic_taxonomy_work_repo import (
@@ -36,7 +38,6 @@ from app.services.economic_theme_observation_service import (
     EconomicThemeObservationService,
     materialize_assignment_facts,
 )
-from sqlalchemy import func, select
 
 NOW = datetime(2026, 9, 21, 8, 0, tzinfo=timezone.utc)
 
@@ -185,7 +186,13 @@ def _generation(db_session, taxonomy, admitted, attempt, eligibility):
         status="unsealed",
         semantic_invalidation_revision=0,
         committed_revision_tuples=[],
-        selections=[],
+        selections=[
+            {
+                "lineage": str(admitted.source_lineage_id),
+                "evidence_packet_id": str(admitted.packet_id),
+                "eligibility_revision": eligibility.revision_number,
+            }
+        ],
         created_by="test:publisher",
     )
     db_session.add(manifest)
@@ -328,6 +335,31 @@ def test_generation_queries_ignore_later_auxiliary_revisions(db_session):
     ]
     assert [(row.security_id, row.signal_kind) for row in signals] == [(42, "breakout")]
     assert signals[0].effective_at == NOW
+
+
+def test_generation_filters_observations_by_pinned_lens_eligibility(db_session):
+    taxonomy, _parent, _child, admitted, attempt, _assignment, eligibility = _setup(
+        db_session
+    )
+    materialize_assignment_facts(
+        db_session,
+        classification_attempt_id=attempt.id,
+        evidence_channels=eligibility.evidence_channels,
+        taxonomy_version_id=taxonomy.id,
+        detector_policy_version="signals-v1",
+    )
+    revised = EconomicSourceAdmissionService(db_session).revise_lens_eligibility(
+        admitted.packet_id,
+        remove="fundamental",
+        reason="fundamental evidence no longer eligible",
+    )
+    generation = _generation(db_session, taxonomy, admitted, attempt, revised)
+
+    observations = EconomicThemeObservationService(
+        SessionLocal
+    ).observations_for_generation(generation.id)
+
+    assert {row.evidence_channel for row in observations} == {"narrative"}
 
 
 def test_direct_root_count_deduplicates_source_family_and_excludes_derived(db_session):

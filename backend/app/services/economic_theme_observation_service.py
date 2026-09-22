@@ -17,7 +17,9 @@ from app.models.economic_taxonomy_runtime import (
     ClassificationAttempt,
     ClassificationAttemptEvent,
     EvidencePacket,
+    GenerationInputManifest,
     InterpretationSelection,
+    LensEligibilityRevision,
     ProcessingRequest,
     ServingGeneration,
     SourceLineage,
@@ -440,7 +442,11 @@ class EconomicThemeObservationService:
             generation = session.get(ServingGeneration, generation_id)
             if generation is None:
                 raise KeyError(f"serving generation {generation_id} not found")
-            return self._observations_for_set(session, generation.interpretation_set_id)
+            return self._observations_for_set(
+                session,
+                generation.interpretation_set_id,
+                generation.generation_input_manifest_id,
+            )
 
     def constituents_for_generation(self, generation_id: UUID) -> list[ConstituentFact]:
         with self.session_factory() as session:
@@ -561,7 +567,40 @@ class EconomicThemeObservationService:
         return len(roots)
 
     @staticmethod
-    def _observations_for_set(session, interpretation_set_id):
+    def _observations_for_set(session, interpretation_set_id, manifest_id):
+        manifest = session.get(GenerationInputManifest, manifest_id)
+        if manifest is None:
+            raise FactMaterializationError("generation_manifest_missing")
+        revision_by_lineage = {
+            str(item.get("lineage")): item.get("eligibility_revision")
+            for item in manifest.selections or []
+            if item.get("lineage") is not None
+            and item.get("eligibility_revision") is not None
+        }
+        selections = session.scalars(
+            select(InterpretationSelection).where(
+                InterpretationSelection.interpretation_set_id == interpretation_set_id
+            )
+        ).all()
+        channels_by_attempt: dict[UUID, frozenset[str]] = {}
+        for selection in selections:
+            revision_number = revision_by_lineage.get(str(selection.source_lineage_id))
+            if revision_number is None:
+                raise FactMaterializationError("eligibility_revision_not_pinned")
+            eligibility = session.scalar(
+                select(LensEligibilityRevision).where(
+                    LensEligibilityRevision.source_lineage_id
+                    == selection.source_lineage_id,
+                    LensEligibilityRevision.evidence_packet_id
+                    == selection.evidence_packet_id,
+                    LensEligibilityRevision.revision_number == int(revision_number),
+                )
+            )
+            if eligibility is None:
+                raise FactMaterializationError("eligibility_revision_not_pinned")
+            channels_by_attempt[selection.selected_classification_attempt_id] = (
+                frozenset(eligibility.evidence_channels)
+            )
         rows = session.execute(
             select(ThemeObservation, ClaimAssignment)
             .join(
@@ -581,6 +620,10 @@ class EconomicThemeObservationService:
         ).all()
         facts: list[ObservationFact] = []
         for observation, assignment in rows:
+            if observation.evidence_channel not in channels_by_attempt.get(
+                assignment.classification_attempt_id, frozenset()
+            ):
+                continue
             target_ids = observation.payload.get("economic_theme_ids") or [
                 str(assignment.economic_theme_id)
             ]
