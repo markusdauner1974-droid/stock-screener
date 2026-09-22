@@ -592,9 +592,9 @@ class SocialThemeProjectionService:
                 == authority.processing_taxonomy_version_id,
                 LegacyClaimAllocation.legacy_theme_cluster_id
                 == legacy.theme_cluster_id,
-                LegacyClaimAllocation.allocation_kind == "source_association",
+                LegacyClaimAllocation.allocation_kind == "social_association",
                 LegacyClaimAllocation.allocation_key
-                == f"social_association:{association_id}",
+                == f"social_theme_association:{association_id}",
                 LegacyClaimAllocation.destination_theme_id.is_not(None),
             )
         )

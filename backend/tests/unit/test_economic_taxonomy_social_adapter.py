@@ -590,3 +590,73 @@ def test_legacy_projection_uses_single_destination_mapping_fallback(db_session):
     association = db_session.scalar(select(EconomicSocialAssociation))
     assert association.economic_theme_id == theme.id
     assert association.security_id == security.id
+
+
+def test_legacy_projection_uses_reviewed_split_social_allocation(db_session):
+    legacy = _legacy_association(db_session, name="Refining", state="accepted")
+    security = StockUniverse(symbol="MU", market="US", is_active=True)
+    db_session.add(security)
+    repo = EconomicTaxonomyRepository(db_session)
+    taxonomy = repo.create_draft(actor="test:social", reason="split allocation")
+    petroleum = repo.create_theme(
+        taxonomy.id,
+        display_name="Petroleum Refining",
+        definition="Petroleum refining economics",
+        mechanism="Petroleum refining margins",
+        lifecycle="established",
+        lifecycle_policy_version="v1",
+        actor="test:social",
+    )
+    metals = repo.create_theme(
+        taxonomy.id,
+        display_name="Metals Refining",
+        definition="Metals refining economics",
+        mechanism="Metals refining margins",
+        lifecycle="established",
+        lifecycle_policy_version="v1",
+        actor="test:social",
+    )
+    repo.set_legacy_disposition(
+        taxonomy.id,
+        legacy.theme_cluster_id,
+        disposition="split_required",
+        actor="test:social",
+    )
+    for theme in (petroleum, metals):
+        repo.add_legacy_destination(
+            taxonomy.id,
+            legacy.theme_cluster_id,
+            theme.id,
+            actor="test:social",
+        )
+    repo.allocate_legacy_claim(
+        taxonomy.id,
+        legacy.theme_cluster_id,
+        allocation_kind="social_association",
+        allocation_key=f"social_theme_association:{legacy.id}",
+        destination_theme_id=petroleum.id,
+        actor="test:social",
+    )
+    taxonomy = repo.seal_draft(taxonomy.id)
+    db_session.add(
+        TaxonomyAuthority(
+            id=1,
+            mode="dual",
+            processing_taxonomy_version_id=taxonomy.id,
+            processing_head_revision=1,
+            authority_epoch=1,
+            writes_fenced=False,
+            semantic_invalidation_revision=0,
+            cutover_catch_up_cursor=[],
+            rollback_state="ready",
+        )
+    )
+    db_session.flush()
+
+    SocialThemeProjectionService(db_session)._project_legacy_association_to_economic(
+        legacy.id
+    )
+
+    association = db_session.scalar(select(EconomicSocialAssociation))
+    assert association.economic_theme_id == petroleum.id
+    assert association.economic_theme_id != metals.id

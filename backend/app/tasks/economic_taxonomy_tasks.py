@@ -11,6 +11,7 @@ from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import aliased
 
 from app.celery_app import celery_app
 from app.database import SessionLocal
@@ -25,13 +26,13 @@ from app.infra.db.repositories.economic_taxonomy_work_repo import (
 from app.models.economic_taxonomy import FacetDimension
 from app.models.economic_taxonomy_runtime import (
     EvidencePacket,
+    EvidencePrecedenceRevision,
     GenerationInputManifest,
     LensEligibilityRevision,
     ProcessingRequest,
     ProviderAttempt,
     ServingGeneration,
     ServingGenerationEvent,
-    SourceLineage,
     TaxonomyAuthority,
     TaxonomyProjectionEvent,
     TaxonomySourceRevisionLog,
@@ -215,15 +216,6 @@ class EconomicTaxonomyTaskService:
             if authority.writes_fenced:
                 return {"status": "skipped", "reason": "writes_fenced"}
             epoch = authority.authority_epoch
-            lineage_ids = session.scalars(
-                select(SourceLineage.id)
-                .join(
-                    EvidencePacket,
-                    EvidencePacket.source_lineage_id == SourceLineage.id,
-                )
-                .distinct()
-                .order_by(SourceLineage.id)
-            ).all()
             discovered = 0
             enqueued = 0
             with producer_write(
@@ -231,35 +223,65 @@ class EconomicTaxonomyTaskService:
                 expected_epoch=epoch,
                 allowed_modes={"shadow", "dual", "economic"},
             ) as locked:
-                admission = self._admission_service(session)
+                precedence = aliased(EvidencePrecedenceRevision)
+                eligibility = aliased(LensEligibilityRevision)
+                latest_effective_revision = (
+                    select(func.max(EvidencePrecedenceRevision.revision_number))
+                    .where(
+                        EvidencePrecedenceRevision.source_lineage_id
+                        == precedence.source_lineage_id,
+                        EvidencePrecedenceRevision.disposition == "effective",
+                    )
+                    .correlate(precedence)
+                    .scalar_subquery()
+                )
+                latest_eligibility_revision = (
+                    select(func.max(LensEligibilityRevision.revision_number))
+                    .where(
+                        LensEligibilityRevision.evidence_packet_id
+                        == eligibility.evidence_packet_id
+                    )
+                    .correlate(eligibility)
+                    .scalar_subquery()
+                )
+                existing_request = (
+                    select(ProcessingRequest.id)
+                    .where(
+                        ProcessingRequest.source_lineage_id
+                        == EvidencePacket.source_lineage_id,
+                        ProcessingRequest.evidence_packet_id == EvidencePacket.id,
+                        ProcessingRequest.policy_bundle_version
+                        == POLICY_BUNDLE_VERSION,
+                    )
+                    .correlate(EvidencePacket)
+                    .exists()
+                )
+                packets = session.scalars(
+                    select(EvidencePacket)
+                    .join(
+                        precedence,
+                        precedence.evidence_packet_id == EvidencePacket.id,
+                    )
+                    .join(
+                        eligibility,
+                        eligibility.evidence_packet_id == EvidencePacket.id,
+                    )
+                    .where(
+                        precedence.disposition == "effective",
+                        precedence.revision_number == latest_effective_revision,
+                        eligibility.revision_number
+                        == latest_eligibility_revision,
+                        func.json_array_length(eligibility.evidence_channels) > 0,
+                        ~existing_request,
+                    )
+                    .order_by(EvidencePacket.source_lineage_id)
+                    .limit(limit)
+                ).all()
                 work = EconomicTaxonomyWorkRepository(session)
-                for lineage_id in lineage_ids:
-                    if discovered >= limit:
-                        break
-                    packet = admission.effective_packet(lineage_id)
-                    if packet is None:
-                        continue
-                    eligibility = session.scalar(
-                        select(LensEligibilityRevision)
-                        .where(LensEligibilityRevision.evidence_packet_id == packet.id)
-                        .order_by(LensEligibilityRevision.revision_number.desc())
-                        .limit(1)
-                    )
-                    if eligibility is None or not eligibility.evidence_channels:
-                        continue
-                    existed = session.scalar(
-                        select(ProcessingRequest.id).where(
-                            ProcessingRequest.source_lineage_id == lineage_id,
-                            ProcessingRequest.evidence_packet_id == packet.id,
-                            ProcessingRequest.policy_bundle_version
-                            == POLICY_BUNDLE_VERSION,
-                        )
-                    )
-                    if existed is not None:
-                        continue
+                for packet in packets:
                     discovered += 1
                     request = work.enqueue_request(
-                        source_lineage_id=lineage_id,
+                        source_lineage_id=packet.source_lineage_id,
                         evidence_packet_id=packet.id,
                         policy_bundle_version=POLICY_BUNDLE_VERSION,
                         available_at=packet.available_at,
@@ -738,15 +760,6 @@ class EconomicTaxonomyTaskService:
                 content_hash=packet.packet_hash,
                 authority_epoch=authority_epoch,
             )
-
-    @staticmethod
-    def _admission_service(session):
-        from app.services.economic_source_admission import (
-            EconomicSourceAdmissionService,
-        )
-
-        return EconomicSourceAdmissionService(session)
-
 
 _PIPELINE_FACTORY: Callable[[], EconomicProcessingPipeline] | None = None
 

@@ -51,13 +51,14 @@ from app.models.stock_universe import StockUniverse
 from app.models.theme_intelligence import (
     EconomicThemeDevelopment,
     ThemeDevelopmentObservation,
+    ThemeDevelopmentTheme,
+)
+from app.services.economic_taxonomy_interpretations import (
+    manifest_social_revision_contracts,
 )
 from app.services.economic_theme_observation_service import (
     observation_rows_for_interpretation,
     signal_rows_for_interpretation,
-)
-from app.services.economic_taxonomy_interpretations import (
-    manifest_social_revision_contracts,
 )
 from app.utils.file_hashing import canonical_json_sha256 as _snapshot_hash
 
@@ -351,20 +352,13 @@ def _build_economic_snapshot_payloads(
     )
 
     development_ids = _pinned_development_observation_ids(db, manifest)
-    development_rows = (
-        db.execute(
-            select(ThemeDevelopmentObservation, EconomicThemeDevelopment)
-            .join(
-                EconomicThemeDevelopment,
-                EconomicThemeDevelopment.observation_id
-                == ThemeDevelopmentObservation.id,
-            )
-            .where(ThemeDevelopmentObservation.id.in_(development_ids))
-        ).all()
-        if development_ids
-        else []
+    development_rows = _development_rows(
+        db,
+        observation_ids=development_ids,
+        allocations=allocations,
+        destinations=destinations,
     )
-    if any(link.economic_theme_id not in theme_ids for _, link in development_rows):
+    if any(theme_id not in theme_ids for _, theme_id in development_rows):
         raise SnapshotBundleError("snapshot_reference_not_in_taxonomy")
 
     social_by_theme = _pinned_social_memberships(db, interpretation.id)
@@ -507,8 +501,8 @@ def _build_economic_snapshot_payloads(
                         "facts": dict(row.facts),
                         "citations": list(row.citations),
                     }
-                    for row, link in development_rows
-                    if link.economic_theme_id == revision.theme_id
+                    for row, theme_id in development_rows
+                    if theme_id == revision.theme_id
                 ],
                 "relationships": [
                     _relationship_payload(row)
@@ -665,6 +659,72 @@ def _pinned_development_observation_ids(db, manifest):
                 raise SnapshotBundleError("development_revision_not_pinned")
             observation_ids.update(revision.payload.get("observation_ids", []))
     return observation_ids
+
+
+def _development_rows(db, *, observation_ids, allocations, destinations):
+    if not observation_ids:
+        return []
+    ids = {int(value) for value in observation_ids}
+    observations = {
+        row.id: row
+        for row in db.scalars(
+            select(ThemeDevelopmentObservation).where(
+                ThemeDevelopmentObservation.id.in_(ids)
+            )
+        )
+    }
+    theme_links = {
+        (row.observation_id, row.economic_theme_id)
+        for row in db.scalars(
+            select(EconomicThemeDevelopment).where(
+                EconomicThemeDevelopment.observation_id.in_(ids)
+            )
+        )
+    }
+    allocation_by_claim = {
+        (
+            row.legacy_theme_cluster_id,
+            row.allocation_kind,
+            row.allocation_key,
+        ): row
+        for row in allocations
+    }
+    destinations_by_legacy = {}
+    for row in destinations:
+        destinations_by_legacy.setdefault(row.legacy_theme_cluster_id, []).append(
+            row.destination_theme_id
+        )
+    for link in db.scalars(
+        select(ThemeDevelopmentTheme).where(
+            ThemeDevelopmentTheme.observation_id.in_(ids)
+        )
+    ):
+        allocation = allocation_by_claim.get(
+            (
+                link.theme_id,
+                "development",
+                f"theme_development_observation:{link.observation_id}",
+            )
+        )
+        if allocation is not None:
+            if allocation.destination_theme_id is not None:
+                theme_links.add(
+                    (link.observation_id, allocation.destination_theme_id)
+                )
+            continue
+        mapped = destinations_by_legacy.get(link.theme_id, [])
+        if len(mapped) == 1:
+            theme_links.add((link.observation_id, mapped[0]))
+        elif len(mapped) > 1:
+            raise SnapshotBundleError("legacy_development_allocation_missing")
+    return [
+        (observations[observation_id], theme_id)
+        for observation_id, theme_id in sorted(
+            theme_links,
+            key=lambda value: (value[0], str(value[1])),
+        )
+        if observation_id in observations
+    ]
 
 
 def _pinned_social_memberships(db, interpretation_set_id):

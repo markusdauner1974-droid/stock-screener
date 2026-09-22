@@ -6,7 +6,7 @@ from unittest.mock import Mock
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 
 from app.database import SessionLocal
 from app.domain.economic_taxonomy.contracts import AdminPrincipal
@@ -436,6 +436,47 @@ def test_discovery_limit_applies_only_to_new_requests(db_session):
             ProcessingRequest.policy_bundle_version == "economic-taxonomy-v1",
         )
     ) is not None
+
+
+def test_discovery_filters_and_limits_candidates_in_one_database_query(db_session):
+    _authority(db_session)
+    admission = EconomicSourceAdmissionService(db_session)
+    for index in range(3):
+        admission.admit_content(
+            EvidenceAdmission(
+                provider="test",
+                canonical_item_id=f"bounded-{index}",
+                capture_route="test",
+                original_text=f"Bounded evidence {index}",
+                preparation_version="prep-v1",
+                available_at=NOW,
+                evidence_channels=("narrative",),
+            )
+        )
+    db_session.commit()
+    statements = []
+
+    def capture(_connection, _cursor, statement, _parameters, _context, _many):
+        statements.append(statement.lower())
+
+    bind = db_session.get_bind()
+    event.listen(bind, "before_cursor_execute", capture)
+    try:
+        EconomicTaxonomyTaskService(
+            SessionLocal, pipeline=_Pipeline(), clock=lambda: NOW
+        ).discover(limit=1)
+    finally:
+        event.remove(bind, "before_cursor_execute", capture)
+
+    candidate_queries = [
+        statement
+        for statement in statements
+        if "economic_evidence_precedence_revisions" in statement
+        and "economic_lens_eligibility_revisions" in statement
+        and "economic_processing_requests" in statement
+    ]
+    assert len(candidate_queries) == 1
+    assert " limit " in candidate_queries[0]
 
 
 def test_delivery_poll_recovers_missing_publish_notification(db_session):
