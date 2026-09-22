@@ -99,6 +99,25 @@ def test_adding_lens_does_not_create_packet_or_work(db_session):
     assert publication_revision.revision_number == revised.revision_number
 
 
+def test_readmitting_same_packet_merges_new_lens_without_new_packet(db_session):
+    admission = EconomicSourceAdmissionService(db_session)
+    first = admission.admit_content(_post(evidence_channels=("technical",)))
+
+    repeated = admission.admit_content(
+        _post(evidence_channels=("technical", "fundamental"))
+    )
+    latest = db_session.scalar(
+        select(LensEligibilityRevision)
+        .where(LensEligibilityRevision.evidence_packet_id == first.packet_id)
+        .order_by(LensEligibilityRevision.revision_number.desc())
+        .limit(1)
+    )
+
+    assert repeated.packet_id == first.packet_id
+    assert latest.evidence_channels == ["fundamental", "technical"]
+    assert db_session.scalar(select(func.count()).select_from(EvidencePacket)) == 1
+
+
 def test_packet_hash_excludes_lens_but_frozen_inputs_remain_reproducible(db_session):
     admission = EconomicSourceAdmissionService(db_session)
     first = admission.admit_content(_post(evidence_channels=("technical",)))
@@ -119,6 +138,17 @@ def test_packet_hash_excludes_lens_but_frozen_inputs_remain_reproducible(db_sess
         db_session.get(EvidencePacket, first.packet_id).grounding_snapshot
         == frozen_grounding
     )
+    effective_eligibility = db_session.scalar(
+        select(LensEligibilityRevision)
+        .where(LensEligibilityRevision.evidence_packet_id == first.packet_id)
+        .order_by(LensEligibilityRevision.revision_number.desc())
+        .limit(1)
+    )
+    assert effective_eligibility.evidence_channels == [
+        "fundamental",
+        "narrative",
+        "technical",
+    ]
 
 
 def test_delayed_packet_keeps_admission_order_without_claiming_freshness(db_session):

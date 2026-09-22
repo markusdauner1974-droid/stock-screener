@@ -39,6 +39,7 @@ from app.services.economic_taxonomy_snapshot_builder import (
     GenerationSnapshotInputs,
     build_snapshot_bundle,
 )
+from app.services.economic_theme_metrics_service import EconomicThemeMetricsService
 from app.services.economic_theme_observation_service import (
     EconomicThemeObservationService,
     materialize_assignment_facts,
@@ -338,8 +339,34 @@ def test_generation_queries_ignore_later_auxiliary_revisions(db_session):
     assert [(row.security_id, row.exposure_kind) for row in constituents] == [
         (42, "producer")
     ]
-    assert [(row.security_id, row.signal_kind) for row in signals] == [(42, "breakout")]
-    assert signals[0].effective_at == NOW
+    assert signals == []
+
+
+def test_metrics_exclude_signals_without_pinned_technical_eligibility(db_session):
+    taxonomy, _parent, child, admitted, attempt, _assignment, eligibility = _setup(
+        db_session
+    )
+    materialize_assignment_facts(
+        db_session,
+        classification_attempt_id=attempt.id,
+        evidence_channels=eligibility.evidence_channels,
+        taxonomy_version_id=taxonomy.id,
+        detector_policy_version="signals-v1",
+    )
+    generation = _generation(db_session, taxonomy, admitted, attempt, eligibility)
+    service = EconomicThemeMetricsService(db_session)
+    inputs = service._load_inputs(
+        taxonomy_version_id=taxonomy.id,
+        interpretation_set_id=generation.interpretation_set_id,
+        generation_input_manifest_id=generation.generation_input_manifest_id,
+        pinned_eligibility_revisions={},
+    )
+    selected = next(value for value in inputs if value.theme_id == child.id)
+
+    assert selected.signals == ()
+    assert service.calculate(selected, as_of=NOW).technical_attention.availability == (
+        "unavailable"
+    )
 
 
 def test_generation_filters_observations_by_pinned_lens_eligibility(db_session):
@@ -405,6 +432,7 @@ def test_snapshot_filters_observations_by_pinned_lens_eligibility(db_session):
 
     assert by_id[str(child.id)]["direct_observation_count"] == 1
     assert by_id[str(parent.id)]["derived_observation_count"] == 1
+    assert by_id[str(child.id)]["signals"] == []
 
 
 def test_direct_root_count_deduplicates_source_family_and_excludes_derived(db_session):

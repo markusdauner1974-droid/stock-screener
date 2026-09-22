@@ -133,10 +133,18 @@ class EconomicSourceAdmissionService:
             self.session,
             expected_epoch=expected_epoch,
             allowed_modes={"legacy", "shadow", "dual", "economic"},
-        ):
-            return self._admit(evidence)
+        ) as authority:
+            return self._admit(
+                evidence,
+                authority_epoch=authority.authority_epoch,
+            )
 
-    def _admit(self, evidence: EvidenceAdmission) -> AdmissionResult:
+    def _admit(
+        self,
+        evidence: EvidenceAdmission,
+        *,
+        authority_epoch: int,
+    ) -> AdmissionResult:
         family = self._get_or_create_family(evidence)
         lineage = self._get_or_create_lineage(family, evidence)
         self.session.execute(
@@ -155,6 +163,15 @@ class EconomicSourceAdmissionService:
         ).scalar_one_or_none()
         if existing is not None:
             effective = self.effective_packet(lineage.id)
+            if effective is not None and (
+                existing.id == effective.id
+                or existing.precedence_state == "equivalent"
+            ):
+                self._merge_equivalent_eligibility(
+                    effective,
+                    evidence.evidence_channels,
+                    authority_epoch=authority_epoch,
+                )
             return self._result(family, lineage, existing, effective)
 
         accepted = self.effective_packet(lineage.id)
@@ -249,7 +266,40 @@ class EconomicSourceAdmissionService:
         )
         self.session.flush()
         effective = packet if state == "effective" else accepted
+        if state == "equivalent" and effective is not None:
+            self._merge_equivalent_eligibility(
+                effective,
+                evidence.evidence_channels,
+                authority_epoch=authority_epoch,
+            )
         return self._result(family, lineage, packet, effective)
+
+    def _merge_equivalent_eligibility(
+        self,
+        effective: EvidencePacket,
+        evidence_channels: tuple[str, ...],
+        *,
+        authority_epoch: int,
+    ) -> None:
+        latest = self.session.execute(
+            select(LensEligibilityRevision)
+            .where(LensEligibilityRevision.evidence_packet_id == effective.id)
+            .order_by(LensEligibilityRevision.revision_number.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        merged = tuple(
+            sorted(set(latest.evidence_channels if latest else ()) | set(evidence_channels))
+        )
+        if latest is not None and tuple(sorted(latest.evidence_channels)) == merged:
+            return
+        self._revise_lens_eligibility(
+            effective.id,
+            add=None,
+            remove=None,
+            evidence_channels=merged,
+            reason="equivalent_evidence_admission",
+            authority_epoch=authority_epoch,
+        )
 
     def effective_packet(self, lineage_id: UUID) -> EvidencePacket | None:
         return self.session.execute(

@@ -21,10 +21,10 @@ from app.models.economic_taxonomy_runtime import (
     LensEligibilityRevision,
     MetricsRevision,
     ThemeMetric,
-    ThemeSignalObservation,
 )
 from app.services.economic_theme_observation_service import (
     EconomicThemeObservationService,
+    signal_rows_for_interpretation,
 )
 from app.utils.file_hashing import canonical_json_sha256 as _hash
 
@@ -541,22 +541,11 @@ class EconomicThemeMetricsService:
                     direction=fact.payload.get("direction"),
                 )
             )
-        signal_rows = self.session.execute(
-            select(ThemeSignalObservation, ClaimAssignment)
-            .join(
-                ClaimAssignment,
-                ClaimAssignment.id == ThemeSignalObservation.claim_assignment_id,
-            )
-            .join(
-                InterpretationSelection,
-                InterpretationSelection.selected_classification_attempt_id
-                == ClaimAssignment.classification_attempt_id,
-            )
-            .where(
-                InterpretationSelection.interpretation_set_id
-                == interpretation_set_id
-            )
-        ).all()
+        signal_rows = signal_rows_for_interpretation(
+            self.session,
+            interpretation_set_id=interpretation_set_id,
+            manifest_id=generation_input_manifest_id,
+        )
         signals: dict[UUID, list[MetricSignal]] = defaultdict(list)
         for signal, assignment in signal_rows:
             signals[assignment.economic_theme_id].append(

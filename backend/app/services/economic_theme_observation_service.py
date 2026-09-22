@@ -80,13 +80,13 @@ class SignalFact:
     payload: dict[str, Any]
 
 
-def observation_rows_for_interpretation(
+def eligibility_channels_by_attempt(
     session,
     *,
     interpretation_set_id: UUID,
     manifest_id: UUID,
-) -> list[tuple[ThemeObservation, ClaimAssignment]]:
-    """Return selected observation rows allowed by the manifest's lens revision."""
+) -> dict[UUID, frozenset[str]]:
+    """Resolve the exact lens eligibility pinned for each selected attempt."""
 
     manifest = session.get(GenerationInputManifest, manifest_id)
     if manifest is None:
@@ -121,6 +121,22 @@ def observation_rows_for_interpretation(
         channels_by_attempt[selection.selected_classification_attempt_id] = frozenset(
             eligibility.evidence_channels
         )
+    return channels_by_attempt
+
+
+def observation_rows_for_interpretation(
+    session,
+    *,
+    interpretation_set_id: UUID,
+    manifest_id: UUID,
+) -> list[tuple[ThemeObservation, ClaimAssignment]]:
+    """Return selected observation rows allowed by the manifest's lens revision."""
+
+    channels_by_attempt = eligibility_channels_by_attempt(
+        session,
+        interpretation_set_id=interpretation_set_id,
+        manifest_id=manifest_id,
+    )
     rows = session.execute(
         select(ThemeObservation, ClaimAssignment)
         .join(
@@ -139,6 +155,43 @@ def observation_rows_for_interpretation(
         (observation, assignment)
         for observation, assignment in rows
         if observation.evidence_channel
+        in channels_by_attempt.get(
+            assignment.classification_attempt_id, frozenset()
+        )
+    ]
+
+
+def signal_rows_for_interpretation(
+    session,
+    *,
+    interpretation_set_id: UUID,
+    manifest_id: UUID,
+) -> list[tuple[ThemeSignalObservation, ClaimAssignment]]:
+    """Return selected technical signals allowed by pinned lens eligibility."""
+
+    channels_by_attempt = eligibility_channels_by_attempt(
+        session,
+        interpretation_set_id=interpretation_set_id,
+        manifest_id=manifest_id,
+    )
+    rows = session.execute(
+        select(ThemeSignalObservation, ClaimAssignment)
+        .join(
+            ClaimAssignment,
+            ClaimAssignment.id == ThemeSignalObservation.claim_assignment_id,
+        )
+        .join(
+            InterpretationSelection,
+            InterpretationSelection.selected_classification_attempt_id
+            == ClaimAssignment.classification_attempt_id,
+        )
+        .where(InterpretationSelection.interpretation_set_id == interpretation_set_id)
+        .order_by(ThemeSignalObservation.created_at, ThemeSignalObservation.id)
+    ).all()
+    return [
+        (signal, assignment)
+        for signal, assignment in rows
+        if "technical"
         in channels_by_attempt.get(
             assignment.classification_attempt_id, frozenset()
         )
@@ -557,26 +610,11 @@ class EconomicThemeObservationService:
             generation = session.get(ServingGeneration, generation_id)
             if generation is None:
                 raise KeyError(f"serving generation {generation_id} not found")
-            rows = session.execute(
-                select(ThemeSignalObservation, ClaimAssignment)
-                .join(
-                    ClaimAssignment,
-                    ClaimAssignment.id == ThemeSignalObservation.claim_assignment_id,
-                )
-                .join(
-                    InterpretationSelection,
-                    InterpretationSelection.selected_classification_attempt_id
-                    == ClaimAssignment.classification_attempt_id,
-                )
-                .where(
-                    InterpretationSelection.interpretation_set_id
-                    == generation.interpretation_set_id
-                )
-                .order_by(
-                    ThemeSignalObservation.created_at,
-                    ThemeSignalObservation.id,
-                )
-            ).all()
+            rows = signal_rows_for_interpretation(
+                session,
+                interpretation_set_id=generation.interpretation_set_id,
+                manifest_id=generation.generation_input_manifest_id,
+            )
             facts = []
             for signal, assignment in rows:
                 payload = dict(signal.payload)

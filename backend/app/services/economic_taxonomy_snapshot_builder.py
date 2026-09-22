@@ -46,7 +46,6 @@ from app.models.economic_taxonomy_runtime import (
     TaxonomyOperationRequest,
     ThemeConstituentExposure,
     ThemeMetric,
-    ThemeSignalObservation,
 )
 from app.models.stock_universe import StockUniverse
 from app.models.theme_intelligence import (
@@ -55,6 +54,10 @@ from app.models.theme_intelligence import (
 )
 from app.services.economic_theme_observation_service import (
     observation_rows_for_interpretation,
+    signal_rows_for_interpretation,
+)
+from app.services.economic_taxonomy_interpretations import (
+    manifest_social_revision_contracts,
 )
 from app.utils.file_hashing import canonical_json_sha256 as _snapshot_hash
 
@@ -298,15 +301,14 @@ def _build_economic_snapshot_payloads(
         if assignment_ids
         else []
     )
-    signal_rows = (
-        db.scalars(
-            select(ThemeSignalObservation).where(
-                ThemeSignalObservation.claim_assignment_id.in_(assignment_ids)
-            )
-        ).all()
-        if assignment_ids
-        else []
-    )
+    signal_rows = [
+        signal
+        for signal, _assignment in signal_rows_for_interpretation(
+            db,
+            interpretation_set_id=interpretation.id,
+            manifest_id=manifest.id,
+        )
+    ]
     if any(row.economic_theme_id not in theme_ids for row in assignments):
         raise SnapshotBundleError("snapshot_reference_not_in_taxonomy")
 
@@ -666,15 +668,44 @@ def _pinned_development_observation_ids(db, manifest):
 
 
 def _pinned_social_memberships(db, interpretation_set_id):
-    refs = db.scalars(
-        select(SocialAssociationRevisionRef)
-        .join(
-            InterpretationSelection,
-            InterpretationSelection.social_association_revision_ref_id
-            == SocialAssociationRevisionRef.id,
+    interpretation = db.get(InterpretationSet, interpretation_set_id)
+    manifest = (
+        db.get(GenerationInputManifest, interpretation.generation_input_manifest_id)
+        if interpretation is not None
+        else None
+    )
+    if manifest is None:
+        raise SnapshotBundleError("generation_manifest_missing")
+    try:
+        contracts = manifest_social_revision_contracts(manifest.selections or [])
+    except ValueError as exc:
+        raise SnapshotBundleError(str(exc)) from exc
+    refs_by_identity = {
+        (ref.association_id, ref.revision_number): ref
+        for ref in db.scalars(
+            select(SocialAssociationRevisionRef)
+            .join(
+                InterpretationSelection,
+                InterpretationSelection.social_association_revision_ref_id
+                == SocialAssociationRevisionRef.id,
+            )
+            .where(
+                InterpretationSelection.interpretation_set_id
+                == interpretation_set_id
+            )
         )
-        .where(InterpretationSelection.interpretation_set_id == interpretation_set_id)
-    ).all()
+    }
+    for association_id, revision_number in contracts:
+        ref = db.scalar(
+            select(SocialAssociationRevisionRef).where(
+                SocialAssociationRevisionRef.association_id == association_id,
+                SocialAssociationRevisionRef.revision_number == revision_number,
+            )
+        )
+        if ref is None:
+            raise SnapshotBundleError("social_revision_not_pinned")
+        refs_by_identity[(association_id, revision_number)] = ref
+    refs = refs_by_identity.values()
     grouped = {}
     for ref in refs:
         association = db.get(EconomicSocialAssociation, ref.association_id)

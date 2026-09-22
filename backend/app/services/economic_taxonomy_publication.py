@@ -18,6 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.domain.economic_taxonomy.contracts import AdminPrincipal
+from app.infra.db.models.social_analysis import EconomicSocialAssociationRevision
 from app.infra.db.repositories.economic_taxonomy_publication_repo import (
     EconomicTaxonomyPublicationRepository,
     PublicationInvariantError,
@@ -41,6 +42,9 @@ from app.models.theme_intelligence import (
     ThemeDevelopmentObservation,
 )
 from app.services.economic_taxonomy_fence import exclusive_publication
+from app.services.economic_social_taxonomy_adapter import (
+    EconomicSocialTaxonomyAdapter,
+)
 from app.services.economic_taxonomy_interpretations import (
     EconomicTaxonomyInterpretationService,
 )
@@ -596,10 +600,8 @@ class EconomicTaxonomyPublicationCoordinator:
                     "constituent_decision_revision": old.get(
                         "constituent_decision_revision"
                     ),
-                    "social_association_revision": old.get(
-                        "social_association_revision"
-                    ),
-                    "social_decision_revision": old.get("social_decision_revision"),
+                    "social_association_revision": None,
+                    "social_decision_revision": None,
                     "development_identity": (
                         development_selections[0]["development_identity"]
                         if len(development_selections) == 1
@@ -619,7 +621,45 @@ class EconomicTaxonomyPublicationCoordinator:
             if len(development_selections) > 1:
                 selection["development_selections"] = development_selections
             selections.append(selection)
+        social_revisions = (
+            EconomicTaxonomyPublicationCoordinator._current_social_revisions(session)
+        )
+        if social_revisions:
+            if not selections:
+                raise PublicationInvariantError(
+                    "social_revision_without_source_selection"
+                )
+            selections[0]["social_association_revision"] = social_revisions[0]
+            selections[0]["social_association_revisions"] = social_revisions
         return selections
+
+    @staticmethod
+    def _current_social_revisions(session: Session) -> list[dict[str, Any]]:
+        latest_by_association = {}
+        for revision in session.scalars(
+            select(EconomicSocialAssociationRevision).order_by(
+                EconomicSocialAssociationRevision.association_id,
+                EconomicSocialAssociationRevision.revision_number.desc(),
+            )
+        ):
+            latest_by_association.setdefault(revision.association_id, revision)
+        adapter = EconomicSocialTaxonomyAdapter(session)
+        result = []
+        for association_id in sorted(latest_by_association, key=str):
+            revision = latest_by_association[association_id]
+            ref = adapter.pin_revision(revision.id)
+            result.append(
+                {
+                    "association_id": str(ref.association_id),
+                    "revision_number": ref.revision_number,
+                    "decision_revision_id": (
+                        str(ref.decision_revision_id)
+                        if ref.decision_revision_id is not None
+                        else None
+                    ),
+                }
+            )
+        return result
 
     @staticmethod
     def _development_selections(

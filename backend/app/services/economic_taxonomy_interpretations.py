@@ -41,6 +41,31 @@ class InvalidInterpretation(ValueError):
     pass
 
 
+def manifest_social_revision_contracts(raw_entries) -> tuple[tuple[UUID, int], ...]:
+    """Return every immutable Social association revision pinned by a manifest."""
+
+    contracts = set()
+    for entry in raw_entries:
+        if not isinstance(entry, dict):
+            raise ValueError("manifest_selection_must_be_object")
+        values = entry.get("social_association_revisions")
+        if values is None:
+            single = entry.get("social_association_revision")
+            values = [] if single is None else [single]
+        if not isinstance(values, list):
+            raise ValueError("invalid_social_association_revisions")
+        for value in values:
+            try:
+                association_id = UUID(str(value["association_id"]))
+                revision_number = int(value["revision_number"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError("invalid_social_association_revision") from exc
+            if revision_number <= 0:
+                raise ValueError("invalid_social_association_revision")
+            contracts.add((association_id, revision_number))
+    return tuple(sorted(contracts, key=lambda value: (str(value[0]), value[1])))
+
+
 def create_interpretation_override(
     session: Session,
     *,
@@ -109,6 +134,7 @@ class EconomicTaxonomyInterpretationService:
 
             raw_entries = list(manifest.selections or [])
             parsed_entries = [self._parse_entry(entry) for entry in raw_entries]
+            social_refs = self._manifest_social_refs(session, raw_entries)
             try:
                 lineage_ids = [UUID(entry.lineage) for entry in parsed_entries]
             except (TypeError, ValueError) as exc:
@@ -171,15 +197,19 @@ class EconomicTaxonomyInterpretationService:
                     }
                 )
             semantic_rows.sort(key=lambda row: row["lineage_id"])
+            semantic_payload = {
+                "selections": semantic_rows,
+                "social_ref_ids": [str(ref.id) for ref in social_refs],
+            }
             session.flush()
             interpretation.seal(
-                semantic_hash=_hash(semantic_rows),
+                semantic_hash=_hash(semantic_payload),
                 artifact_integrity_hash=_hash(
                     {
                         "interpretation_set_id": str(interpretation.id),
                         "manifest_id": str(manifest.id),
                         "created_by": actor,
-                        "selections": semantic_rows,
+                        **semantic_payload,
                     }
                 ),
             )
@@ -423,6 +453,25 @@ class EconomicTaxonomyInterpretationService:
         if row is None:
             raise InvalidInterpretation("social_revision_not_pinned")
         return row
+
+    @staticmethod
+    def _manifest_social_refs(session, raw_entries):
+        try:
+            contracts = manifest_social_revision_contracts(raw_entries)
+        except ValueError as exc:
+            raise InvalidInterpretation(str(exc)) from exc
+        refs = []
+        for association_id, revision_number in contracts:
+            row = session.scalar(
+                select(SocialAssociationRevisionRef).where(
+                    SocialAssociationRevisionRef.association_id == association_id,
+                    SocialAssociationRevisionRef.revision_number == revision_number,
+                )
+            )
+            if row is None:
+                raise InvalidInterpretation("social_revision_not_pinned")
+            refs.append(row)
+        return tuple(refs)
 
     @staticmethod
     def _validate_auxiliary_revisions(

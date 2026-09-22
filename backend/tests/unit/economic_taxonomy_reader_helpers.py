@@ -166,11 +166,8 @@ def seed_generation(db, *, display_name="AI Memory", set_serving=True):
                 "evidence_precedence_revision": 2,
                 "lens_eligibility_revision": 3,
                 "constituent_decision_revision": 4,
-                "social_association_revision": {
-                    "association_id": "00000000-0000-0000-0000-000000000001",
-                    "revision_number": 5,
-                },
-                "social_decision_revision": 6,
+                "social_association_revision": None,
+                "social_decision_revision": None,
                 "development_identity": str(development_identity),
                 "development_revision": 7,
                 "override_revision": 8,

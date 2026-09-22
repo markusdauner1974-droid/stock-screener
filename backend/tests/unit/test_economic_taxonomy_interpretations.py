@@ -26,6 +26,7 @@ from app.models.economic_taxonomy_runtime import (
     TaxonomyAuthority,
     ThemeObservation,
 )
+from app.models.stock_universe import StockUniverse
 from app.models.theme import ContentItem
 from app.services.economic_source_admission import (
     EconomicSourceAdmissionService,
@@ -38,6 +39,12 @@ from app.services.economic_taxonomy_interpretations import (
 )
 from app.services.economic_taxonomy_publication import (
     EconomicTaxonomyPublicationCoordinator,
+)
+from app.services.economic_social_taxonomy_adapter import (
+    EconomicSocialTaxonomyAdapter,
+)
+from app.services.economic_taxonomy_snapshot_builder import (
+    _pinned_social_memberships,
 )
 from app.services.economic_taxonomy_seed import seed_initial_dimensions
 from app.services.theme_development_service import record_developments
@@ -375,6 +382,93 @@ def test_publication_refresh_preserves_authenticated_interpretation_override(
     assert selections[0]["selected_attempt_id"] != str(newer.id)
     assert selections[0]["evidence_packet_id"] == str(older_packet.packet_id)
     assert selections[0]["interpretation_override_revision_id"] == str(override.id)
+
+
+def test_publication_cutoff_pins_all_current_social_association_revisions(
+    db_session,
+):
+    taxonomy, theme = _fixture(db_session)
+    admitted = _admit(db_session)
+    _attempt(
+        db_session,
+        admitted=admitted,
+        taxonomy_id=taxonomy.id,
+        theme_id=theme.id,
+    )
+    db_session.add_all(
+        [
+            StockUniverse(id=81, symbol="MU", name="Micron", market="US"),
+            StockUniverse(id=82, symbol="WDC", name="Western Digital", market="US"),
+        ]
+    )
+    db_session.flush()
+    adapter = EconomicSocialTaxonomyAdapter(db_session)
+    associations = []
+    revisions = []
+    for security_id in (81, 82):
+        association = adapter.get_or_create_association(theme.id, security_id)
+        associations.append(association)
+        revisions.append(
+            adapter.revise(
+                association.id,
+                state="accepted",
+                idempotency_key=f"accepted:{security_id}",
+                actor="admin:test",
+                reason="reviewed membership",
+                mirror_acknowledged=True,
+                evidence_packet_id=admitted.packet_id,
+            )
+        )
+    db_session.commit()
+    factory = lambda: db_session.__class__(bind=db_session.get_bind())
+
+    cutoff = EconomicTaxonomyPublicationCoordinator(factory).capture_cutoff(
+        principal=ADMIN
+    )
+    manifest = db_session.get(GenerationInputManifest, cutoff.manifest_id)
+    pinned = manifest.selections[0]["social_association_revisions"]
+    assert {
+        (row["association_id"], row["revision_number"])
+        for row in pinned
+    } == {
+        (str(revision.association_id), revision.revision_number)
+        for revision in revisions
+    }
+
+    interpretation = EconomicTaxonomyInterpretationService(
+        factory
+    ).build_interpretation_set(manifest.id)
+    memberships = _pinned_social_memberships(db_session, interpretation.id)
+
+    assert {
+        row["security_id"] for row in memberships[theme.id]
+    } == {81, 82}
+
+    rejected = adapter.revise(
+        associations[0].id,
+        state="rejected",
+        idempotency_key="rejected:81",
+        actor="admin:test",
+        reason="corrected membership",
+        mirror_acknowledged=True,
+        evidence_packet_id=admitted.packet_id,
+    )
+    db_session.commit()
+    next_cutoff = EconomicTaxonomyPublicationCoordinator(factory).capture_cutoff(
+        principal=ADMIN
+    )
+    next_manifest = db_session.get(GenerationInputManifest, next_cutoff.manifest_id)
+    next_pins = {
+        row["association_id"]: row["revision_number"]
+        for row in next_manifest.selections[0]["social_association_revisions"]
+    }
+
+    assert next_pins[str(associations[0].id)] == rejected.revision_number
+    assert {
+        row["state"] for row in _pinned_social_memberships(
+            db_session, interpretation.id
+        )[theme.id]
+    } == {"accepted"}
 
 
 def test_publication_cutoff_advances_development_selection(db_session):
