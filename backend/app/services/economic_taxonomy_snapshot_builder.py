@@ -633,22 +633,35 @@ def _mapping_payload(row):
 def _pinned_development_observation_ids(db, manifest):
     observation_ids = set()
     for raw in manifest.selections or []:
-        revision_number = raw.get("development_revision")
-        if revision_number is None:
-            continue
-        query = select(DevelopmentSelectionRevision).where(
-            DevelopmentSelectionRevision.revision_number == int(revision_number)
-        )
-        identity = raw.get("development_identity")
-        if identity is not None:
-            query = query.where(
-                DevelopmentSelectionRevision.development_identity
-                == UUID(str(identity))
+        selections = raw.get("development_selections")
+        if selections is None:
+            selections = (
+                [
+                    {
+                        "development_identity": raw.get("development_identity"),
+                        "revision_number": raw.get("development_revision"),
+                    }
+                ]
+                if raw.get("development_revision") is not None
+                else []
             )
-        rows = db.scalars(query).all()
-        if len(rows) != 1:
-            raise SnapshotBundleError("development_revision_not_pinned")
-        observation_ids.update(rows[0].payload.get("observation_ids", []))
+        if not isinstance(selections, list):
+            raise SnapshotBundleError("invalid_development_selections")
+        for selection in selections:
+            try:
+                identity = UUID(str(selection["development_identity"]))
+                revision_number = int(selection["revision_number"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise SnapshotBundleError("invalid_development_selection") from exc
+            revision = db.scalar(
+                select(DevelopmentSelectionRevision).where(
+                    DevelopmentSelectionRevision.development_identity == identity,
+                    DevelopmentSelectionRevision.revision_number == revision_number,
+                )
+            )
+            if revision is None:
+                raise SnapshotBundleError("development_revision_not_pinned")
+            observation_ids.update(revision.payload.get("observation_ids", []))
     return observation_ids
 
 

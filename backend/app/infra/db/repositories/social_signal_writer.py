@@ -804,7 +804,10 @@ class SocialSignalWriter:
                 prior = db.get(SocialSignalRun, pointer.run_id)
                 if utc(prior.created_at) >= utc(run.created_at):
                     raise ValueError("publication_generation_superseded")
-            SocialThemeProjectionService(db).apply_live(projection, expected_mode_version, prepared=application)
+            projection_service = SocialThemeProjectionService(db)
+            projection_service.apply_live(
+                projection, expected_mode_version, prepared=application
+            )
             from app.services.social_theme_market_service import LiveAcceptedBasketReader
             basket_reader = LiveAcceptedBasketReader(db)
             for expected in application.baskets:
@@ -816,4 +819,5 @@ class SocialSignalWriter:
             else:
                 pointer.run_id, pointer.updated_at = run_id, now
             run.status, run.published_at = "published", now
+            projection_service.admit_economic_evidence(projection)
         return SocialRunResult(run_id, "live", "complete", True, summary)

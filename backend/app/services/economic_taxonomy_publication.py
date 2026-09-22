@@ -24,6 +24,8 @@ from app.infra.db.repositories.economic_taxonomy_publication_repo import (
 )
 from app.models.economic_taxonomy import TaxonomyVersion
 from app.models.economic_taxonomy_runtime import (
+    ClassificationAttempt,
+    DevelopmentSelectionRevision,
     EvidencePacket,
     EvidencePrecedenceRevision,
     GenerationInputManifest,
@@ -33,6 +35,10 @@ from app.models.economic_taxonomy_runtime import (
     SourceLineage,
     TaxonomyAuthority,
     TaxonomyProjectionEvent,
+)
+from app.models.theme_intelligence import (
+    ThemeDevelopmentEvent,
+    ThemeDevelopmentObservation,
 )
 from app.services.economic_taxonomy_fence import exclusive_publication
 from app.services.economic_taxonomy_interpretations import (
@@ -488,9 +494,10 @@ class EconomicTaxonomyPublicationCoordinator:
             lambda: session
         )
         selections: list[dict[str, Any]] = []
-        for lineage_id in session.scalars(
-            select(SourceLineage.id).order_by(SourceLineage.id)
+        for lineage in session.scalars(
+            select(SourceLineage).order_by(SourceLineage.id)
         ):
+            lineage_id = lineage.id
             precedence_revision = session.scalar(
                 select(func.max(EvidencePrecedenceRevision.revision_number)).where(
                     EvidencePrecedenceRevision.source_lineage_id == lineage_id
@@ -514,6 +521,47 @@ class EconomicTaxonomyPublicationCoordinator:
             )
             if packet is None:
                 continue
+            attempt = interpretation_service._default_attempt(
+                session,
+                lineage_id,
+                precedence_cutoff=precedence_revision,
+            )
+            old = previous.get(str(lineage_id), {})
+            override_id = old.get("interpretation_override_revision_id")
+            if override_id is not None:
+                try:
+                    selected_attempt_id = UUID(str(old["selected_attempt_id"]))
+                    parsed_override_id = UUID(str(override_id))
+                    selected = session.get(ClassificationAttempt, selected_attempt_id)
+                    if selected is None or not interpretation_service._attempt_completed(
+                        session, selected
+                    ):
+                        raise ValueError("override attempt is not completed")
+                    interpretation_service._validated_override(
+                        session,
+                        parsed_override_id,
+                        lineage_id=lineage_id,
+                        selected_attempt_id=selected.id,
+                    )
+                    selected_packet = interpretation_service._packet_for_attempt(
+                        session, selected
+                    )
+                    if (
+                        selected_packet.source_lineage_id != lineage_id
+                        or interpretation_service._packet_precedence_state(
+                            session,
+                            selected_packet.id,
+                            cutoff=precedence_revision,
+                        )
+                        not in {"effective", "equivalent"}
+                    ):
+                        raise ValueError("override evidence is no longer selectable")
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise PublicationInvariantError(
+                        "interpretation_override_replacement_required"
+                    ) from exc
+                attempt = selected
+                packet = selected_packet
             eligibility = session.scalar(
                 select(LensEligibilityRevision)
                 .where(LensEligibilityRevision.evidence_packet_id == packet.id)
@@ -521,26 +569,30 @@ class EconomicTaxonomyPublicationCoordinator:
                 .limit(1)
             )
             if eligibility is None:
+                if override_id is not None:
+                    raise PublicationInvariantError(
+                        "interpretation_override_replacement_required"
+                    )
                 continue
-            attempt = interpretation_service._default_attempt(
-                session,
-                lineage_id,
-                precedence_cutoff=precedence_revision,
+            development_selections = (
+                EconomicTaxonomyPublicationCoordinator._development_selections(
+                    session, lineage.source_family_id
+                )
             )
-            old = previous.get(str(lineage_id), {})
             projection_revision = session.scalar(
                 select(func.max(TaxonomyProjectionEvent.projection_revision)).where(
                     TaxonomyProjectionEvent.source_lineage == str(lineage_id)
                 )
             )
-            selections.append(
-                {
+            selection = {
                     "lineage": str(lineage_id),
                     "evidence_packet_id": str(packet.id),
                     "selected_attempt_id": str(attempt.id) if attempt else None,
                     "eligibility_revision": eligibility.revision_number,
                     "evidence_precedence_revision": int(precedence_revision),
-                    "interpretation_override_revision_id": None,
+                    "interpretation_override_revision_id": (
+                        str(override_id) if override_id is not None else None
+                    ),
                     "constituent_decision_revision": old.get(
                         "constituent_decision_revision"
                     ),
@@ -548,15 +600,63 @@ class EconomicTaxonomyPublicationCoordinator:
                         "social_association_revision"
                     ),
                     "social_decision_revision": old.get("social_decision_revision"),
-                    "development_identity": old.get("development_identity"),
-                    "development_revision": old.get("development_revision"),
+                    "development_identity": (
+                        development_selections[0]["development_identity"]
+                        if len(development_selections) == 1
+                        else None
+                    ),
+                    "development_revision": (
+                        development_selections[0]["revision_number"]
+                        if len(development_selections) == 1
+                        else None
+                    ),
                     "mapping_revision": max(1, authority.processing_head_revision),
                     "metrics_policy_revision": 1,
                     "compatibility_projection_revision": max(
                         1, int(projection_revision or 0) + 1
                     ),
                 }
+            if len(development_selections) > 1:
+                selection["development_selections"] = development_selections
+            selections.append(selection)
+        return selections
+
+    @staticmethod
+    def _development_selections(
+        session: Session, source_family_id: UUID
+    ) -> list[dict[str, Any]]:
+        identities = {
+            value
+            for value in session.scalars(
+                select(ThemeDevelopmentEvent.development_identity)
+                .join(
+                    ThemeDevelopmentObservation,
+                    ThemeDevelopmentObservation.event_id == ThemeDevelopmentEvent.id,
+                )
+                .where(
+                    ThemeDevelopmentObservation.source_family_id == source_family_id,
+                    ThemeDevelopmentEvent.development_identity.is_not(None),
+                )
             )
+            if value is not None
+        }
+        selections = []
+        for identity in sorted(identities, key=str):
+            revision = session.scalar(
+                select(DevelopmentSelectionRevision)
+                .where(
+                    DevelopmentSelectionRevision.development_identity == identity
+                )
+                .order_by(DevelopmentSelectionRevision.revision_number.desc())
+                .limit(1)
+            )
+            if revision is not None:
+                selections.append(
+                    {
+                        "development_identity": str(identity),
+                        "revision_number": revision.revision_number,
+                    }
+                )
         return selections
 
     @staticmethod

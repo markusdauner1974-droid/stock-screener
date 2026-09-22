@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import func, select
@@ -16,6 +17,7 @@ from app.models.economic_taxonomy_runtime import (
     ClaimReviewArtifact,
     ClassificationAttempt,
     ClassificationAttemptEvent,
+    DevelopmentSelectionRevision,
     EvidencePrecedenceRevision,
     ExtractionArtifact,
     GenerationInputManifest,
@@ -24,6 +26,7 @@ from app.models.economic_taxonomy_runtime import (
     TaxonomyAuthority,
     ThemeObservation,
 )
+from app.models.theme import ContentItem
 from app.services.economic_source_admission import (
     EconomicSourceAdmissionService,
     EvidenceAdmission,
@@ -37,6 +40,7 @@ from app.services.economic_taxonomy_publication import (
     EconomicTaxonomyPublicationCoordinator,
 )
 from app.services.economic_taxonomy_seed import seed_initial_dimensions
+from app.services.theme_development_service import record_developments
 
 NOW = datetime(2026, 9, 21, 8, 0, tzinfo=timezone.utc)
 ADMIN = AdminPrincipal(
@@ -44,6 +48,26 @@ ADMIN = AdminPrincipal(
     auth_method="admin_api_key",
     roles=frozenset({"taxonomy:review"}),
 )
+
+
+def _development_facts(project: str = "Project A"):
+    return {
+        "theme_ids": [],
+        "actor": "Nebius",
+        "action": "order",
+        "object": f"{project} order",
+        "event_time": "2026-09",
+        "reference": None,
+        "status": "confirmed",
+        "summary": f"Nebius confirmed {project} order.",
+        "quantities": [],
+        "citations": [
+            {
+                "source_id": "primary",
+                "quote": f"Nebius confirmed {project} order 2026-09",
+            }
+        ],
+    }
 
 
 def _fixture(db_session):
@@ -288,6 +312,195 @@ def test_default_publication_cutoff_selects_completed_processing_attempt(db_sess
             "compatibility_projection_revision": 1,
         }
     ]
+
+
+def test_publication_refresh_preserves_authenticated_interpretation_override(
+    db_session,
+):
+    taxonomy, theme = _fixture(db_session)
+    older_packet = _admit(db_session, provider_order=1)
+    older = _attempt(
+        db_session,
+        admitted=older_packet,
+        taxonomy_id=taxonomy.id,
+        theme_id=theme.id,
+    )
+    newer_packet = _admit(
+        db_session,
+        text="Corrected memory story.",
+        provider_order=2,
+        supersedes=older_packet.packet_id,
+    )
+    newer = _attempt(
+        db_session,
+        admitted=newer_packet,
+        taxonomy_id=taxonomy.id,
+        theme_id=theme.id,
+        empty=True,
+    )
+    override = create_interpretation_override(
+        db_session,
+        source_lineage_id=older_packet.source_lineage_id,
+        selected_attempt_id=older.id,
+        reason="Reviewed source correction",
+        principal=ADMIN,
+    )
+    previous = _entry(db_session, older_packet, older.id, override_id=override.id)
+    manifest = SimpleNamespace(selections=[previous])
+    generation = SimpleNamespace(generation_input_manifest_id="manifest")
+
+    class PreviousGenerationSession:
+        def __getattr__(self, name):
+            return getattr(db_session, name)
+
+        def get(self, model, identity, **kwargs):
+            from app.models.economic_taxonomy_runtime import ServingGeneration
+
+            if model is ServingGeneration and identity == "generation":
+                return generation
+            if model is GenerationInputManifest and identity == "manifest":
+                return manifest
+            return db_session.get(model, identity, **kwargs)
+
+    authority = SimpleNamespace(
+        serving_generation_id="generation",
+        processing_head_revision=1,
+    )
+
+    selections = EconomicTaxonomyPublicationCoordinator._current_selections(
+        PreviousGenerationSession(), authority
+    )
+
+    assert selections[0]["selected_attempt_id"] == str(older.id)
+    assert selections[0]["selected_attempt_id"] != str(newer.id)
+    assert selections[0]["evidence_packet_id"] == str(older_packet.packet_id)
+    assert selections[0]["interpretation_override_revision_id"] == str(override.id)
+
+
+def test_publication_cutoff_advances_development_selection(db_session):
+    taxonomy, theme = _fixture(db_session)
+    admitted = _admit(db_session)
+    _attempt(
+        db_session,
+        admitted=admitted,
+        taxonomy_id=taxonomy.id,
+        theme_id=theme.id,
+    )
+    item = ContentItem(
+        source_type="twitter",
+        external_id="development-selection",
+        url="https://x.com/example/status/development-selection",
+        content="Nebius confirmed Project A order 2026-09.",
+        published_at=NOW,
+    )
+    db_session.add(item)
+    db_session.flush()
+    facts = _development_facts()
+    record_developments(
+        db_session,
+        item=item,
+        pipeline="narrative",
+        analysis_channel="narrative",
+        revision="d" * 64,
+        theme_ids=[],
+        economic_theme_ids=[theme.id],
+        source_family_id=admitted.source_family_id,
+        sources={"primary": item.content},
+        observations=[facts],
+        available_at=NOW,
+    )
+    db_session.commit()
+    factory = lambda: db_session.__class__(bind=db_session.get_bind())
+
+    first_cutoff = EconomicTaxonomyPublicationCoordinator(factory).capture_cutoff(
+        principal=ADMIN
+    )
+    first_manifest = db_session.get(GenerationInputManifest, first_cutoff.manifest_id)
+    first_selection = first_manifest.selections[0]
+    first_revision = db_session.query(DevelopmentSelectionRevision).one()
+    assert first_selection["development_identity"] == str(
+        first_revision.development_identity
+    )
+    assert first_selection["development_revision"] == 1
+
+    record_developments(
+        db_session,
+        item=item,
+        pipeline="narrative",
+        analysis_channel="narrative",
+        revision="e" * 64,
+        theme_ids=[],
+        economic_theme_ids=[theme.id],
+        source_family_id=admitted.source_family_id,
+        sources={"primary": item.content},
+        observations=[],
+        available_at=NOW,
+    )
+    db_session.commit()
+
+    second_cutoff = EconomicTaxonomyPublicationCoordinator(factory).capture_cutoff(
+        principal=ADMIN
+    )
+    second_manifest = db_session.get(GenerationInputManifest, second_cutoff.manifest_id)
+    second_selection = second_manifest.selections[0]
+    assert second_selection["development_identity"] == str(
+        first_revision.development_identity
+    )
+    assert second_selection["development_revision"] == 2
+
+
+def test_publication_cutoff_pins_multiple_developments_from_one_source(db_session):
+    taxonomy, theme = _fixture(db_session)
+    admitted = _admit(db_session)
+    _attempt(
+        db_session,
+        admitted=admitted,
+        taxonomy_id=taxonomy.id,
+        theme_id=theme.id,
+    )
+    item = ContentItem(
+        source_type="twitter",
+        external_id="multiple-developments",
+        url="https://x.com/example/status/multiple-developments",
+        content=(
+            "Nebius confirmed Project A order 2026-09. "
+            "Nebius confirmed Project B order 2026-09."
+        ),
+        published_at=NOW,
+    )
+    db_session.add(item)
+    db_session.flush()
+    record_developments(
+        db_session,
+        item=item,
+        pipeline="narrative",
+        analysis_channel="narrative",
+        revision="m" * 64,
+        theme_ids=[],
+        economic_theme_ids=[theme.id],
+        source_family_id=admitted.source_family_id,
+        sources={"primary": item.content},
+        observations=[_development_facts("Project A"), _development_facts("Project B")],
+        available_at=NOW,
+    )
+    db_session.commit()
+    factory = lambda: db_session.__class__(bind=db_session.get_bind())
+
+    cutoff = EconomicTaxonomyPublicationCoordinator(factory).capture_cutoff(
+        principal=ADMIN
+    )
+    manifest = db_session.get(GenerationInputManifest, cutoff.manifest_id)
+    selection = manifest.selections[0]
+
+    assert selection["development_identity"] is None
+    assert selection["development_revision"] is None
+    assert len(selection["development_selections"]) == 2
+    assert {
+        value["revision_number"] for value in selection["development_selections"]
+    } == {1}
+    EconomicTaxonomyInterpretationService(factory).build_interpretation_set(
+        manifest.id
+    )
 
 
 def test_corrected_to_empty_removes_current_facts_but_preserves_old_set(db_session):

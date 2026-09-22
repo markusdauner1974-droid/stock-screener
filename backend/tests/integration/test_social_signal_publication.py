@@ -221,6 +221,41 @@ def test_projection_and_pointer_roll_back_together_after_apply(store, monkeypatc
     assert w.publish("new", version).published
 
 
+def test_published_social_work_is_admitted_to_economic_processing(store):
+    from app.models.economic_taxonomy_runtime import EvidencePacket, SourceLineage
+
+    w = writer(store)
+    w.create_run("economic-admission", NOW)
+    work_id = save_success(store, w, "economic-admission")
+    prepared = w.prepare_run("economic-admission", (row("economic-admission"),), NOW)
+
+    assert w.publish("economic-admission", prepared.registry_version).published
+
+    with store() as db:
+        lineage = db.query(SourceLineage).one()
+        packet = db.query(EvidencePacket).one()
+        assert packet.source_lineage_id == lineage.id
+        assert packet.source_metadata["social_work_id"] == work_id
+        assert packet.precedence_state == "effective"
+
+
+def test_exploratory_social_work_does_not_enter_live_economic_processing(store):
+    from app.infra.db.models.social_analysis import SocialExtractionWork
+    from app.models.economic_taxonomy_runtime import SourceLineage
+
+    w = writer(store)
+    w.create_run("exploratory-admission", NOW)
+    work_id = save_success(store, w, "exploratory-admission")
+    with store.begin() as db:
+        db.get(SocialExtractionWork, work_id).requested_by_admin = True
+    prepared = w.prepare_run("exploratory-admission", (), NOW)
+
+    assert w.publish("exploratory-admission", prepared.registry_version).published
+
+    with store() as db:
+        assert db.query(SourceLineage).count() == 0
+
+
 def test_frozen_replay_inputs_keep_metrics_and_reuse_work_after_new_observation(store):
     w = writer(store)
     w.create_run("run", NOW)

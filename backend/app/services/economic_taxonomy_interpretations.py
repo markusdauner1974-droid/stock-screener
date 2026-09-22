@@ -448,22 +448,41 @@ class EconomicTaxonomyInterpretationService:
             if exists is None:
                 raise InvalidInterpretation("constituent_decision_not_pinned")
 
-        if entry.development_revision is not None:
-            query = select(DevelopmentSelectionRevision).where(
-                DevelopmentSelectionRevision.revision_number
-                == entry.development_revision
+        development_selections = raw_entry.get("development_selections")
+        if development_selections is None:
+            development_selections = (
+                [
+                    {
+                        "development_identity": raw_entry.get(
+                            "development_identity"
+                        ),
+                        "revision_number": entry.development_revision,
+                    }
+                ]
+                if entry.development_revision is not None
+                else []
             )
-            development_identity = raw_entry.get("development_identity")
-            if development_identity is not None:
-                try:
-                    identity = UUID(str(development_identity))
-                except (TypeError, ValueError) as exc:
-                    raise InvalidInterpretation("invalid_development_identity") from exc
-                query = query.where(
-                    DevelopmentSelectionRevision.development_identity == identity
+        if not isinstance(development_selections, list):
+            raise InvalidInterpretation("invalid_development_selections")
+        seen = set()
+        for development in development_selections:
+            if not isinstance(development, dict):
+                raise InvalidInterpretation("invalid_development_selection")
+            try:
+                identity = UUID(str(development["development_identity"]))
+                revision_number = int(development["revision_number"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise InvalidInterpretation("invalid_development_selection") from exc
+            if identity in seen or revision_number <= 0:
+                raise InvalidInterpretation("invalid_development_selection")
+            seen.add(identity)
+            row = session.scalar(
+                select(DevelopmentSelectionRevision.id).where(
+                    DevelopmentSelectionRevision.development_identity == identity,
+                    DevelopmentSelectionRevision.revision_number == revision_number,
                 )
-            rows = session.scalars(query).all()
-            if len(rows) != 1:
+            )
+            if row is None:
                 raise InvalidInterpretation("development_revision_not_pinned")
 
     @staticmethod

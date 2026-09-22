@@ -6,7 +6,7 @@ calls, commits, Social pointer changes, or legacy attention writes occur here.
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 
@@ -34,6 +34,7 @@ from app.models.economic_taxonomy_runtime import TaxonomyAuthority
 from app.models.stock_universe import StockUniverse
 from app.models.theme import ThemeAlias, ThemeCluster, ThemeConstituent, ThemeMention
 from app.services.economic_social_taxonomy_adapter import EconomicSocialTaxonomyAdapter
+from app.services.economic_source_admission import EvidenceAdmission
 from app.services.economic_taxonomy_runtime import EconomicTaxonomyRuntimeService
 from app.services.social_company_identity_service import SocialCompanyIdentityService
 from app.services.social_extraction_service import (
@@ -269,6 +270,76 @@ class SocialThemeProjectionService:
         if expected_version is not None and registry.version != expected_version:
             raise ValueError("social_projection_version_conflict")
         return registry
+
+    def admit_economic_evidence(self, projection: ThemeProjection) -> None:
+        """Admit the exact saved inputs after their Social run becomes published."""
+
+        run = self.db.get(SocialSignalRun, projection.run_id)
+        if run is None or run.mode != "live" or run.status != "published":
+            raise ValueError("published_social_run_required")
+        identity = SocialCompanyIdentityService(self.db).read()
+        resolver = SocialTickerResolver(
+            self.db, verified_company_ids=identity.verified_company_ids
+        )
+        adapter = EconomicSocialTaxonomyAdapter(self.db)
+        for work_id in projection.work_ids:
+            work = self.db.get(SocialExtractionWork, work_id)
+            post, result = self._decode_work(work)
+            if (
+                work.requested_by_admin
+                or post.created_at < projection.prepared_at - timedelta(days=14)
+                or post.created_at > projection.prepared_at
+            ):
+                continue
+            resolutions = {
+                claim.company_token: resolver.resolve(claim.company_token)
+                for claim in result.claims
+            }
+            prepared = tuple(post.prepared_evidence)
+            admission = adapter.admit_saved_work(
+                work.id,
+                EvidenceAdmission(
+                    provider="x",
+                    canonical_item_id=post.provider_post_id,
+                    canonical_source_family=f"x:post:{post.provider_post_id}",
+                    capture_route="social",
+                    route_record_id=str(work.id),
+                    original_text=post.text,
+                    attachment_hashes=tuple(
+                        item.original_text_sha256 for item in prepared
+                    ),
+                    extracted_text_hashes=tuple(item.text_sha256 for item in prepared),
+                    grounding_snapshot={
+                        "company_resolutions": [
+                            asdict(resolutions[token]) for token in sorted(resolutions)
+                        ]
+                    },
+                    preparation_version="social-saved-work-v1",
+                    source_metadata={
+                        "content_item_id": work.content_item_id,
+                        "source_provider": post.provider,
+                        "source_id": post.source_id,
+                        "url": post.url,
+                        "canonical_url": post.canonical_url,
+                        "author_handle": post.author_handle,
+                        "quoted_text": post.quoted_text,
+                        "input_snapshot": dict(work.input_snapshot_json),
+                        "input_hash": work.input_hash,
+                        "prompt_version": work.prompt_version,
+                        "schema_version": work.schema_version,
+                        "actual_provider": work.actual_provider,
+                        "actual_model": work.actual_model,
+                    },
+                    captured_at=post.observed_at,
+                    observed_at=post.created_at,
+                    available_at=max(
+                        (post.observed_at, *(item.available_at for item in prepared))
+                    ),
+                    evidence_channels=("narrative",),
+                ),
+            )
+            if not admission.live:
+                raise ValueError("social_evidence_live_admission_required")
 
     def apply_live(
         self,
