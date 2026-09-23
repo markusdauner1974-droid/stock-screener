@@ -257,15 +257,22 @@ def test_nan_frame_selects_scalar_path() -> None:
     """A NaN frame must route through the scalar path, not silently differ.
 
     The vectorised path cannot reproduce pandas' NaN-skipping reductions, so
-    the detector delegates instead of approximating.
+    the detector delegates instead of approximating. If the fallback were not
+    wired up, the NaN frame would yield a NaN median, no window would pass the
+    positivity test, and the run count would collapse -- which ``_compare``
+    catches on the count before comparing any field.
+
+    ``_compare`` rather than ``==``: ``_TightRun`` holds ``pivot_price``, which
+    is NaN whenever a window's high contains one, and ``nan != nan`` would make
+    an equality assertion fail on two identical lists.
     """
     close = np.concatenate([np.full(20, 100.0), [np.nan], np.full(20, 100.0)])
     frame = _weekly_frame(close)
-    assert _find_tight_runs(frame, PARAMS) == _find_tight_runs_scalar(frame, PARAMS)
+    assert _compare(frame, "nan-close") == []
 
 
 def test_non_nan_frame_matches_scalar_results() -> None:
     """The vectorised path is the one exercised on clean production frames."""
     frame = _weekly_frame(np.concatenate([np.full(20, 100.0), np.full(20, 100.05)]))
     assert np.isnan(frame[["Close", "High", "Low", "Volume"]].to_numpy()).sum() == 0
-    assert _find_tight_runs(frame, PARAMS) == _find_tight_runs_scalar(frame, PARAMS)
+    assert _compare(frame, "clean-frame") == []
