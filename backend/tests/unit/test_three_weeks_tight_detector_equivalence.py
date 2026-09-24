@@ -390,6 +390,49 @@ def test_detect_passes_the_candidate_limit() -> None:
     assert calls == [_MAX_CANDIDATES]
 
 
+def test_detect_passes_normalized_weekly_frame_to_finder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``detect()`` hands the *normalized* frame to ``_find_tight_runs``.
+
+    The normalization tests above call ``normalize_ohlcv_frame`` directly, so
+    they prove the drop exists -- not that ``detect()`` uses it. If the call
+    site in ``detect()`` were changed to pass the raw weekly frame, they would
+    stay green while the vectorised finder received NaNs on real data. This
+    captures the frame at the boundary instead: a NaN-bearing input must
+    arrive at the finder one bar shorter and NaN-free.
+    """
+    close = np.concatenate([np.full(20, 100.0), [np.nan], np.full(20, 100.0)])
+    frame = _weekly_frame(close)
+    assert np.isnan(frame[["Close"]].to_numpy()).sum() == 1
+
+    received: list[pd.DataFrame] = []
+
+    def capture(weekly, parameters, *, limit=None):
+        received.append(weekly)
+        return []
+
+    monkeypatch.setattr(three_weeks_tight_module, "_find_tight_runs", capture)
+
+    detector = three_weeks_tight_module.ThreeWeeksTightDetector()
+    detector.detect(
+        PatternDetectorInput(
+            symbol="TEST",
+            timeframe="weekly",
+            daily_bars=0,
+            weekly_bars=len(frame),
+            features={"weekly_ohlcv": frame},
+        ),
+        PARAMS,
+    )
+
+    assert len(received) == 1, "the finder was not reached"
+    handed_over = received[0]
+    assert len(handed_over) == len(frame) - 1, "the NaN bar was not dropped"
+    columns = ["Close", "High", "Low", "Volume"]
+    assert np.isnan(handed_over[columns].to_numpy()).sum() == 0
+
+
 # ---------------------------------------------------------------------------
 # Structural guarantee: one implementation, reached by every production frame
 # ---------------------------------------------------------------------------
