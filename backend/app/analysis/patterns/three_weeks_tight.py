@@ -9,7 +9,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
+from numpy.lib.stride_tricks import sliding_window_view
 
 from app.analysis.patterns.config import SetupEngineParameters
 from app.analysis.patterns.detectors.base import (
@@ -86,7 +88,7 @@ class ThreeWeeksTightDetector(PatternDetector):
 
         warnings = tuple(warnings) + normalized_weekly.warnings
         weekly = normalized_weekly.frame
-        runs = _find_tight_runs(weekly, parameters)
+        runs = _find_tight_runs(weekly, parameters, limit=_MAX_CANDIDATES)
         if not runs:
             return PatternDetectorResult.no_detection(
                 self.name,
@@ -221,13 +223,36 @@ def _resolve_weekly_frame(
 def _find_tight_runs(
     weekly: pd.DataFrame,
     parameters: SetupEngineParameters,
+    *,
+    limit: int | None = None,
 ) -> list[_TightRun]:
-    closes = weekly["Close"]
-    highs = weekly["High"]
-    lows = weekly["Low"]
-    volumes = weekly["Volume"]
+    """Collect tight runs in the weekly frame, best first.
+
+    ``limit`` caps how many runs are materialised. Pass ``_MAX_CANDIDATES``
+    when only the ranking head is needed; ``detect()`` does, because it reads
+    ``runs[:_MAX_CANDIDATES]`` and nothing else. ``None`` returns every run,
+    which is what the equivalence tests compare against the reference.
+
+    Precondition: ``weekly`` is NaN-free across ``Close``/``High``/``Low``/
+    ``Volume``. ``detect()`` always routes the weekly frame through
+    ``normalize_detector_input_ohlcv``, which drops any bar with a NaN in a
+    required column, so the detector never sees one. This matters because the
+    vectorised maths propagates NaN where pandas reductions skip it silently;
+    the two disagree on such frames, and the frame is therefore cleaned before
+    it arrives here rather than handled twice.
+
+    The former scalar reference implementation now lives in
+    ``tests/unit/test_three_weeks_tight_detector_equivalence.py``, where it pins this
+    one's output.
+    """
+    close_arr = weekly["Close"].to_numpy(dtype=float)
+    high_arr = weekly["High"].to_numpy(dtype=float)
+    low_arr = weekly["Low"].to_numpy(dtype=float)
+    vol_arr = weekly["Volume"].to_numpy(dtype=float)
     n = len(weekly)
-    runs: list[_TightRun] = []
+
+    if n == 0:
+        return []
 
     strict_threshold = (
         parameters.three_weeks_tight_max_contraction_pct_strict
@@ -236,82 +261,138 @@ def _find_tight_runs(
         parameters.three_weeks_tight_max_contraction_pct_relaxed
     )
 
+    # Candidate fields are accumulated as arrays, then concatenated across
+    # weeks_tight in the same (weeks_tight, start) order the scalar code
+    # appended them. That keeps the stable sort's tie-breaking identical, and
+    # it means _TightRun objects are built only for the runs that are returned
+    # -- on a flat 300-week series 1,773 candidates become 5 objects.
+    start_chunks: list[np.ndarray] = []
+    weeks_chunks: list[np.ndarray] = []
+    strict_chunks: list[np.ndarray] = []
+    band_chunks: list[np.ndarray] = []
+    range_chunks: list[np.ndarray] = []
+    vol_vs_chunks: list[np.ndarray] = []
+    has_vol_vs_chunks: list[np.ndarray] = []
+    pivot_idx_chunks: list[np.ndarray] = []
+    pivot_price_chunks: list[np.ndarray] = []
+
+    # Rolling mean over 10 bars, used for the volume comparison. Index i holds
+    # the mean of volumes[i : i + 10]; the prior-10-week mean for a run that
+    # starts at s is therefore entry s - 10.
+    prior_10w_lookup: np.ndarray | None = None
+    if n >= 10:
+        prior_10w_lookup = sliding_window_view(vol_arr, 10).mean(axis=1)
+
     for weeks_tight in range(_MIN_WEEKS_TIGHT, _MAX_WEEKS_TIGHT + 1):
-        for end_idx in range(weeks_tight - 1, n):
-            start_idx = end_idx - weeks_tight + 1
-            close_window = closes.iloc[start_idx : end_idx + 1]
-            high_window = highs.iloc[start_idx : end_idx + 1]
-            low_window = lows.iloc[start_idx : end_idx + 1]
+        if weeks_tight > n:
+            continue
 
-            median_close = float(close_window.median())
-            if median_close <= 0.0:
-                continue
+        close_win = sliding_window_view(close_arr, weeks_tight)
+        high_win = sliding_window_view(high_arr, weeks_tight)
+        low_win = sliding_window_view(low_arr, weeks_tight)
+        vol_win = sliding_window_view(vol_arr, weeks_tight)
 
-            tight_band_pct = float(
-                (
-                    (close_window - median_close).abs() / median_close
-                ).max()
+        median_close = np.median(close_win, axis=1)
+        positive = median_close > 0.0
+
+        with np.errstate(divide="ignore", invalid="ignore"):
+            tight_band_pct = (
+                (np.abs(close_win - median_close[:, None]) / median_close[:, None])
+                .max(axis=1)
                 * 100.0
             )
-            tight_range_pct = float(
-                ((high_window.max() - low_window.min()) / median_close) * 100.0
+            tight_range_pct = (
+                (high_win.max(axis=1) - low_win.min(axis=1))
+                / median_close
+                * 100.0
             )
 
-            if start_idx >= 10:
-                prior_10w = float(volumes.iloc[start_idx - 10 : start_idx].mean())
-                run_vol = float(volumes.iloc[start_idx : end_idx + 1].mean())
-                vol_vs_10w = (run_vol / prior_10w) if prior_10w > 0 else None
-            else:
-                vol_vs_10w = None
-
-            pivot_offset = int(high_window.to_numpy(dtype=float).argmax())
-            pivot_idx = start_idx + pivot_offset
-            pivot_price = float(highs.iat[pivot_idx])
-            recency_weeks = n - 1 - end_idx
-
-            if tight_band_pct <= strict_threshold:
-                mode = "strict"
-                threshold = strict_threshold
-                mode_bias = 0.10
-            elif tight_band_pct <= relaxed_threshold:
-                mode = "relaxed"
-                threshold = relaxed_threshold
-                mode_bias = 0.0
-            else:
-                continue
-
-            score = (
-                min(weeks_tight, _MAX_WEEKS_TIGHT) * 0.16
-                + max(0.0, 1.0 - (tight_band_pct / max(threshold, 1e-9)))
-                * 0.55
-                + max(0.0, 1.0 - recency_weeks / 10.0) * 0.19
-                + mode_bias
-            )
-            runs.append(
-                _TightRun(
-                    start_idx=start_idx,
-                    end_idx=end_idx,
-                    weeks_tight=weeks_tight,
-                    mode=mode,
-                    max_contraction_pct=threshold,
-                    tight_band_pct=tight_band_pct,
-                    tight_range_pct=tight_range_pct,
-                    vol_vs_10w=vol_vs_10w,
-                    pivot_idx=pivot_idx,
-                    pivot_price=pivot_price,
-                    recency_weeks=recency_weeks,
-                    score=score,
-                )
-            )
-
-    runs.sort(
-        key=lambda run: (
-            -run.score,
-            run.recency_weeks,
-            -run.weeks_tight,
-            run.tight_band_pct,
-            run.mode != "strict",
-            -run.pivot_idx,
+        strict_mask = positive & (tight_band_pct <= strict_threshold)
+        relaxed_mask = (
+            positive
+            & ~strict_mask
+            & (tight_band_pct <= relaxed_threshold)
         )
+        keep = strict_mask | relaxed_mask
+        if not keep.any():
+            continue
+
+        idx = np.nonzero(keep)[0]
+        start = idx
+        strict_sel = strict_mask[idx]
+        run_vol_sel = vol_win.mean(axis=1)[idx]
+        pivot_sel = start + high_win.argmax(axis=1)[idx]
+
+        # A boolean mask marks "comparison available"; the value array is only
+        # read where the mask is set. None encodes no comparison: too early in
+        # the series, or a non-positive prior average.
+        vol_vs_sel = np.zeros(idx.size)
+        has_vol_vs_sel = np.zeros(idx.size, dtype=bool)
+        if prior_10w_lookup is not None:
+            has_prior = start >= 10
+            if has_prior.any():
+                prior = prior_10w_lookup[start[has_prior] - 10]
+                targets = np.nonzero(has_prior)[0][prior > 0]
+                if targets.size:
+                    with np.errstate(divide="ignore", invalid="ignore"):
+                        vol_vs_sel[targets] = run_vol_sel[targets] / prior[prior > 0]
+                    has_vol_vs_sel[targets] = True
+
+        start_chunks.append(start)
+        weeks_chunks.append(np.full(idx.size, weeks_tight, dtype=int))
+        strict_chunks.append(strict_sel)
+        band_chunks.append(tight_band_pct[idx])
+        range_chunks.append(tight_range_pct[idx])
+        vol_vs_chunks.append(vol_vs_sel)
+        has_vol_vs_chunks.append(has_vol_vs_sel)
+        pivot_idx_chunks.append(pivot_sel)
+        pivot_price_chunks.append(high_arr[pivot_sel])
+
+    if not start_chunks:
+        return []
+
+    start = np.concatenate(start_chunks)
+    weeks = np.concatenate(weeks_chunks)
+    strict = np.concatenate(strict_chunks)
+    band = np.concatenate(band_chunks)
+    range_pct = np.concatenate(range_chunks)
+    vol_vs = np.concatenate(vol_vs_chunks)
+    has_vol_vs = np.concatenate(has_vol_vs_chunks)
+    pivot_idx = np.concatenate(pivot_idx_chunks)
+    pivot_price = np.concatenate(pivot_price_chunks)
+
+    end = start + weeks - 1
+    recency = n - 1 - end
+    threshold = np.where(strict, strict_threshold, relaxed_threshold)
+    score = (
+        np.minimum(weeks, _MAX_WEEKS_TIGHT) * 0.16
+        + np.maximum(0.0, 1.0 - band / np.maximum(threshold, 1e-9)) * 0.55
+        + np.maximum(0.0, 1.0 - recency / 10.0) * 0.19
+        + np.where(strict, 0.10, 0.0)
     )
-    return runs
+
+    # np.lexsort orders by the LAST key first, so the keys read left to right
+    # as least-significant first. This mirrors the former list.sort key
+    # (-score, recency_weeks, -weeks_tight, tight_band_pct, mode != "strict",
+    # -pivot_idx), and lexsort is stable just as list.sort was.
+    order = np.lexsort((-pivot_idx, ~strict, band, -weeks, recency, -score))
+    if limit is not None:
+        order = order[:limit]
+
+    return [
+        _TightRun(
+            start_idx=int(start[i]),
+            end_idx=int(end[i]),
+            weeks_tight=int(weeks[i]),
+            mode="strict" if strict[i] else "relaxed",
+            max_contraction_pct=float(threshold[i]),
+            tight_band_pct=float(band[i]),
+            tight_range_pct=float(range_pct[i]),
+            vol_vs_10w=float(vol_vs[i]) if has_vol_vs[i] else None,
+            pivot_idx=int(pivot_idx[i]),
+            pivot_price=float(pivot_price[i]),
+            recency_weeks=int(recency[i]),
+            score=float(score[i]),
+        )
+        for i in order
+    ]
