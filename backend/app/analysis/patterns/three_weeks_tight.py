@@ -226,16 +226,17 @@ def _find_tight_runs(
 ) -> list[_TightRun]:
     """Collect all tight runs in the weekly frame.
 
-    Two code paths produce identical ``_TightRun`` sequences:
+    Precondition: ``weekly`` is NaN-free across ``Close``/``High``/``Low``/
+    ``Volume``. ``detect()`` always routes the weekly frame through
+    ``normalize_detector_input_ohlcv``, which drops any bar with a NaN in a
+    required column, so the detector never sees one. This matters because the
+    vectorised maths propagates NaN where pandas reductions skip it silently;
+    the two disagree on such frames, and the frame is therefore cleaned before
+    it arrives here rather than handled twice.
 
-    * ``_find_tight_runs_scalar`` -- the reference implementation. One Python
-      loop per (weeks_tight, end_idx) window using pandas slicing.
-    * the vectorised path below -- evaluates every window of a given length
-      in one shot with sliding-window views.
-
-    The vectorised path is used whenever the frame is free of NaN. pandas
-    reductions skip NaN silently while numpy propagates it, so a frame that
-    contains NaN falls back to the scalar path to keep results bit-identical.
+    The former scalar reference implementation now lives in
+    ``tests/unit/test_three_weeks_tight_equivalence.py``, where it pins this
+    one's output.
     """
     close_arr = weekly["Close"].to_numpy(dtype=float)
     high_arr = weekly["High"].to_numpy(dtype=float)
@@ -245,14 +246,6 @@ def _find_tight_runs(
 
     if n == 0:
         return []
-
-    if (
-        np.isnan(close_arr).any()
-        or np.isnan(high_arr).any()
-        or np.isnan(low_arr).any()
-        or np.isnan(vol_arr).any()
-    ):
-        return _find_tight_runs_scalar(weekly, parameters)
 
     strict_threshold = (
         parameters.three_weeks_tight_max_contraction_pct_strict
@@ -354,106 +347,6 @@ def _find_tight_runs(
                     max_contraction_pct=threshold,
                     tight_band_pct=band_pct,
                     tight_range_pct=float(tight_range_pct[i]),
-                    vol_vs_10w=vol_vs_10w,
-                    pivot_idx=pivot_idx,
-                    pivot_price=pivot_price,
-                    recency_weeks=recency_weeks,
-                    score=score,
-                )
-            )
-
-    runs.sort(
-        key=lambda run: (
-            -run.score,
-            run.recency_weeks,
-            -run.weeks_tight,
-            run.tight_band_pct,
-            run.mode != "strict",
-            -run.pivot_idx,
-        )
-    )
-    return runs
-
-
-def _find_tight_runs_scalar(
-    weekly: pd.DataFrame,
-    parameters: SetupEngineParameters,
-) -> list[_TightRun]:
-    """Reference implementation: one pandas slice per candidate window."""
-    closes = weekly["Close"]
-    highs = weekly["High"]
-    lows = weekly["Low"]
-    volumes = weekly["Volume"]
-    n = len(weekly)
-    runs: list[_TightRun] = []
-
-    strict_threshold = (
-        parameters.three_weeks_tight_max_contraction_pct_strict
-    )
-    relaxed_threshold = (
-        parameters.three_weeks_tight_max_contraction_pct_relaxed
-    )
-
-    for weeks_tight in range(_MIN_WEEKS_TIGHT, _MAX_WEEKS_TIGHT + 1):
-        for end_idx in range(weeks_tight - 1, n):
-            start_idx = end_idx - weeks_tight + 1
-            close_window = closes.iloc[start_idx : end_idx + 1]
-            high_window = highs.iloc[start_idx : end_idx + 1]
-            low_window = lows.iloc[start_idx : end_idx + 1]
-
-            median_close = float(close_window.median())
-            if median_close <= 0.0:
-                continue
-
-            tight_band_pct = float(
-                (
-                    (close_window - median_close).abs() / median_close
-                ).max()
-                * 100.0
-            )
-            tight_range_pct = float(
-                ((high_window.max() - low_window.min()) / median_close) * 100.0
-            )
-
-            if start_idx >= 10:
-                prior_10w = float(volumes.iloc[start_idx - 10 : start_idx].mean())
-                run_vol = float(volumes.iloc[start_idx : end_idx + 1].mean())
-                vol_vs_10w = (run_vol / prior_10w) if prior_10w > 0 else None
-            else:
-                vol_vs_10w = None
-
-            pivot_offset = int(high_window.to_numpy(dtype=float).argmax())
-            pivot_idx = start_idx + pivot_offset
-            pivot_price = float(highs.iat[pivot_idx])
-            recency_weeks = n - 1 - end_idx
-
-            if tight_band_pct <= strict_threshold:
-                mode = "strict"
-                threshold = strict_threshold
-                mode_bias = 0.10
-            elif tight_band_pct <= relaxed_threshold:
-                mode = "relaxed"
-                threshold = relaxed_threshold
-                mode_bias = 0.0
-            else:
-                continue
-
-            score = (
-                min(weeks_tight, _MAX_WEEKS_TIGHT) * 0.16
-                + max(0.0, 1.0 - (tight_band_pct / max(threshold, 1e-9)))
-                * 0.55
-                + max(0.0, 1.0 - recency_weeks / 10.0) * 0.19
-                + mode_bias
-            )
-            runs.append(
-                _TightRun(
-                    start_idx=start_idx,
-                    end_idx=end_idx,
-                    weeks_tight=weeks_tight,
-                    mode=mode,
-                    max_contraction_pct=threshold,
-                    tight_band_pct=tight_band_pct,
-                    tight_range_pct=tight_range_pct,
                     vol_vs_10w=vol_vs_10w,
                     pivot_idx=pivot_idx,
                     pivot_price=pivot_price,
