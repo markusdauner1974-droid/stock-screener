@@ -23,6 +23,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import app.analysis.patterns.three_weeks_tight as three_weeks_tight_module
+
 from app.analysis.patterns.config import DEFAULT_SETUP_ENGINE_PARAMETERS
 from app.analysis.patterns.three_weeks_tight import (
     _find_tight_runs,
@@ -144,6 +146,7 @@ def _compare(frame: pd.DataFrame, label: str) -> list[str]:
     ],
 )
 def test_equivalence_deterministic_patterns(label: str, close: np.ndarray) -> None:
+    """Hand-built shapes (tight run, too-wide band, flat, trends, sine) stay identical."""
     assert _compare(_weekly_frame(close), label) == []
 
 
@@ -154,6 +157,7 @@ def test_equivalence_deterministic_patterns(label: str, close: np.ndarray) -> No
 
 @pytest.mark.parametrize("n", [0, 1, 2, 3, 4, 5, 9, 10, 11, 12, 13, 14, 15, 16])
 def test_equivalence_boundary_lengths(n: int) -> None:
+    """Frame lengths around the minimum-window boundary agree, including empty frames."""
     rng = np.random.default_rng(1000 + n)
     close = rng.normal(100, 2, n) if n else np.array([])
     assert _compare(_weekly_frame(close), f"n={n}") == []
@@ -167,6 +171,7 @@ def test_equivalence_boundary_lengths(n: int) -> None:
 @pytest.mark.parametrize("n", [30, 60, 120, 250, 300, 350])
 @pytest.mark.parametrize("trial", range(4))
 def test_equivalence_random_walk(n: int, trial: int) -> None:
+    """Random walks of varying length agree when no run is forced."""
     rng = np.random.default_rng((n, trial))
     close = np.maximum(100 + np.cumsum(rng.normal(0, 1.0, n)), 5.0)
     volume = rng.uniform(2e5, 3e6, n)
@@ -177,6 +182,7 @@ def test_equivalence_random_walk(n: int, trial: int) -> None:
 @pytest.mark.parametrize("n", [200, 350])
 @pytest.mark.parametrize("trial", range(4))
 def test_equivalence_random_walk_with_tight_tail(n: int, trial: int) -> None:
+    """Walks with a deliberately squeezed final weeks do produce runs, and they agree."""
     rng = np.random.default_rng((7_000 + n, trial))
     close = np.maximum(50 + np.cumsum(rng.normal(0, 0.8, n)), 5.0)
     k = int(rng.integers(6, 16))
@@ -190,46 +196,55 @@ def test_equivalence_random_walk_with_tight_tail(n: int, trial: int) -> None:
 
 
 def test_equivalence_zero_prices() -> None:
+    """An all-zero series is handled identically (no division blow-up)."""
     assert _compare(_weekly_frame(np.zeros(50)), "zeros") == []
 
 
 def test_equivalence_negative_prices() -> None:
+    """Negative prices stay identical -- they are rejected, not silently rescaled."""
     assert _compare(_weekly_frame(np.full(50, -5.0)), "negative") == []
 
 
 def test_equivalence_very_small_and_huge_prices() -> None:
+    """Extreme magnitudes (1e-9 and 1e9) agree, guarding the relative band maths."""
     assert _compare(_weekly_frame(np.full(50, 1e-9)), "tiny") == []
     assert _compare(_weekly_frame(np.full(50, 1e9)), "huge") == []
 
 
 def test_equivalence_zero_price_within_series() -> None:
+    """A single zero inside an otherwise normal series agrees."""
     close = np.concatenate([np.full(20, 100.0), [0.0], np.full(20, 100.0)])
     assert _compare(_weekly_frame(close), "zero-in-series") == []
 
 
 def test_equivalence_nan_in_close_uses_fallback() -> None:
+    """A NaN in Close routes to the scalar path and yields identical runs."""
     close = np.concatenate([np.full(20, 100.0), [np.nan], np.full(20, 100.0)])
     assert _compare(_weekly_frame(close), "nan-close") == []
 
 
 def test_equivalence_nan_in_high_uses_fallback() -> None:
+    """A NaN in High routes to the scalar path and yields identical runs."""
     high = np.concatenate([np.full(20, 101.0), [np.nan], np.full(19, 101.0)])
     frame = _weekly_frame(np.full(40, 100.0), high=high)
     assert _compare(frame, "nan-high") == []
 
 
 def test_equivalence_zero_volume() -> None:
+    """Zero volume throughout agrees, including the volume-ratio gate."""
     frame = _weekly_frame(np.full(50, 100.0), volume=np.zeros(50))
     assert _compare(frame, "zero-volume") == []
 
 
 def test_equivalence_partial_zero_volume() -> None:
+    """Zero volume only in part of the series agrees."""
     volume = np.concatenate([np.full(20, 1e6), np.zeros(30)])
     frame = _weekly_frame(np.full(50, 100.0), volume=volume)
     assert _compare(frame, "partial-zero-volume") == []
 
 
 def test_equivalence_inverted_high_low() -> None:
+    """Inverted high/low values agree rather than silently producing different bands."""
     rng = np.random.default_rng(11)
     close = np.maximum(100 + rng.normal(0, 1, 80), 1.0)
     frame = _weekly_frame(close, high=close * 0.9, low=close * 1.1)
@@ -237,12 +252,14 @@ def test_equivalence_inverted_high_low() -> None:
 
 
 def test_equivalence_non_datetime_index() -> None:
+    """A non-datetime index agrees -- the detector indexes positionally."""
     frame = _weekly_frame(np.full(60, 100.0))
     frame.index = pd.RangeIndex(60)
     assert _compare(frame, "range-index") == []
 
 
 def test_equivalence_integer_volume_dtype() -> None:
+    """Integer volume dtype agrees with the float path."""
     frame = _weekly_frame(np.full(60, 100.0))
     frame["Volume"] = frame["Volume"].astype("int64")
     assert _compare(frame, "int-volume") == []
@@ -271,8 +288,67 @@ def test_nan_frame_selects_scalar_path() -> None:
     assert _compare(frame, "nan-close") == []
 
 
-def test_non_nan_frame_matches_scalar_results() -> None:
-    """The vectorised path is the one exercised on clean production frames."""
+def test_non_nan_frame_matches_scalar_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The vectorised path is the one exercised on clean production frames.
+
+    ``_compare`` derives its expectation from ``_find_tight_runs_scalar``, so a
+    detector that quietly routed clean frames through the scalar fallback would
+    still compare equal. Counting calls to the module's ``sliding_window_view``
+    pins the *path*, not just the result -- without it the vectorisation could
+    be removed and this suite would stay green.
+    """
     frame = _weekly_frame(np.concatenate([np.full(20, 100.0), np.full(20, 100.05)]))
     assert np.isnan(frame[["Close", "High", "Low", "Volume"]].to_numpy()).sum() == 0
+
+    calls = 0
+    original = three_weeks_tight_module.sliding_window_view
+
+    def counting_sliding_window_view(*args: object, **kwargs: object) -> np.ndarray:
+        """Count invocations of the module-level sliding-window view."""
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        three_weeks_tight_module,
+        "sliding_window_view",
+        counting_sliding_window_view,
+    )
+
     assert _compare(frame, "clean-frame") == []
+
+    # weeks_tight windows plus the trailing 10-week volume average.
+    assert calls > 0, "clean frame took the scalar fallback instead of the fast path"
+
+
+def test_nan_frame_does_not_use_vectorised_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mirror image of the previous test: a NaN frame must not vectorise.
+
+    ``numpy`` propagates NaN where ``pandas`` skips it, so a NaN frame has to
+    delegate. Asserting ``calls == 0`` keeps the fallback wired up in the other
+    direction -- a detector that dropped it would produce different scores
+    rather than merely slower ones.
+    """
+    close = np.concatenate([np.full(20, 100.0), [np.nan], np.full(20, 100.0)])
+    frame = _weekly_frame(close)
+
+    calls = 0
+    original = three_weeks_tight_module.sliding_window_view
+
+    def counting_sliding_window_view(*args: object, **kwargs: object) -> np.ndarray:
+        """Count invocations of the module-level sliding-window view."""
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        three_weeks_tight_module,
+        "sliding_window_view",
+        counting_sliding_window_view,
+    )
+
+    assert _compare(frame, "nan-close") == []
+
+    assert calls == 0, "NaN frame vectorised instead of delegating to the scalar path"
