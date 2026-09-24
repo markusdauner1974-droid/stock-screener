@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from sqlalchemy import func
+from collections import defaultdict
+
+from sqlalchemy import func, literal_column
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.domain.scanning.opportunity_state import ActionState
@@ -32,16 +34,25 @@ class SqlOpportunityStateSummaryRepository:
         )
 
     def _aggregate(self, *, model, details, predicate) -> OpportunityStateSummary:
-        """Aggregate the projection in a single grouped pass.
+        """Read ``action_state`` and ``correction_survivor`` once per row,
+        group by the two, and pivot the buckets into a summary.
 
-        Every ``details_json`` access detoasts the whole stored value, so the
-        previous shape -- one conditional aggregate per action state, twice --
-        paid that cost once per expression. Reading both keys once and pivoting
-        the resulting buckets keeps the same totals for a fraction of the work.
+        Both columns are ``JSON`` rather than ``JSONB``, so each ``->>`` still
+        parses the whole stored breakdown: two reads per row is the floor here
+        without a schema change. The previous shape paid that per key *and*
+        per action state, sixteen parses for the same answer.
+
+        ``details`` is ``scan_results.details`` for a legacy scan run and
+        ``stock_feature_daily.details_json`` for a feature-store run; the keys
+        are the same in both.
         """
-
         action_state = details["action_state"].as_string()
-        survivor = details["correction_survivor"].as_boolean()
+        # The survivor test stays in SQL, as it was upstream. Deciding it in
+        # Python instead makes ``JSON_EXTRACT(...) IS 1`` collapse to
+        # ``bool(...)`` on SQLite, where the string "false" and the integer 2
+        # are both truthy -- so identical data would count differently
+        # depending on the backend.
+        survivor = details["correction_survivor"].as_boolean().is_(True)
         buckets = (
             self._session.query(
                 survivor.label("survivor"),
@@ -50,25 +61,29 @@ class SqlOpportunityStateSummaryRepository:
             )
             .select_from(model)
             .filter(predicate)
-            .group_by(survivor, action_state)
+            # Group by output position. Repeating the expressions would rely on
+            # the driver inlining its bind parameters: psycopg2 interpolates on
+            # the client, so the server sees identical text, but a driver that
+            # binds server-side (asyncpg) emits $1 in the SELECT and $3 in the
+            # GROUP BY, and PostgreSQL then rejects it as a grouping error.
+            .group_by(literal_column("1"), literal_column("2"))
             .all()
         )
 
-        known_states = {state.value: state for state in ActionState}
         rows_total = 0
         survivor_count = 0
-        action_state_counts = {state: 0 for state in ActionState}
-        survivor_action_state_counts = {state: 0 for state in ActionState}
+        action_state_counts: dict[ActionState, int] = defaultdict(int)
+        survivor_action_state_counts: dict[ActionState, int] = defaultdict(int)
 
         for is_survivor, raw_state, rows in buckets:
-            rows = int(rows or 0)
             rows_total += rows
             if is_survivor:
                 survivor_count += rows
-            # Unknown states stay out of every bucket; they are still counted in
-            # rows_total so the totals never silently drift.
-            state = known_states.get(raw_state)
-            if state is None:
+            # Unknown states stay out of every bucket; they are still counted
+            # in rows_total so the totals never silently drift.
+            try:
+                state = ActionState(raw_state)
+            except ValueError:
                 continue
             action_state_counts[state] += rows
             if is_survivor:
@@ -77,8 +92,8 @@ class SqlOpportunityStateSummaryRepository:
         return OpportunityStateSummary(
             rows_total=rows_total,
             survivor_count=survivor_count,
-            action_state_counts=action_state_counts,
-            survivor_action_state_counts=survivor_action_state_counts,
+            action_state_counts=dict(action_state_counts),
+            survivor_action_state_counts=dict(survivor_action_state_counts),
         )
 
 
