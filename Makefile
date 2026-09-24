@@ -27,6 +27,7 @@ NVM_ACTIVATE = export NVM_DIR="$$HOME/.nvm" && [ -s "$$NVM_DIR/nvm.sh" ] && . "$
 GATE_1 = \
   tests/unit/test_detector_interface_contract.py \
   tests/unit/test_detector_subtasks_c3a_c4a_c6a.py \
+  tests/unit/test_three_weeks_tight_detector_equivalence.py \
   tests/unit/test_detector_fixtures_se_g1.py \
   tests/unit/test_setup_engine_contract.py \
   tests/unit/test_setup_engine_report_schema.py \

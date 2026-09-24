@@ -24,6 +24,7 @@ import pytest
 import app.analysis.patterns.three_weeks_tight as three_weeks_tight_module
 
 from app.analysis.patterns.config import DEFAULT_SETUP_ENGINE_PARAMETERS
+from app.analysis.patterns.detectors.base import PatternDetectorInput
 from app.analysis.patterns.normalization import normalize_ohlcv_frame
 from app.analysis.patterns.three_weeks_tight import (
     _MAX_CANDIDATES,
@@ -34,6 +35,22 @@ from app.analysis.patterns.three_weeks_tight import (
 )
 
 PARAMS = DEFAULT_SETUP_ENGINE_PARAMETERS
+
+def _flat_frame(n: int, *, value: float = 100.0) -> pd.DataFrame:
+    return _weekly_frame(np.full(n, value, dtype=float))
+
+
+def _walk_frame(n: int, *, seed: int) -> pd.DataFrame:
+    rng = np.random.default_rng(seed)
+    return _weekly_frame(100.0 + np.cumsum(rng.normal(0.0, 1.5, n)))
+
+
+_CASE_BUILDERS = {
+    "flat": lambda: _flat_frame(300),
+    "walk": lambda: _walk_frame(300, seed=7),
+    "flat-120": lambda: _flat_frame(120, value=50.0),
+    "walk-500": lambda: _walk_frame(500, seed=11),
+}
 
 # Every field of _TightRun. Listed explicitly so a new field added without
 # being compared here is a visible omission rather than a silent gap.
@@ -286,6 +303,91 @@ def test_equivalence_integer_volume_dtype() -> None:
     frame = _weekly_frame(np.full(60, 100.0))
     frame["Volume"] = frame["Volume"].astype("int64")
     assert _compare(frame, "int-volume") == []
+
+
+# ---------------------------------------------------------------------------
+# The ``limit`` path used by detect()
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["flat", "walk", "flat-120", "walk-500"],
+)
+def test_limit_equals_unbounded_head(name: str) -> None:
+    """``limit=_MAX_CANDIDATES`` is exactly the head of the unbounded list.
+
+    ``detect()`` reads ``runs[:_MAX_CANDIDATES]`` and nothing else, so the
+    detector now asks for that head directly rather than materialising every
+    candidate. This pins the shortcut's semantics: not "the first N found",
+    which would depend on accumulation order, but the same ranking head the
+    unbounded call produced.
+    """
+    frame = _CASE_BUILDERS[name]()
+    full = _find_tight_runs(frame, PARAMS)
+    limited = _find_tight_runs(frame, PARAMS, limit=_MAX_CANDIDATES)
+
+    assert len(limited) == min(len(full), _MAX_CANDIDATES)
+    for index, (a, b) in enumerate(zip(limited, full[:_MAX_CANDIDATES])):
+        for field in _COMPARED_FIELDS:
+            left, right = getattr(a, field), getattr(b, field)
+            if isinstance(left, float) and isinstance(right, float):
+                if math.isnan(left) and math.isnan(right):
+                    continue
+            assert left == right, f"{name}[{index}].{field}: {left!r} != {right!r}"
+
+
+def test_limit_above_candidate_count_returns_all() -> None:
+    """A limit larger than the candidate count is not a truncation."""
+    frame = _walk_frame(101, seed=3)
+    full = _find_tight_runs(frame, PARAMS)
+    assert _find_tight_runs(frame, PARAMS, limit=len(full) + 10) == full
+
+
+def test_unbounded_call_still_returns_the_scalar_tail() -> None:
+    """``limit=None`` keeps the full list, tail included.
+
+    The equivalence tests depend on this: they compare the unbounded result
+    against the scalar reference, so a silent default of ``_MAX_CANDIDATES``
+    would make them pass while hiding every dropped run.
+    """
+    frame = _walk_frame(300, seed=5)
+    full = _find_tight_runs(frame, PARAMS)
+    assert len(full) > _MAX_CANDIDATES
+    assert full == _reference_find_tight_runs(frame, PARAMS)
+
+
+def test_detect_passes_the_candidate_limit() -> None:
+    """``detect()`` asks for the head directly, not the whole ranking.
+
+    Counting on the module rather than inspecting the source keeps the
+    assertion honest if the call site moves.
+    """
+    calls: list[int | None] = []
+    real = three_weeks_tight_module._find_tight_runs
+
+    def spy(weekly, parameters, *, limit=None):
+        calls.append(limit)
+        return real(weekly, parameters, limit=limit)
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(three_weeks_tight_module, "_find_tight_runs", spy)
+    try:
+        detector = three_weeks_tight_module.ThreeWeeksTightDetector()
+        detector.detect(
+            PatternDetectorInput(
+                symbol="TEST",
+                timeframe="weekly",
+                daily_bars=0,
+                weekly_bars=300,
+                features={"weekly_ohlcv": _CASE_BUILDERS["flat"]()},
+            ),
+            PARAMS,
+        )
+    finally:
+        monkeypatch.undo()
+
+    assert calls == [_MAX_CANDIDATES]
 
 
 # ---------------------------------------------------------------------------
