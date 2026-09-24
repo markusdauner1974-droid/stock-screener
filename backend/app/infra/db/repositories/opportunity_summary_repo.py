@@ -16,6 +16,7 @@ class SqlOpportunityStateSummaryRepository:
         self._session = session
 
     def for_scan(self, scan_id: str) -> OpportunityStateSummary:
+        """Aggregate the opportunity projection for one legacy scan run."""
         return self._aggregate(
             model=ScanResult,
             details=ScanResult.details,
@@ -23,6 +24,7 @@ class SqlOpportunityStateSummaryRepository:
         )
 
     def for_feature_run(self, run_id: int) -> OpportunityStateSummary:
+        """Aggregate the opportunity projection for one feature-store run."""
         return self._aggregate(
             model=StockFeatureDaily,
             details=StockFeatureDaily.details_json,
