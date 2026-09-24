@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import case, func
+from sqlalchemy import func
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.domain.scanning.opportunity_state import ActionState
@@ -30,52 +30,53 @@ class SqlOpportunityStateSummaryRepository:
         )
 
     def _aggregate(self, *, model, details, predicate) -> OpportunityStateSummary:
+        """Aggregate the projection in a single grouped pass.
+
+        Every ``details_json`` access detoasts the whole stored value, so the
+        previous shape -- one conditional aggregate per action state, twice --
+        paid that cost once per expression. Reading both keys once and pivoting
+        the resulting buckets keeps the same totals for a fraction of the work.
+        """
+
         action_state = details["action_state"].as_string()
         survivor = details["correction_survivor"].as_boolean()
-        aggregates = [
-            func.count().label("rows_total"),
-            func.coalesce(
-                func.sum(case((survivor.is_(True), 1), else_=0)),
-                0,
-            ).label("survivor_count"),
-        ]
-        aggregates.extend(
-            func.coalesce(
-                func.sum(case((action_state == state.value, 1), else_=0)),
-                0,
-            ).label(f"state_{state.value}")
-            for state in ActionState
+        buckets = (
+            self._session.query(
+                survivor.label("survivor"),
+                action_state.label("action_state"),
+                func.count().label("rows"),
+            )
+            .select_from(model)
+            .filter(predicate)
+            .group_by(survivor, action_state)
+            .all()
         )
-        aggregates.extend(
-            func.coalesce(
-                func.sum(
-                    case(
-                        (
-                            survivor.is_(True) & (action_state == state.value),
-                            1,
-                        ),
-                        else_=0,
-                    )
-                ),
-                0,
-            ).label(f"survivor_state_{state.value}")
-            for state in ActionState
-        )
-        row = (
-            self._session.query(*aggregates).select_from(model).filter(predicate).one()
-        )
-        state_count = len(ActionState)
+
+        known_states = {state.value: state for state in ActionState}
+        rows_total = 0
+        survivor_count = 0
+        action_state_counts = {state: 0 for state in ActionState}
+        survivor_action_state_counts = {state: 0 for state in ActionState}
+
+        for is_survivor, raw_state, rows in buckets:
+            rows = int(rows or 0)
+            rows_total += rows
+            if is_survivor:
+                survivor_count += rows
+            # Unknown states stay out of every bucket; they are still counted in
+            # rows_total so the totals never silently drift.
+            state = known_states.get(raw_state)
+            if state is None:
+                continue
+            action_state_counts[state] += rows
+            if is_survivor:
+                survivor_action_state_counts[state] += rows
+
         return OpportunityStateSummary(
-            rows_total=int(row[0] or 0),
-            survivor_count=int(row[1] or 0),
-            action_state_counts={
-                state: int(row[index + 2] or 0)
-                for index, state in enumerate(ActionState)
-            },
-            survivor_action_state_counts={
-                state: int(row[index + 2 + state_count] or 0)
-                for index, state in enumerate(ActionState)
-            },
+            rows_total=rows_total,
+            survivor_count=survivor_count,
+            action_state_counts=action_state_counts,
+            survivor_action_state_counts=survivor_action_state_counts,
         )
 
 
