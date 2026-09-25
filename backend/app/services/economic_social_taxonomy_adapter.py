@@ -372,7 +372,20 @@ class EconomicSocialTaxonomyAdapter:
             reason=reason,
             source_payload={},
         )
+        authority = self.db.get(TaxonomyAuthority, 1)
+        mirror_enabled = (
+            authority is not None
+            and authority.mode in {"dual", "economic"}
+            and authority.serving_generation_id is not None
+        )
         pending_mirror = state == "accepted" and not mirror_acknowledged
+        # A previously mirrored acceptance must be retracted from legacy
+        # readers, otherwise rollback would expose the stale acceptance.
+        pending_retraction = (
+            state != "accepted"
+            and mirror_enabled
+            and bool(self._accepted_legacy_mirrors(association_id))
+        )
         effective_state = "pending_legacy_mirror" if pending_mirror else state
         live = (
             state == "accepted"
@@ -380,35 +393,29 @@ class EconomicSocialTaxonomyAdapter:
             and mirror_acknowledged
         )
         projection_event_id = None
-        if pending_mirror:
-            authority = self.db.get(TaxonomyAuthority, 1)
-            if (
-                authority is not None
-                and authority.mode in {"dual", "economic"}
-                and authority.serving_generation_id is not None
-            ):
-                association = self.db.get(EconomicSocialAssociation, association_id)
-                lineage = f"economic-social-association:{association_id}"
-                event = EconomicTaxonomyRuntimeService(self.db).stage_projection_fanout(
-                    generation_id=authority.serving_generation_id,
-                    affected_lineages=(lineage,),
-                    projection_kind="social_membership",
-                    projection_version=1,
-                    target="legacy",
-                    payload_by_lineage={
-                        lineage: {
-                            "association_id": str(association_id),
-                            "economic_theme_id": str(association.economic_theme_id),
-                            "security_id": association.security_id,
-                            "state": state,
-                        }
-                    },
-                    staged_epoch=authority.authority_epoch,
-                    origin_representation="economic",
-                    selected_interpretation_version=f"social-decision:{decision.id}",
-                    mapping_version="economic-social-v1",
-                )[0]
-                projection_event_id = event.id
+        if mirror_enabled and (pending_mirror or pending_retraction):
+            association = self.db.get(EconomicSocialAssociation, association_id)
+            lineage = f"economic-social-association:{association_id}"
+            event = EconomicTaxonomyRuntimeService(self.db).stage_projection_fanout(
+                generation_id=authority.serving_generation_id,
+                affected_lineages=(lineage,),
+                projection_kind="social_membership",
+                projection_version=1,
+                target="legacy",
+                payload_by_lineage={
+                    lineage: {
+                        "association_id": str(association_id),
+                        "economic_theme_id": str(association.economic_theme_id),
+                        "security_id": association.security_id,
+                        "state": state,
+                    }
+                },
+                staged_epoch=authority.authority_epoch,
+                origin_representation="economic",
+                selected_interpretation_version=f"social-decision:{decision.id}",
+                mapping_version="economic-social-v1",
+            )[0]
+            projection_event_id = event.id
         return self._create_revision(
             association_id,
             state=effective_state,
@@ -416,7 +423,7 @@ class EconomicSocialTaxonomyAdapter:
             admission_state=admission_state,
             mirror_state=(
                 "pending"
-                if pending_mirror
+                if pending_mirror or pending_retraction
                 else "acknowledged" if state == "accepted" else "not_required"
             ),
             reconciliation_hash=_semantic_hash(
@@ -694,6 +701,10 @@ class EconomicSocialTaxonomyAdapter:
                 f"economic social revision {association_revision_id} not found"
             )
         if revision.state != "pending_legacy_mirror":
+            if revision.mirror_state == "pending":
+                return self._apply_legacy_retraction(
+                    revision, now=now, authority_epoch=authority_epoch
+                )
             return revision
         association = self.db.get(EconomicSocialAssociation, revision.association_id)
         security = self.db.get(StockUniverse, association.security_id)
@@ -764,6 +775,13 @@ class EconomicSocialTaxonomyAdapter:
                     legacy_association_id=legacy.id,
                 )
             )
+            self.db.flush()
+        # Every legacy row bridged to this membership mirrors its acceptance,
+        # including rows an earlier economic decision retracted.
+        for bridged in self._bridged_legacy_rows(association.id):
+            if bridged.state != "accepted":
+                self._set_legacy_mirror_state(bridged, "accepted", now=now)
+                bridged.accepted_at = bridged.accepted_at or now
         digest = _semantic_hash(
             {
                 "acknowledges_revision_id": revision.id,
@@ -791,6 +809,104 @@ class EconomicSocialTaxonomyAdapter:
             details={
                 "acknowledges_revision_id": str(revision.id),
                 "legacy_association_id": legacy.id,
+            },
+            authority_epoch=authority_epoch,
+        )
+
+    def _bridged_legacy_rows(
+        self, association_id: UUID
+    ) -> list[SocialThemeAssociation]:
+        return list(
+            self.db.scalars(
+                select(SocialThemeAssociation)
+                .join(
+                    EconomicSocialAssociationSource,
+                    EconomicSocialAssociationSource.legacy_association_id
+                    == SocialThemeAssociation.id,
+                )
+                .where(
+                    EconomicSocialAssociationSource.association_id == association_id,
+                    EconomicSocialAssociationSource.source_kind
+                    == "legacy_association",
+                )
+                .order_by(SocialThemeAssociation.id)
+            )
+        )
+
+    def _accepted_legacy_mirrors(
+        self, association_id: UUID
+    ) -> list[SocialThemeAssociation]:
+        return [
+            row
+            for row in self._bridged_legacy_rows(association_id)
+            if row.state == "accepted"
+        ]
+
+    def _set_legacy_mirror_state(
+        self, legacy: SocialThemeAssociation, target: str, *, now: datetime
+    ) -> None:
+        self.db.add(
+            SocialThemeDecision(
+                association_id=legacy.id,
+                run_id=None,
+                actor="system:economic-taxonomy-mirror",
+                reason="economic_social_decision_mirror",
+                before_state=legacy.state,
+                after_state=target,
+                policy_version="economic-social-v1",
+                evidence_work_ids=list(legacy.evidence_work_ids or []),
+                created_at=now,
+            )
+        )
+        legacy.state = target
+        legacy.version += 1
+        legacy.updated_at = now
+
+    def _apply_legacy_retraction(
+        self,
+        revision: EconomicSocialAssociationRevision,
+        *,
+        now: datetime,
+        authority_epoch: int,
+    ) -> EconomicSocialAssociationRevision:
+        """Withdraw a mirrored legacy acceptance after a non-accepted decision."""
+
+        # Legacy rows only model proposed/accepted/rejected; a conflict under
+        # review is not an acceptance, so it reads as proposed.
+        target = "rejected" if revision.state == "rejected" else "proposed"
+        legacy_ids = []
+        for legacy in self._accepted_legacy_mirrors(revision.association_id):
+            self._set_legacy_mirror_state(legacy, target, now=now)
+            legacy_ids.append(legacy.id)
+        digest = _semantic_hash(
+            {
+                "acknowledges_revision_id": revision.id,
+                "retracted_legacy_association_ids": legacy_ids,
+            }
+        )
+        existing = self.db.scalar(
+            select(EconomicSocialAssociationRevision).where(
+                EconomicSocialAssociationRevision.association_id
+                == revision.association_id,
+                EconomicSocialAssociationRevision.reconciliation_hash == digest,
+            )
+        )
+        if existing is not None:
+            return existing
+        return self._create_revision(
+            revision.association_id,
+            state=revision.state,
+            live=False,
+            admission_state=revision.admission_state,
+            mirror_state="acknowledged",
+            reconciliation_hash=digest,
+            decision_revision_id=revision.decision_revision_id,
+            evidence_packet_id=revision.evidence_packet_id,
+            projection_event_id=revision.projection_event_id,
+            details={
+                "acknowledges_revision_id": str(revision.id),
+                "requested_state": revision.state,
+                "retracted_legacy_association_ids": legacy_ids,
             },
             authority_epoch=authority_epoch,
         )

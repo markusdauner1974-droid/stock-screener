@@ -20,6 +20,7 @@ from app.domain.social_signals.records import (
     validate_utc_timestamp,
 )
 from app.infra.db.models.social_analysis import (
+    EconomicSocialAssociationSource,
     SocialExtractionWork,
     SocialRunWork,
     SocialThemeAssociation,
@@ -723,6 +724,14 @@ class SocialThemeProjectionService:
         if target not in {"accepted", "rejected"} or not isinstance(reason, str) or not reason.strip() or not isinstance(actor, str) or not actor.strip():
             raise ValueError("decision_reason_and_actor_required")
         authority = self.db.get(TaxonomyAuthority, 1)
+        if authority is not None and authority.mode == "economic":
+            return self._decide_economic(
+                association_id,
+                target,
+                reason.strip(),
+                actor.strip(),
+                expected_version,
+            )
         expected_epoch = authority.authority_epoch if authority is not None else 1
         payload = {
             "association_id": association_id,
@@ -764,6 +773,45 @@ class SocialThemeProjectionService:
                 target="economic",
                 payload=payload,
             )
+
+    def _decide_economic(self, association_id, target, reason, actor, expected_version):
+        """Revise the bridged global association once economic is authoritative.
+
+        The legacy row is a compatibility mirror after cutover, so it changes
+        only through ordered delivery of the resulting projection event.
+        """
+        association = self.db.get(
+            SocialThemeAssociation, association_id, populate_existing=True
+        )
+        if association is None or association.version != expected_version:
+            raise ValueError("association_version_conflict")
+        economic_ids = set(
+            self.db.scalars(
+                select(EconomicSocialAssociationSource.association_id).where(
+                    EconomicSocialAssociationSource.source_kind
+                    == "legacy_association",
+                    EconomicSocialAssociationSource.legacy_association_id
+                    == association_id,
+                )
+            )
+        )
+        if not economic_ids:
+            raise ValueError("economic_association_missing")
+        if len(economic_ids) != 1:
+            raise ValueError("economic_association_ambiguous")
+        (economic_id,) = economic_ids
+        idempotency_key = (
+            f"legacy-admin:{association_id}:v{expected_version}:{target}:"
+            f"{_semantic_hash({'reason': reason, 'actor': actor})}"
+        )
+        return EconomicSocialTaxonomyAdapter(self.db).revise(
+            economic_id,
+            state=target,
+            idempotency_key=idempotency_key,
+            actor=actor,
+            reason=reason,
+            mirror_acknowledged=False,
+        )
 
     def effective_live_membership(self, theme_cluster_id):
         """Active legacy UNION accepted Social listings, current trusted grouping.

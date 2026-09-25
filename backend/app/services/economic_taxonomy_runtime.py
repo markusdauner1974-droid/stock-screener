@@ -30,6 +30,8 @@ from app.models.theme import ThemeCluster, ThemeConstituent
 from app.services.economic_taxonomy_fence import producer_write
 from app.utils.file_hashing import canonical_json_sha256 as _payload_hash
 
+_LEGACY_MIRROR_PIPELINES = ("technical", "fundamental")
+
 
 class ProjectionRuntimeError(ValueError):
     pass
@@ -501,7 +503,9 @@ class EconomicTaxonomyRuntimeService:
                 select(EconomicSocialAssociationRevision)
                 .where(
                     EconomicSocialAssociationRevision.projection_event_id == event.id,
-                    EconomicSocialAssociationRevision.state == "pending_legacy_mirror",
+                    # Accepts are pending_legacy_mirror; retractions keep
+                    # their decided state while the mirror is pending.
+                    EconomicSocialAssociationRevision.mirror_state == "pending",
                 )
                 .order_by(EconomicSocialAssociationRevision.revision_number.desc())
                 .limit(1)
@@ -557,19 +561,6 @@ class EconomicTaxonomyRuntimeService:
         desired_keys = {
             self._legacy_theme_key(theme_id) for theme_id in desired_theme_ids
         }
-        existing = (
-            {
-                row.canonical_key: row
-                for row in self.session.scalars(
-                    select(ThemeCluster).where(
-                        ThemeCluster.pipeline == "technical",
-                        ThemeCluster.canonical_key.in_(desired_keys),
-                    )
-                )
-            }
-            if desired_keys
-            else {}
-        )
         lifecycle_states = {
             "provisional": "candidate",
             "established": "active",
@@ -577,98 +568,115 @@ class EconomicTaxonomyRuntimeService:
             "reactivated": "reactivated",
             "retired": "retired",
         }
-        for theme_id in sorted(desired_theme_ids):
-            key = self._legacy_theme_key(theme_id)
-            detail = details_by_theme.get(theme_id, {})
-            display_name = str(
-                detail.get("display_name") or f"Economic Theme {theme_id}"
-            )
-            lifecycle = lifecycle_states.get(
-                str(detail.get("lifecycle") or "provisional"), "candidate"
-            )
-            cluster = existing.get(key)
-            if cluster is None:
-                cluster = ThemeCluster(
-                    name=display_name,
-                    display_name=display_name,
-                    canonical_key=key,
-                    pipeline="technical",
-                    aliases=[],
-                    description=detail.get("definition"),
-                    discovery_source="taxonomy_mirror",
-                    first_seen_at=now,
-                    last_seen_at=now,
-                    lifecycle_state=lifecycle,
-                    lifecycle_state_updated_at=now,
-                    is_active=lifecycle != "retired",
-                    is_emerging=lifecycle == "candidate",
-                )
-                self.session.add(cluster)
-                self.session.flush()
-                existing[key] = cluster
-            else:
-                cluster.name = display_name
-                cluster.display_name = display_name
-                cluster.description = detail.get("definition")
-                cluster.last_seen_at = now
-                if cluster.lifecycle_state != lifecycle:
-                    cluster.lifecycle_state = lifecycle
-                    cluster.lifecycle_state_updated_at = now
-                cluster.is_active = lifecycle != "retired"
-                cluster.is_emerging = lifecycle == "candidate"
-
-            constituents = {
-                row.symbol: row
-                for row in self.session.scalars(
-                    select(ThemeConstituent).where(
-                        ThemeConstituent.theme_cluster_id == cluster.id
+        # Economic Themes are not pipeline-scoped, and legacy content sources
+        # feed both pipelines by default, so each legacy reader receives the
+        # same mirrored catalog after rollback.
+        for pipeline in _LEGACY_MIRROR_PIPELINES:
+            existing = (
+                {
+                    row.canonical_key: row
+                    for row in self.session.scalars(
+                        select(ThemeCluster).where(
+                            ThemeCluster.pipeline == pipeline,
+                            ThemeCluster.canonical_key.in_(desired_keys),
+                        )
                     )
+                }
+                if desired_keys
+                else {}
+            )
+            for theme_id in sorted(desired_theme_ids):
+                key = self._legacy_theme_key(theme_id)
+                detail = details_by_theme.get(theme_id, {})
+                display_name = str(
+                    detail.get("display_name") or f"Economic Theme {theme_id}"
                 )
-            }
-            desired_symbols = symbols_by_theme.get(theme_id, set())
-            for symbol in sorted(desired_symbols):
-                constituent = constituents.get(symbol)
-                if constituent is None:
-                    constituent = ThemeConstituent(
-                        theme_cluster_id=cluster.id,
-                        symbol=symbol,
-                        source="taxonomy_mirror",
-                        confidence=1.0,
-                        mention_count=1,
-                        first_mentioned_at=now,
-                        last_mentioned_at=now,
-                        is_active=cluster.is_active,
+                lifecycle = lifecycle_states.get(
+                    str(detail.get("lifecycle") or "provisional"), "candidate"
+                )
+                cluster = existing.get(key)
+                if cluster is None:
+                    cluster = ThemeCluster(
+                        name=display_name,
+                        display_name=display_name,
+                        canonical_key=key,
+                        pipeline=pipeline,
+                        aliases=[],
+                        description=detail.get("definition"),
+                        discovery_source="taxonomy_mirror",
+                        first_seen_at=now,
+                        last_seen_at=now,
+                        lifecycle_state=lifecycle,
+                        lifecycle_state_updated_at=now,
+                        is_active=lifecycle != "retired",
+                        is_emerging=lifecycle == "candidate",
                     )
-                    self.session.add(constituent)
+                    self.session.add(cluster)
+                    self.session.flush()
+                    existing[key] = cluster
                 else:
-                    constituent.is_active = cluster.is_active
-                    constituent.last_mentioned_at = now
-            for symbol, constituent in constituents.items():
-                if (
-                    constituent.source == "taxonomy_mirror"
-                    and symbol not in desired_symbols
-                ):
-                    constituent.is_active = False
+                    cluster.name = display_name
+                    cluster.display_name = display_name
+                    cluster.description = detail.get("definition")
+                    cluster.last_seen_at = now
+                    if cluster.lifecycle_state != lifecycle:
+                        cluster.lifecycle_state = lifecycle
+                        cluster.lifecycle_state_updated_at = now
+                    cluster.is_active = lifecycle != "retired"
+                    cluster.is_emerging = lifecycle == "candidate"
 
-        for cluster in self.session.scalars(
-            select(ThemeCluster).where(
-                ThemeCluster.pipeline == "technical",
-                ThemeCluster.discovery_source.in_(
-                    ("taxonomy_mirror", "economic_mirror")
-                ),
-            )
-        ):
-            if cluster.canonical_key in desired_keys:
-                continue
-            if cluster.discovery_source == "taxonomy_mirror":
-                cluster.is_active = False
-            for constituent in self.session.scalars(
-                select(ThemeConstituent).where(
-                    ThemeConstituent.theme_cluster_id == cluster.id,
-                    ThemeConstituent.source == "taxonomy_mirror",
+                constituents = {
+                    row.symbol: row
+                    for row in self.session.scalars(
+                        select(ThemeConstituent).where(
+                            ThemeConstituent.theme_cluster_id == cluster.id
+                        )
+                    )
+                }
+                desired_symbols = symbols_by_theme.get(theme_id, set())
+                for symbol in sorted(desired_symbols):
+                    constituent = constituents.get(symbol)
+                    if constituent is None:
+                        constituent = ThemeConstituent(
+                            theme_cluster_id=cluster.id,
+                            symbol=symbol,
+                            source="taxonomy_mirror",
+                            confidence=1.0,
+                            mention_count=1,
+                            first_mentioned_at=now,
+                            last_mentioned_at=now,
+                            is_active=cluster.is_active,
+                        )
+                        self.session.add(constituent)
+                    else:
+                        constituent.is_active = cluster.is_active
+                        constituent.last_mentioned_at = now
+                for symbol, constituent in constituents.items():
+                    if (
+                        constituent.source == "taxonomy_mirror"
+                        and symbol not in desired_symbols
+                    ):
+                        constituent.is_active = False
+
+            for cluster in self.session.scalars(
+                select(ThemeCluster).where(
+                    ThemeCluster.pipeline == pipeline,
+                    ThemeCluster.discovery_source.in_(
+                        ("taxonomy_mirror", "economic_mirror")
+                    ),
                 )
             ):
-                constituent.is_active = False
+                if cluster.canonical_key in desired_keys:
+                    continue
+                if cluster.discovery_source == "taxonomy_mirror":
+                    cluster.is_active = False
+                for constituent in self.session.scalars(
+                    select(ThemeConstituent).where(
+                        ThemeConstituent.theme_cluster_id == cluster.id,
+                        ThemeConstituent.source == "taxonomy_mirror",
+                    )
+                ):
+                    constituent.is_active = False
         self.session.flush()
 
     def record_delivery_failure(

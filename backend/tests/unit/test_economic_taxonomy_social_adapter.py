@@ -13,6 +13,7 @@ from app.infra.db.models.social_analysis import (
     SocialExtractionWork,
     SocialRunWork,
     SocialThemeAssociation,
+    SocialThemeDecision,
 )
 from app.infra.db.models.social_signals import SocialSignalRun, SocialSourceRegistry
 from app.infra.db.repositories.economic_taxonomy_repo import EconomicTaxonomyRepository
@@ -277,6 +278,171 @@ def test_social_membership_delivery_applies_legacy_mirror_before_success(db_sess
     assert latest.live is True
     assert latest.mirror_state == "acknowledged"
     assert db_session.query(SocialThemeAssociation).count() == 1
+
+
+def _deliver_next(db_session):
+    authority = db_session.get(TaxonomyAuthority, 1)
+    runtime = EconomicTaxonomyRuntimeService(db_session)
+    claim = runtime.claim_deliveries_from_published_generations(
+        worker_id="worker:social-mirror",
+        expected_epoch=authority.authority_epoch,
+        now=NOW,
+        limit=1,
+    )[0]
+    db_session.commit()
+    result = runtime.apply_delivery(
+        claim,
+        expected_epoch=authority.authority_epoch,
+        now=NOW,
+    )
+    db_session.commit()
+    return claim, result
+
+
+def test_social_rejection_retracts_and_reacceptance_restores_legacy_mirror(
+    db_session,
+):
+    seed_generation(db_session)
+    theme, security = _global_pair(db_session)
+    adapter = EconomicSocialTaxonomyAdapter(db_session)
+    association = adapter.get_or_create_association(theme.id, security.id)
+    adapter.revise(
+        association.id,
+        state="accepted",
+        idempotency_key="accepted-before-retraction",
+        actor="admin:test",
+        reason="reviewed native membership",
+        mirror_acknowledged=False,
+    )
+    db_session.commit()
+    _deliver_next(db_session)
+    legacy = db_session.scalar(select(SocialThemeAssociation))
+    assert legacy.state == "accepted"
+
+    rejected = adapter.revise(
+        association.id,
+        state="rejected",
+        idempotency_key="rejected-after-mirror",
+        actor="admin:test",
+        reason="membership no longer supported",
+        mirror_acknowledged=True,
+    )
+    db_session.commit()
+
+    assert rejected.state == "rejected"
+    assert rejected.live is False
+    assert rejected.mirror_state == "pending"
+    assert rejected.projection_event_id is not None
+
+    claim, result = _deliver_next(db_session)
+
+    assert claim.projection_event_id == rejected.projection_event_id
+    assert result.outcome == "success"
+    db_session.refresh(legacy)
+    assert legacy.state == "rejected"
+    latest = db_session.scalar(
+        select(EconomicSocialAssociationRevision)
+        .where(EconomicSocialAssociationRevision.association_id == association.id)
+        .order_by(EconomicSocialAssociationRevision.revision_number.desc())
+        .limit(1)
+    )
+    assert latest.state == "rejected"
+    assert latest.live is False
+    assert latest.mirror_state == "acknowledged"
+    assert db_session.scalar(
+        select(SocialThemeDecision).where(
+            SocialThemeDecision.association_id == legacy.id,
+            SocialThemeDecision.after_state == "rejected",
+        )
+    ).actor == "system:economic-taxonomy-mirror"
+
+    adapter.revise(
+        association.id,
+        state="accepted",
+        idempotency_key="reaccepted-after-retraction",
+        actor="admin:test",
+        reason="membership reinstated",
+        mirror_acknowledged=False,
+    )
+    db_session.commit()
+    _deliver_next(db_session)
+
+    db_session.refresh(legacy)
+    assert legacy.state == "accepted"
+    assert db_session.query(SocialThemeAssociation).count() == 1
+
+
+def test_admin_decision_after_cutover_revises_economic_association(db_session):
+    seed_generation(db_session)
+    theme, security = _global_pair(db_session)
+    legacy = _legacy_association(db_session, name="AI Memory", state="accepted")
+    projected = EconomicSocialTaxonomyAdapter(db_session).project_legacy_associations(
+        economic_theme_id=theme.id,
+        security_id=security.id,
+        legacy_association_ids=(legacy.id,),
+    )
+    db_session.commit()
+    service = SocialThemeProjectionService(db_session, admin_authorized=True)
+
+    rejected = service.decide(
+        legacy.id, "rejected", "reviewed evidence", "admin", legacy.version
+    )
+    db_session.commit()
+
+    assert rejected.association_id == projected.association_id
+    assert rejected.state == "rejected"
+    assert rejected.live is False
+    assert rejected.mirror_state == "pending"
+    db_session.refresh(legacy)
+    assert legacy.state == "accepted"
+
+    _deliver_next(db_session)
+
+    db_session.refresh(legacy)
+    assert legacy.state == "rejected"
+    with pytest.raises(ValueError, match="association_version_conflict"):
+        service.decide(legacy.id, "accepted", "stale", "admin", legacy.version - 1)
+
+    accepted = service.decide(
+        legacy.id, "accepted", "reinstated", "admin", legacy.version
+    )
+    db_session.commit()
+    assert accepted.state == "pending_legacy_mirror"
+
+    _deliver_next(db_session)
+
+    db_session.refresh(legacy)
+    assert legacy.state == "accepted"
+
+
+def test_admin_decision_after_cutover_requires_economic_bridge(db_session):
+    seed_generation(db_session)
+    legacy = _legacy_association(db_session, name="Unmapped", state="accepted")
+    db_session.commit()
+
+    with pytest.raises(ValueError, match="economic_association_missing"):
+        SocialThemeProjectionService(db_session, admin_authorized=True).decide(
+            legacy.id, "rejected", "reviewed evidence", "admin", legacy.version
+        )
+
+
+def test_social_rejection_without_legacy_mirror_stages_no_retraction(db_session):
+    seed_generation(db_session)
+    theme, security = _global_pair(db_session)
+    adapter = EconomicSocialTaxonomyAdapter(db_session)
+    association = adapter.get_or_create_association(theme.id, security.id)
+
+    rejected = adapter.revise(
+        association.id,
+        state="rejected",
+        idempotency_key="rejected-without-mirror",
+        actor="admin:test",
+        reason="never accepted",
+        mirror_acknowledged=True,
+    )
+
+    assert rejected.mirror_state == "not_required"
+    assert rejected.projection_event_id is None
 
 
 def test_completed_social_mirror_is_not_copied_to_the_next_generation(db_session):

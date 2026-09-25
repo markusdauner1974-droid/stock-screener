@@ -566,6 +566,11 @@ class EconomicTaxonomyPublicationCoordinator:
                     ) from exc
                 attempt = selected
                 packet = selected_packet
+            elif attempt is not None:
+                # A newer effective packet may still be awaiting processing.
+                # Keep serving the default completed attempt with its own
+                # packet until the newer packet has a completed attempt.
+                packet = interpretation_service._packet_for_attempt(session, attempt)
             eligibility = session.scalar(
                 select(LensEligibilityRevision)
                 .where(LensEligibilityRevision.evidence_packet_id == packet.id)

@@ -327,6 +327,54 @@ def test_default_publication_cutoff_selects_completed_processing_attempt(db_sess
     ]
 
 
+def test_publication_cutoff_keeps_prior_attempt_while_newer_packet_is_pending(
+    db_session,
+):
+    taxonomy, theme = _fixture(db_session)
+    older_packet = _admit(db_session, provider_order=1)
+    older = _attempt(
+        db_session,
+        admitted=older_packet,
+        taxonomy_id=taxonomy.id,
+        theme_id=theme.id,
+    )
+    newer_packet = _admit(
+        db_session,
+        text="Corrected memory story.",
+        provider_order=2,
+        supersedes=older_packet.packet_id,
+    )
+    factory = lambda: db_session.__class__(bind=db_session.get_bind())
+    coordinator = EconomicTaxonomyPublicationCoordinator(factory)
+
+    pending = coordinator.capture_cutoff(principal=ADMIN)
+
+    manifest = db_session.get(GenerationInputManifest, pending.manifest_id)
+    assert manifest.selections[0]["evidence_packet_id"] == str(
+        older_packet.packet_id
+    )
+    assert manifest.selections[0]["selected_attempt_id"] == str(older.id)
+    assert manifest.selections[0]["evidence_precedence_revision"] == 2
+    interpretation = EconomicTaxonomyInterpretationService(
+        factory
+    ).build_interpretation_set(manifest.id)
+    assert interpretation.id is not None
+
+    newer = _attempt(
+        db_session,
+        admitted=newer_packet,
+        taxonomy_id=taxonomy.id,
+        theme_id=theme.id,
+    )
+    completed = coordinator.capture_cutoff(principal=ADMIN)
+
+    manifest = db_session.get(GenerationInputManifest, completed.manifest_id)
+    assert manifest.selections[0]["evidence_packet_id"] == str(
+        newer_packet.packet_id
+    )
+    assert manifest.selections[0]["selected_attempt_id"] == str(newer.id)
+
+
 def test_publication_refresh_preserves_authenticated_interpretation_override(
     db_session,
 ):

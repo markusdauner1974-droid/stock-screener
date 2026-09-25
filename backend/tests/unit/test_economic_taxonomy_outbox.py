@@ -250,6 +250,23 @@ def test_legacy_theme_delivery_materializes_and_retracts_legacy_reader_rows(
         )
     )
     assert constituent.is_active is True
+    fundamental = db_session.scalar(
+        select(ThemeCluster).where(
+            ThemeCluster.pipeline == "fundamental",
+            ThemeCluster.canonical_key == f"economic_{theme_id.hex}",
+        )
+    )
+    assert fundamental.display_name == "AI Memory"
+    assert fundamental.is_active is True
+    assert {
+        row.symbol
+        for row in db_session.scalars(
+            select(ThemeConstituent).where(
+                ThemeConstituent.theme_cluster_id == fundamental.id,
+                ThemeConstituent.is_active.is_(True),
+            )
+        )
+    } == {"MU"}
 
     second_source = service.stage_projection(
         generation_id=None,
@@ -320,6 +337,7 @@ def test_legacy_theme_delivery_materializes_and_retracts_legacy_reader_rows(
     service.apply_projection_event(final_retraction, authority_epoch=10, now=NOW)
 
     assert cluster.is_active is False
+    assert fundamental.is_active is False
 
 
 def test_delivery_eligibility_comes_from_publication_history(db_session):
