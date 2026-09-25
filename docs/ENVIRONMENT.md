@@ -65,7 +65,7 @@ Enables assistant web research fallback.
 | `SERVER_AUTH_SECURE_COOKIE` | `false` | Force Secure auth cookies; set `true` when TLS terminates at a trusted HTTPS proxy |
 | `SERVER_EXPOSE_API_DOCS` | `false` | Keep `/docs`, `/redoc`, and `/openapi.json` disabled unless you explicitly need them |
 | `ADMIN_API_KEY` | (empty) | Required for `/api/v1/config/*` endpoints |
-| `ADMIN_PRINCIPAL_ID` | (empty) | Required stable audit identity bound to `ADMIN_API_KEY`; admin endpoints fail closed without it |
+| `ADMIN_PRINCIPAL_ID` | (empty) | Stable audit identity bound to `ADMIN_API_KEY`, and the only identity granted Economic Taxonomy review/publication authority. Without it, admin endpoints keep working but are audited as `admin:unbound-api-key` (a warning is logged once) and taxonomy publication fails closed |
 
 ## Docker Deployment
 

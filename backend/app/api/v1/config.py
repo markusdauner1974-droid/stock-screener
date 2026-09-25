@@ -1,4 +1,5 @@
 """API endpoints for application configuration including LLM settings."""
+import hmac
 import json
 import logging
 import os
@@ -41,18 +42,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def require_admin(
-    x_admin_key: str = Header(default=None, alias="X-Admin-Key"),
-    authorization: str = Header(default=None),
-    settings=settings,
-):
+# Audit subject for installs that set ADMIN_API_KEY without ADMIN_PRINCIPAL_ID.
+# It keeps pre-existing admin endpoints working but never carries taxonomy
+# review authority.
+UNBOUND_ADMIN_SUBJECT = "admin:unbound-api-key"
+_unbound_admin_warned = False
+
+
+def authenticate_admin(
+    config,
+    *,
+    x_admin_key: str | None = None,
+    authorization: str | None = None,
+) -> AdminPrincipal:
     """Authenticate the configured key and return its trusted audit identity."""
-    admin_key = settings.admin_api_key
-    principal_id = settings.admin_principal_id
-    if not admin_key or not principal_id:
-        logger.error(
-            "ADMIN_API_KEY or ADMIN_PRINCIPAL_ID not configured; admin endpoints disabled"
-        )
+    admin_key = config.admin_api_key
+    if not admin_key:
+        logger.error("ADMIN_API_KEY not configured; admin endpoints disabled")
         raise HTTPException(status_code=503, detail="Admin identity not configured")
 
     provided = None
@@ -61,13 +67,40 @@ def require_admin(
     if not provided and isinstance(x_admin_key, str):
         provided = x_admin_key
 
-    if not provided or provided != admin_key:
+    if not provided or not hmac.compare_digest(
+        provided.encode("utf-8"), admin_key.encode("utf-8")
+    ):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+    principal_id = config.admin_principal_id
+    if not principal_id:
+        global _unbound_admin_warned
+        if not _unbound_admin_warned:
+            _unbound_admin_warned = True
+            logger.warning(
+                "ADMIN_PRINCIPAL_ID not configured; admin requests are audited "
+                "as %s without taxonomy review authority",
+                UNBOUND_ADMIN_SUBJECT,
+            )
+        return AdminPrincipal(
+            subject=UNBOUND_ADMIN_SUBJECT,
+            auth_method="admin_api_key",
+            roles=frozenset(),
+        )
     return AdminPrincipal(
         subject=principal_id,
         auth_method="admin_api_key",
         roles=frozenset({"taxonomy:review"}),
+    )
+
+
+def require_admin(
+    x_admin_key: str = Header(default=None, alias="X-Admin-Key"),
+    authorization: str = Header(default=None),
+) -> AdminPrincipal:
+    """FastAPI dependency; configuration is read here, never from the request."""
+    return authenticate_admin(
+        settings, x_admin_key=x_admin_key, authorization=authorization
     )
 
 
