@@ -285,15 +285,20 @@ def _resolve_latest_published_run_for_market(
 ) -> int | None:
     """Return the published run a caller should act on.
 
-    Without ``ranking_date`` this is the newest published run for the market,
-    which is whatever the ``latest_published*`` pointers say.
+    Candidates are considered in a fixed order: the market pointer, then the
+    global ``latest_published`` pointer, then remaining published runs newest
+    first. The first candidate that is published, belongs to the market and —
+    when ``ranking_date`` is given — serves that date wins.
 
-    With ``ranking_date`` the run must additionally *serve* that date: a run
-    published for an earlier trading date is skipped in favour of the newest
-    run that still matches, and ``None`` is returned when none does. Callers
-    that enrich a run with rankings from a given date must pass it — enriching
-    an older run with newer rankings raises ``FeatureRunRsIdentityError`` from
-    the identity resolver, which is how the daily chain used to abort.
+    Without ``ranking_date`` this is therefore the newest published run for the
+    market, which is whatever the ``latest_published*`` pointers say.
+
+    With ``ranking_date`` a run must additionally *serve* that date, so the
+    pointers are skipped over while they stay stale instead of shadowing a
+    matching run: ``None`` is returned when no candidate matches. Callers that
+    enrich a run with rankings from a given date must pass it — enriching an
+    older run with newer rankings raises ``FeatureRunRsIdentityError`` from the
+    identity resolver, which is how the daily chain used to abort.
     """
     from app.domain.feature_store.run_metadata import feature_run_market
     from app.infra.db.models.feature_store import FeatureRun, FeatureRunPointer
@@ -309,6 +314,9 @@ def _resolve_latest_published_run_for_market(
             seen_ids.add(run.id)
             candidates.append(run)
 
+    # Deliberately pointer-first: a stale pointer must not shadow a matching
+    # run further down the list, but an intact pointer keeps its precedence over
+    # an equally valid run that only the batch would have surfaced.
     for key in (pointer_key, "latest_published"):
         pointer = (
             db.query(FeatureRunPointer)

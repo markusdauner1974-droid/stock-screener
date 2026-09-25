@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import inspect
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
@@ -2382,7 +2382,7 @@ def test_metadata_repair_skips_instead_of_enriching_a_stale_run():
         db.add(
             IBDGroupRank(
                 industry_group="Semiconductors",
-                date=date(2026, 9, 18),
+                date=date(2026, 9, 22),
                 rank=1,
                 avg_rs_rating=95.0,
             )
@@ -2407,4 +2407,80 @@ def test_metadata_repair_skips_instead_of_enriching_a_stale_run():
     # ...but the repair still returns a normal result, so the chain continues.
     assert stats["market"] == "US"
     assert stats["ranking_date"] == "2026-09-22"
+    engine.dispose()
+
+
+def test_resolver_keeps_pointer_precedence_over_the_published_batch():
+    """The pointers must still decide before the catch-all batch does.
+
+    The market-specific pointer outranks the global fallback, and both outrank
+    a run merely found by ``published_at``. The resolver merges the three
+    sources into one candidate list, so without a test this ordering could be
+    lost the next time the candidate collection is touched.
+    """
+    engine = create_engine("sqlite:///:memory:")
+    _build_run_resolution_schema(engine)
+    factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    later = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)
+
+    with factory() as db:
+        # The fallback pointer names a run published LATER than the market one.
+        _add_run(db, run_id=10, rs_date="2026-09-24", pointer="latest_published_market:US")
+        db.query(FeatureRun).filter_by(id=10).update({"published_at": later})
+        _add_run(db, run_id=11, rs_date="2026-09-24", pointer="latest_published")
+        db.query(FeatureRun).filter_by(id=11).update(
+            {"published_at": later + timedelta(hours=1)}
+        )
+        db.commit()
+
+        resolved = _resolve_latest_published_run_for_market(
+            db=db,
+            market="US",
+            ranking_date=date(2026, 9, 24),
+        )
+
+    assert resolved == 10, "the market pointer outranks the global fallback"
+    engine.dispose()
+
+
+def test_resolver_falls_through_a_stale_market_pointer_to_the_fallback():
+    """A stale market pointer must not shadow a fallback that serves the date."""
+    engine = create_engine("sqlite:///:memory:")
+    _build_run_resolution_schema(engine)
+    factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+    with factory() as db:
+        _add_run(db, run_id=10, rs_date="2026-09-18", pointer="latest_published_market:US")
+        _add_run(db, run_id=11, rs_date="2026-09-24", pointer="latest_published")
+        db.commit()
+
+        resolved = _resolve_latest_published_run_for_market(
+            db=db,
+            market="US",
+            ranking_date=date(2026, 9, 24),
+        )
+
+    assert resolved == 11
+    engine.dispose()
+
+
+def test_resolver_falls_through_stale_pointers_to_the_published_batch():
+    """When both pointers are stale, a matching run is still found by date."""
+    engine = create_engine("sqlite:///:memory:")
+    _build_run_resolution_schema(engine)
+    factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+    with factory() as db:
+        _add_run(db, run_id=10, rs_date="2026-09-18", pointer="latest_published_market:US")
+        _add_run(db, run_id=11, rs_date="2026-09-18", pointer="latest_published")
+        _add_run(db, run_id=12, rs_date="2026-09-24")
+        db.commit()
+
+        resolved = _resolve_latest_published_run_for_market(
+            db=db,
+            market="US",
+            ranking_date=date(2026, 9, 24),
+        )
+
+    assert resolved == 12
     engine.dispose()
