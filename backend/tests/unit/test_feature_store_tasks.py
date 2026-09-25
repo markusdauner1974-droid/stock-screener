@@ -2444,14 +2444,27 @@ def test_resolver_keeps_pointer_precedence_over_the_published_batch():
 
 
 def test_resolver_falls_through_a_stale_market_pointer_to_the_fallback():
-    """A stale market pointer must not shadow a fallback that serves the date."""
+    """A stale market pointer must not shadow a fallback that serves the date.
+
+    An unpointed run that is *newer* than the fallback is present on purpose:
+    the fallback must win on precedence, not because it happens to be the
+    newest published run. Without that run the assertion would also hold for a
+    resolver that consulted the published batch before the global pointer.
+    """
     engine = create_engine("sqlite:///:memory:")
     _build_run_resolution_schema(engine)
     factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    later = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc)
 
     with factory() as db:
         _add_run(db, run_id=10, rs_date="2026-09-18", pointer="latest_published_market:US")
         _add_run(db, run_id=11, rs_date="2026-09-24", pointer="latest_published")
+        db.query(FeatureRun).filter_by(id=11).update({"published_at": later})
+        # Eligible for the ranking date, unpointed, and published after run 11.
+        _add_run(db, run_id=12, rs_date="2026-09-24")
+        db.query(FeatureRun).filter_by(id=12).update(
+            {"published_at": later + timedelta(hours=1)}
+        )
         db.commit()
 
         resolved = _resolve_latest_published_run_for_market(
@@ -2460,7 +2473,7 @@ def test_resolver_falls_through_a_stale_market_pointer_to_the_fallback():
             ranking_date=date(2026, 9, 24),
         )
 
-    assert resolved == 11
+    assert resolved == 11, "the global pointer outranks a newer unpointed run"
     engine.dispose()
 
 
