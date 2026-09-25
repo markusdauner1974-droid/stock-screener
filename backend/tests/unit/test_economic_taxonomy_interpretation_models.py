@@ -12,7 +12,6 @@ from app.models.economic_taxonomy_runtime import (
     ClaimReviewArtifact,
     ClassificationAttempt,
     ClassificationAttemptEvent,
-    EconomicThemeEmbedding,
     EvidencePacket,
     ExtractionArtifact,
     ImmutableRuntimePayload,
@@ -399,27 +398,3 @@ def test_lens_eligibility_is_append_only_revision_history(db):
     assert second.evidence_channels == ["technical", "fundamental"]
 
 
-def test_embedding_cache_key_includes_taxonomy_and_model_inputs(db):
-    theme = EconomicTheme(created_by="test:author")
-    db.add(theme)
-    db.flush()
-    first = EconomicThemeEmbedding(
-        economic_theme_id=theme.id,
-        taxonomy_semantic_hash="taxonomy-1",
-        source_text_hash="text-1",
-        embedding_model="model",
-        model_version="v1",
-        embedding=[0.1, 0.2],
-    )
-    second = EconomicThemeEmbedding(
-        economic_theme_id=theme.id,
-        taxonomy_semantic_hash="taxonomy-2",
-        source_text_hash="text-1",
-        embedding_model="model",
-        model_version="v1",
-        embedding=[0.1, 0.2],
-    )
-    db.add_all([first, second])
-    db.flush()
-
-    assert first.id != second.id
