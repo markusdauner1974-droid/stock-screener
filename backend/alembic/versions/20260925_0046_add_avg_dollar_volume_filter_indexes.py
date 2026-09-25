@@ -23,10 +23,16 @@ migration so the drift guard can look the field up by the name indexed here).
 PostgreSQL-only, matching ``20260617_0021`` and ``20260821_0028``: SQLite does
 not parse these JSON operators. The indexes are built ``CONCURRENTLY`` inside an
 autocommit block so a large run does not block writes while they are created.
+
+Because the build runs outside a transaction, a failure partway through leaves
+an *invalid* index behind under the target name. ``IF NOT EXISTS`` would then
+treat the name as taken, so ``_ensure_valid`` drops and rebuilds any invalid
+same-named index instead of silently finishing without a usable one.
 """
 
 from __future__ import annotations
 
+import sqlalchemy as sa
 from alembic import op
 
 revision = "20260925_0046"
@@ -41,6 +47,11 @@ _FIELDS = [
     "avg_dollar_volume",
     "ibd_group_rank",
 ]
+
+_COUNT_INVALID_SQL = """
+SELECT count(*) FROM pg_index
+WHERE indexrelid = to_regclass(:index_name) AND NOT indisvalid
+"""
 
 
 def _index_name(field: str) -> str:
@@ -58,7 +69,31 @@ def _index_expr(field: str) -> str:
     return f"CAST(details_json ->> '{field}' AS FLOAT)"
 
 
+def _rebuild_invalid_indexes() -> None:
+    """Drop same-named indexes a previous interrupted build left invalid.
+
+    ``CREATE INDEX CONCURRENTLY`` cannot run inside a transaction and is not
+    atomic: a failure leaves an invalid index under the target name. The
+    following ``IF NOT EXISTS`` would consider the name taken and skip the
+    build, so the snapshot would keep full-scanning with no error anywhere.
+    """
+    bind = op.get_bind()
+    if op.get_context().as_sql:
+        # Offline / ``--sql`` generation: there is no catalog to inspect, and
+        # the emitted script is expected to contain only the CREATE statements.
+        return
+    for field in _FIELDS:
+        name = _index_name(field)
+        invalid = bind.execute(
+            sa.text(_COUNT_INVALID_SQL), {"index_name": name}
+        ).scalar()
+        if invalid:
+            with op.get_context().autocommit_block():
+                op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
+
+
 def _create_indexes() -> None:
+    _rebuild_invalid_indexes()
     with op.get_context().autocommit_block():
         for field in _FIELDS:
             op.execute(

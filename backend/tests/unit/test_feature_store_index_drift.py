@@ -15,8 +15,10 @@ key, since the migration's ``_index_expr`` only emits the single-segment
 from __future__ import annotations
 
 import importlib.util
+from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
@@ -255,7 +257,16 @@ def test_daily_snapshot_migration_emits_exact_concurrent_indexes():
     )
     migration.op = Operations(context)
 
+    calls: list[str] = []
+    real_rebuild = migration._rebuild_invalid_indexes
+    migration._rebuild_invalid_indexes = lambda: calls.append("rebuild")
+
     migration._create_indexes()
+
+    # A retry after an interrupted CONCURRENTLY build must repair the invalid
+    # index first, otherwise IF NOT EXISTS skips the build entirely.
+    assert calls == ["rebuild"], calls
+    migration._rebuild_invalid_indexes = real_rebuild
 
     statements = [
         line
@@ -294,12 +305,87 @@ def test_daily_snapshot_migration_emits_exact_concurrent_drops():
     ]
 
 
+def test_daily_snapshot_migration_recovers_invalid_indexes():
+    """CONCURRENTLY is not atomic: an interrupted build leaves an invalid index
+    under the target name, which ``IF NOT EXISTS`` would then treat as done."""
+    migration = _load_migration(_DAILY_SNAPSHOT_MIGRATION)
+    assert migration._rebuild_invalid_indexes is not None
+
+    # Offline (--sql) has no catalog; the emitted script must stay CREATEs only.
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    migration.op = Operations(context)
+    migration._rebuild_invalid_indexes()
+    assert output.getvalue().strip() == ""
+
+    # A catalog reporting an invalid index must trigger a DROP before the CREATE.
+    class _FakeBind:
+        def __init__(self, invalid):
+            self._invalid = invalid
+            self.statements: list[str] = []
+
+        def execute(self, _clause, _params=None):
+            outer = self
+
+            class _R:
+                def scalar(self):
+                    return outer._invalid
+
+            return _R()
+
+    class _Ctx:
+        as_sql = False
+
+        def __init__(self, bind):
+            self._bind = bind
+
+        def autocommit_block(self):
+            import contextlib
+
+            return contextlib.nullcontext()
+
+        def get_bind(self):
+            return self._bind
+
+    emitted: list[str] = []
+
+    class _Op:
+        def get_context(self):
+            return ctx
+
+        def get_bind(self):
+            return ctx.get_bind()
+
+        def execute(self, sql, *a, **k):
+            emitted.append(sql)
+
+    ctx = _Ctx(_FakeBind(1))
+    migration.op = _Op()
+    migration._rebuild_invalid_indexes()
+
+    assert emitted == [
+        "DROP INDEX CONCURRENTLY IF EXISTS ix_sfd_run_avg_dollar_volume",
+        "DROP INDEX CONCURRENTLY IF EXISTS ix_sfd_run_ibd_group_rank",
+    ], emitted
+
+    # A valid catalog must emit nothing.
+    emitted.clear()
+    ctx = _Ctx(_FakeBind(0))
+    migration.op = _Op()
+    migration._rebuild_invalid_indexes()
+    assert emitted == []
+
+
 def test_default_scan_filter_field_is_indexed():
     """The Daily Snapshot constrains minVolume for every market, so the field
     that filter maps to must be indexed -- that miss is what made the snapshot
     exceed the client timeout."""
     from app.domain.scanning.default_filters import resolve_default_scan_filters
     from app.infra.query.feature_store_query import _FIELD_BINDINGS
+    from app.services.daily_snapshot_service import VOLUME_FILTER_FIELD
 
     # 20260821_0028 predates the `_FIELDS` convention and keeps its two fields
     # inline in `_create_indexes`, so read them the same way the migration does.
@@ -318,8 +404,85 @@ def test_default_scan_filter_field_is_indexed():
     for market in ("US", "DE"):
         minimum_volume = resolve_default_scan_filters(market).get("minVolume")
         assert minimum_volume is not None, f"{market} has no default minVolume"
-        binding = _FIELD_BINDINGS["volume"]
+        # Read the field the service actually constrains, not a hard-coded
+        # name: if the service switches to an unindexed field the snapshot
+        # starts full-scanning again, and this must fail rather than pass.
+        binding = _FIELD_BINDINGS[VOLUME_FILTER_FIELD]
         assert binding.json_path in indexed_paths, (
             f"minVolume ({minimum_volume}) filters {binding.json_path} but no "
             f"migration indexes it; the snapshot will full-scan the run"
         )
+
+
+def test_daily_snapshot_service_filters_the_volume_field(monkeypatch):
+    """The service must constrain ``VOLUME_FILTER_FIELD``, and that field must
+    be indexed — otherwise the snapshot is back to a full JSON scan.
+
+    ``_query_scan_rows`` is the single place the snapshot turns filters into a
+    query, so capture there: it takes the ``FilterSpec`` the service built.
+    """
+    import app.services.daily_snapshot_service as svc
+
+    captured: list = []
+
+    def _fake_query_scan_rows(*, filters, **_kw):
+        captured.append(filters)
+        return [], 0
+
+    monkeypatch.setattr(svc, "_query_scan_rows", _fake_query_scan_rows)
+    monkeypatch.setattr(svc, "resolve_default_scan_filters", lambda _m: {"minVolume": 5})
+
+    class _Query:
+        def filter(self, *_a):
+            return self
+
+        def order_by(self, *_a):
+            return self
+
+        def first(self):
+            return None
+
+        def all(self):
+            return []
+
+    class _Db:
+        def query(self, *_a):
+            return _Query()
+
+        def get(self, *_a):
+            return None
+
+    scan = SimpleNamespace(
+        scan_id="s-1",
+        completed_at=datetime(2026, 6, 11, tzinfo=timezone.utc),
+        feature_run=None,
+    )
+
+    try:
+        svc.build_daily_snapshot_payload(
+            _Db(),
+            market="US",
+            market_display_name="United States",
+            scan=scan,
+            uow=object(),
+            scan_results_use_case=object(),
+        )
+    except Exception:  # noqa: BLE001 - only the captured filters matter here.
+        pass
+
+    filtered = {
+        f.field
+        for spec in captured
+        for group in (
+            getattr(spec, "range_filters", []),
+            getattr(spec, "categorical_filters", []),
+            getattr(spec, "boolean_filters", []),
+        )
+        for f in group
+    }
+
+    assert filtered, "the snapshot issued no filtered query; cannot assert coverage"
+    assert svc.VOLUME_FILTER_FIELD in filtered, (
+        f"build_daily_snapshot_payload did not constrain "
+        f"{svc.VOLUME_FILTER_FIELD}; it constrained {sorted(filtered)}"
+    )
