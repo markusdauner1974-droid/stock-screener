@@ -33,6 +33,7 @@ from app.schemas.digest import (
 )
 from app.schemas.validation import ValidationHorizonSummary, ValidationSourceKind
 from app.services.breadth.query import breadth_query, latest_breadth
+from app.services.economic_theme_read_service import EconomicThemeReader
 from app.services.strategy_profile_service import (
     DEFAULT_PROFILE,
     StrategyProfileService,
@@ -81,7 +82,10 @@ class DigestService:
         as_of_date: date | None = None,
         profile: str | None = None,
     ) -> DailyDigestResponse:
-        effective_as_of_date = self._resolve_as_of_date(db, as_of_date)
+        theme_reader = EconomicThemeReader(db)
+        effective_as_of_date = self._resolve_as_of_date(
+            db, as_of_date, theme_reader=theme_reader
+        )
         profile_detail = self._profile_service.get_profile(profile or DEFAULT_PROFILE)
         degraded_reasons: list[str] = []
 
@@ -109,6 +113,7 @@ class DigestService:
             db,
             effective_as_of_date,
             profile_detail=profile_detail,
+            theme_reader=theme_reader,
         )
         degraded_reasons.extend(themes_result.degraded_reasons)
 
@@ -123,7 +128,9 @@ class DigestService:
         if latest_run is None and watchlists:
             degraded_reasons.append("watchlists_missing_feature_run_context")
 
-        latest_theme_alert_at = self._load_latest_theme_alert_at(db, effective_as_of_date)
+        latest_theme_alert_at = self._load_latest_theme_alert_at(
+            db, effective_as_of_date, theme_reader=theme_reader
+        )
         freshness = self._build_freshness(
             latest_run=latest_run,
             breadth=breadth,
@@ -235,7 +242,13 @@ class DigestService:
 
         return "\n".join(lines).strip() + "\n"
 
-    def _resolve_as_of_date(self, db: Session, requested_date: date | None) -> date:
+    def _resolve_as_of_date(
+        self,
+        db: Session,
+        requested_date: date | None,
+        *,
+        theme_reader: EconomicThemeReader,
+    ) -> date:
         if requested_date is not None:
             return requested_date
 
@@ -255,17 +268,24 @@ class DigestService:
         if latest_breadth_date is not None:
             candidates.append(latest_breadth_date)
 
-        latest_theme_metrics_date = db.query(func.max(ThemeMetrics.date)).scalar()
-        if latest_theme_metrics_date is not None:
-            candidates.append(latest_theme_metrics_date)
+        if theme_reader.source_name == "economic":
+            raw_as_of = theme_reader.read_current_catalog().get("metrics_as_of")
+            try:
+                candidates.append(datetime.fromisoformat(str(raw_as_of)).date())
+            except (TypeError, ValueError):
+                pass
+        else:
+            latest_theme_metrics_date = db.query(func.max(ThemeMetrics.date)).scalar()
+            if latest_theme_metrics_date is not None:
+                candidates.append(latest_theme_metrics_date)
 
-        latest_theme_alert_at = (
-            db.query(func.max(ThemeAlert.triggered_at))
-            .filter(ThemeAlert.alert_type.in_(SUPPORTED_THEME_ALERT_TYPES))
-            .scalar()
-        )
-        if latest_theme_alert_at is not None:
-            candidates.append(to_eastern_date(latest_theme_alert_at))
+            latest_theme_alert_at = (
+                db.query(func.max(ThemeAlert.triggered_at))
+                .filter(ThemeAlert.alert_type.in_(SUPPORTED_THEME_ALERT_TYPES))
+                .scalar()
+            )
+            if latest_theme_alert_at is not None:
+                candidates.append(to_eastern_date(latest_theme_alert_at))
 
         return max(candidates) if candidates else datetime.now(UTC).date()
 
@@ -289,7 +309,15 @@ class DigestService:
         # Digest is US-scoped today.
         return latest_breadth(db, market="US", as_of_date=as_of_date)
 
-    def _load_latest_theme_alert_at(self, db: Session, as_of_date: date) -> datetime | None:
+    def _load_latest_theme_alert_at(
+        self,
+        db: Session,
+        as_of_date: date,
+        *,
+        theme_reader: EconomicThemeReader,
+    ) -> datetime | None:
+        if theme_reader.source_name == "economic":
+            return None
         _, alerts_until = eastern_day_bounds_utc(as_of_date)
         return (
             db.query(func.max(ThemeAlert.triggered_at))
@@ -451,7 +479,11 @@ class DigestService:
         as_of_date: date,
         *,
         profile_detail,
+        theme_reader: EconomicThemeReader,
     ) -> _ThemeSectionResult:
+        if theme_reader.source_name == "economic":
+            return self._build_economic_theme_section(theme_reader, as_of_date)
+
         degraded_reasons: list[str] = []
         latest_metrics_date = (
             db.query(func.max(ThemeMetrics.date))
@@ -560,6 +592,56 @@ class DigestService:
             recent_alert_symbols=recent_alert_symbols,
             degraded_reasons=degraded_reasons,
             latest_metrics_date=latest_metrics_date,
+        )
+
+    def _build_economic_theme_section(
+        self,
+        reader: EconomicThemeReader,
+        as_of_date: date,
+    ) -> _ThemeSectionResult:
+        rows = reader.ranked_themes(
+            ranking_view="broad_confirmation",
+            limit=10_000,
+            include_unavailable=False,
+        )
+
+        def item(row):
+            metric = row["selected_metric"]
+            components = metric.get("components") or {}
+            return DigestThemeItem(
+                theme_id=row["economic_theme_id"],
+                display_name=row["display_name"],
+                category=reader.facet_value(row, "category"),
+                momentum_score=_round_or_none(metric.get("percentile")),
+                mention_velocity=_round_or_none(components.get("velocity")),
+                basket_return_1m=None,
+                status=row["lifecycle"],
+            )
+
+        leaders = rows[:THEME_SECTION_LIMIT]
+        leader_ids = {row["economic_theme_id"] for row in leaders}
+        laggards = [
+            row for row in reversed(rows) if row["economic_theme_id"] not in leader_ids
+        ][:THEME_SECTION_LIMIT]
+        catalog = reader.read_current_catalog()
+        raw_as_of = catalog.get("metrics_as_of")
+        try:
+            metrics_date = datetime.fromisoformat(str(raw_as_of)).date()
+        except (TypeError, ValueError):
+            metrics_date = as_of_date
+        degraded = []
+        if not rows:
+            degraded.append("missing_theme_metrics")
+        degraded.append("economic_theme_alerts_unavailable")
+        return _ThemeSectionResult(
+            section=DigestThemeSection(
+                leaders=[item(row) for row in leaders],
+                laggards=[item(row) for row in laggards],
+                recent_alerts=[],
+            ),
+            recent_alert_symbols=set(),
+            degraded_reasons=degraded,
+            latest_metrics_date=metrics_date,
         )
 
     def _theme_item(self, metrics: ThemeMetrics, cluster: ThemeCluster) -> DigestThemeItem:

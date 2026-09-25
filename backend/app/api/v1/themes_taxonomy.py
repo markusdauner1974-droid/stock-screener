@@ -21,8 +21,20 @@ from ...schemas.theme import (
     UnassignedThemeItem,
     UnassignedThemesResponse,
 )
+from ...services.economic_theme_read_service import EconomicThemeReader
 
 router = APIRouter()
+
+
+def _reject_economic_mode(db: Session) -> None:
+    if EconomicThemeReader(db).source_name == "economic":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "economic_generation_endpoint_required",
+                "endpoint": "/api/v1/economic-themes",
+            },
+        )
 
 
 @router.get("/taxonomy/l1", response_model=L1ThemeRankingsResponse)
@@ -36,6 +48,7 @@ def get_l1_rankings(
     db: Session = Depends(get_db),
 ):
     """Get L1 theme rankings with aggregated metrics."""
+    _reject_economic_mode(db)
     from ...services.theme_taxonomy_service import ThemeTaxonomyService
 
     service = ThemeTaxonomyService(db, pipeline=pipeline)
@@ -63,6 +76,7 @@ def get_l1_children(
     db: Session = Depends(get_db),
 ):
     """Get L2 children of an L1 theme."""
+    _reject_economic_mode(db)
     from ...services.theme_taxonomy_service import ThemeTaxonomyService
 
     service = ThemeTaxonomyService(db)
@@ -88,12 +102,15 @@ def run_taxonomy_assignment(
     db: Session = Depends(get_db),
 ):
     """Run full taxonomy assignment pipeline (rules -> clustering -> LLM naming)."""
+    _reject_economic_mode(db)
     from ...services.theme_taxonomy_service import ThemeTaxonomyService
 
     service = ThemeTaxonomyService(db, pipeline=request.pipeline)
     report = service.run_full_taxonomy_assignment(dry_run=request.dry_run)
     if not request.dry_run:
-        from ...services.ui_snapshot_service import safe_publish_themes_bootstrap_variants
+        from ...services.ui_snapshot_service import (
+            safe_publish_themes_bootstrap_variants,
+        )
 
         safe_publish_themes_bootstrap_variants(request.pipeline)
     return report
@@ -106,6 +123,7 @@ def run_taxonomy_assignment_async(
     db: Session = Depends(get_db),
 ):
     """Run taxonomy assignment asynchronously via Celery."""
+    _reject_economic_mode(db)
     del db
     from ...tasks.theme_discovery_tasks import run_taxonomy_assignment as taxonomy_task
 
@@ -120,6 +138,7 @@ def reassign_l2_to_l1(
     db: Session = Depends(get_db),
 ):
     """Manually reassign an L2 theme to a different L1 parent."""
+    _reject_economic_mode(db)
     from ...services.theme_taxonomy_service import ThemeTaxonomyService
 
     service = ThemeTaxonomyService(db)
@@ -141,6 +160,7 @@ def get_unassigned_themes(
     db: Session = Depends(get_db),
 ):
     """Get L2 themes without L1 parent assignment."""
+    _reject_economic_mode(db)
     from ...services.theme_taxonomy_service import ThemeTaxonomyService
 
     service = ThemeTaxonomyService(db, pipeline=pipeline)
@@ -157,6 +177,7 @@ def get_l1_categories(
     db: Session = Depends(get_db),
 ):
     """List available L1 categories with theme counts."""
+    _reject_economic_mode(db)
     from ...services.theme_taxonomy_service import ThemeTaxonomyService
 
     service = ThemeTaxonomyService(db, pipeline=pipeline)

@@ -173,7 +173,7 @@ def test_admin_rejection_invalidates_prepared_generation(social_fixture):
         f.service.apply_live(projection, projection.registry_version, prepared=prepared)
 
 
-def save_success(store, w, run):
+def save_success(store, w, run, *, selected_model="synthetic/model"):
     from dataclasses import asdict
     from app.domain.social_signals.records import ExtractionClaim, ExtractionPostJudgment, ExtractionResult
     from app.infra.db.models.social_analysis import SocialExtractionWork
@@ -184,7 +184,13 @@ def save_success(store, w, run):
     w.persist_observations(empty_batch(2), run_id=run)
     with store() as db:
         item_id = db.query(ContentItem).one().id
-    work_id = ProcessSocialBacklog(store).enqueue(item_id, b.posts[0], selected_model="synthetic/model", now=NOW, run_id=run)
+    work_id = ProcessSocialBacklog(store).enqueue(
+        item_id,
+        b.posts[0],
+        selected_model=selected_model,
+        now=NOW,
+        run_id=run,
+    )
     with store.begin() as db:
         work = db.get(SocialExtractionWork, work_id)
         result = ExtractionResult(work.input_hash, "synthetic", "model", work.prompt_version, work.schema_version,
@@ -219,6 +225,113 @@ def test_projection_and_pointer_roll_back_together_after_apply(store, monkeypatc
         assert db.get(SocialSignalRunPointer, "latest_published").run_id == "prior"
     monkeypatch.setattr(SocialThemeProjectionService, "apply_live", original)
     assert w.publish("new", version).published
+
+
+def test_published_social_work_is_admitted_to_economic_processing(store):
+    from app.models.economic_taxonomy_runtime import EvidencePacket, SourceLineage
+
+    w = writer(store)
+    w.create_run("economic-admission", NOW)
+    work_id = save_success(store, w, "economic-admission")
+    prepared = w.prepare_run("economic-admission", (row("economic-admission"),), NOW)
+
+    assert w.publish("economic-admission", prepared.registry_version).published
+
+    with store() as db:
+        lineage = db.query(SourceLineage).one()
+        packet = db.query(EvidencePacket).one()
+        assert packet.source_lineage_id == lineage.id
+        assert packet.source_metadata["social_work_id"] == work_id
+        assert packet.precedence_state == "effective"
+
+
+def test_social_publication_uses_economic_native_path_after_cutover(store):
+    from app.infra.db.models.social_signals import SocialSignalRunPointer
+    from app.models.economic_taxonomy_runtime import (
+        EvidencePacket,
+        SourceLineage,
+        TaxonomyAuthority,
+        TaxonomyProjectionEvent,
+    )
+    from app.models.theme import ThemeCluster
+
+    w = writer(store)
+    w.create_run("economic-native", NOW)
+    save_success(store, w, "economic-native")
+    prepared = w.prepare_run("economic-native", (row("economic-native"),), NOW)
+    with store.begin() as db:
+        db.add(
+            TaxonomyAuthority(
+                id=1,
+                mode="economic",
+                processing_head_revision=0,
+                authority_epoch=2,
+                writes_fenced=False,
+                semantic_invalidation_revision=0,
+                cutover_catch_up_cursor=[],
+                rollback_state="ready",
+            )
+        )
+
+    assert w.publish("economic-native", prepared.registry_version).published
+
+    with store() as db:
+        assert db.get(SocialSignalRunPointer, "latest_published").run_id == (
+            "economic-native"
+        )
+        assert db.query(SourceLineage).count() == 1
+        packet = db.query(EvidencePacket).one()
+        assert packet.source_metadata["social_admission_state"] == "live"
+        assert packet.source_metadata["social_memberships"] == []
+        assert db.query(ThemeCluster).count() == 0
+        assert db.query(TaxonomyProjectionEvent).count() == 0
+
+
+def test_equivalent_social_recapture_can_publish_without_recounting(store):
+    from app.models.economic_taxonomy_runtime import EvidencePacket, SourceLineage
+
+    w = writer(store)
+    w.create_run("original", NOW)
+    save_success(store, w, "original")
+    original = w.prepare_run("original", (row("original"),), NOW)
+    assert w.publish("original", original.registry_version).published
+
+    recaptured_at = NOW + timedelta(hours=1)
+    w.create_run("recapture", recaptured_at)
+    save_success(store, w, "recapture", selected_model="synthetic/model-v2")
+    recapture = w.prepare_run(
+        "recapture", (row("recapture"),), recaptured_at
+    )
+
+    assert w.publish("recapture", recapture.registry_version).published
+
+    with store() as db:
+        assert db.query(SourceLineage).count() == 1
+        packets = db.query(EvidencePacket).order_by(
+            EvidencePacket.evidence_revision_ordinal
+        ).all()
+        assert [packet.precedence_state for packet in packets] == [
+            "effective",
+            "equivalent",
+        ]
+        assert packets[1].equivalent_evidence_packet_id == packets[0].id
+
+
+def test_exploratory_social_work_does_not_enter_live_economic_processing(store):
+    from app.infra.db.models.social_analysis import SocialExtractionWork
+    from app.models.economic_taxonomy_runtime import SourceLineage
+
+    w = writer(store)
+    w.create_run("exploratory-admission", NOW)
+    work_id = save_success(store, w, "exploratory-admission")
+    with store.begin() as db:
+        db.get(SocialExtractionWork, work_id).requested_by_admin = True
+    prepared = w.prepare_run("exploratory-admission", (), NOW)
+
+    assert w.publish("exploratory-admission", prepared.registry_version).published
+
+    with store() as db:
+        assert db.query(SourceLineage).count() == 0
 
 
 def test_frozen_replay_inputs_keep_metrics_and_reuse_work_after_new_observation(store):

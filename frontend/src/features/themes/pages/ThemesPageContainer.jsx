@@ -1,6 +1,19 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Alert, Box, Button, CircularProgress, Container } from '@mui/material';
+import {
+  Alert,
+  Box,
+  Button,
+  Card,
+  CardActionArea,
+  CardContent,
+  Chip,
+  CircularProgress,
+  Container,
+  Grid,
+  Stack,
+  Typography,
+} from '@mui/material';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import {
   dismissAlert,
@@ -16,6 +29,11 @@ import {
   getThemesBootstrap,
   runPipelineAsync,
 } from '../../../api/themes';
+import {
+  getEconomicTaxonomyReview,
+  getEconomicThemes,
+} from '../../../api/economicThemes';
+import EconomicTaxonomyReview from '../../../components/Themes/EconomicTaxonomyReview';
 import ThemeSourcesModal from '../../../components/Themes/ThemeSourcesModal';
 import ThemeReviewDialog from '../../../components/Themes/ThemeReviewDialog';
 import ThemeSettingsDialog from '../../../components/Themes/ThemeSettingsDialog';
@@ -26,6 +44,7 @@ import { usePipeline } from '../../../contexts/usePipeline';
 import { useRuntime } from '../../../contexts/RuntimeContext';
 import { DEFAULT_SOURCE_TYPES } from '../constants';
 import ThemeDetailModal from '../components/ThemeDetailModal';
+import EconomicThemeDetailModal from '../components/EconomicThemeDetailModal';
 import ThemeInsightsCards from '../components/ThemeInsightsCards';
 import ThemesFiltersPanel from '../components/ThemesFiltersPanel';
 import ThemesPageHeader from '../components/ThemesPageHeader';
@@ -35,6 +54,21 @@ import { useMarket } from '../../../contexts/MarketContext';
 
 const PAGE_SIZE = 50;
 const VALID_THEME_VIEWS = new Set(['grouped', 'flat']);
+const ECONOMIC_METRICS = [
+  ['technical_attention', 'Technical Attention'],
+  ['fundamental_attention', 'Fundamental Attention'],
+  ['narrative_attention', 'Narrative Attention'],
+  ['emerging', 'Emerging'],
+  ['broad_confirmation', 'Broad Confirmation'],
+];
+
+const metricValue = (metric) => {
+  if (metric?.availability !== 'available') return 'Unavailable';
+  if (metric.percentile !== null && metric.percentile !== undefined) {
+    return `${Number(metric.percentile).toFixed(0)} pct`;
+  }
+  return metric.raw_value ?? 'Available';
+};
 
 function ThemesPage() {
   const [selectedTab, setSelectedTab] = useState('all');
@@ -58,16 +92,42 @@ function ThemesPage() {
   const [categoryFilter, setCategoryFilter] = useState(null);
   const [bootstrapSettledVariants, setBootstrapSettledVariants] = useState({});
   const [dismissingAlertId, setDismissingAlertId] = useState(null);
+  const [selectedEconomicThemeId, setSelectedEconomicThemeId] = useState(null);
 
   const { runtimeReady, uiSnapshots, features = {} } = useRuntime();
   const { selectedMarket } = useMarket();
   const { isPipelineRunning, startPipeline } = usePipeline();
   const queryClient = useQueryClient();
 
+  const economicCatalogQuery = useQuery({
+    queryKey: ['economicThemes', 'current'],
+    queryFn: () => getEconomicThemes(),
+    enabled: runtimeReady,
+    retry: false,
+    refetchInterval: 60_000,
+    staleTime: 60_000,
+  });
+  const economicCatalog = economicCatalogQuery.data;
+  const selectedEconomicTheme = (economicCatalog?.themes || []).find(
+    (theme) => theme.economic_theme_id === selectedEconomicThemeId,
+  ) || null;
+  const economicMode = economicCatalog?.generation?.authority_mode === 'economic';
+  const economicReviewQuery = useQuery({
+    queryKey: ['economicTaxonomyReview', economicCatalog?.generation_id],
+    queryFn: () => getEconomicTaxonomyReview({
+      generationId: economicCatalog.generation_id,
+    }),
+    enabled: runtimeReady && Boolean(economicCatalog?.generation_id),
+    retry: false,
+    staleTime: 60_000,
+  });
+
   const snapshotEnabled = runtimeReady && Boolean(uiSnapshots?.themes);
   const bootstrapVariantKey = `${selectedPipeline}:${themeView}`;
   const bootstrapSettled = Boolean(bootstrapSettledVariants[bootstrapVariantKey]);
-  const liveQueriesEnabled = runtimeReady && (!snapshotEnabled || bootstrapSettled);
+  const authorityResolved = !economicCatalogQuery.isPending;
+  const liveQueriesEnabled = runtimeReady && authorityResolved && !economicMode
+    && (!snapshotEnabled || bootstrapSettled);
 
   const handleSourceTypeToggle = (sourceType) => {
     setSelectedSourceTypes((previous) => {
@@ -151,7 +211,7 @@ function ThemesPage() {
   const themesBootstrapQuery = useQuery({
     queryKey: ['themesBootstrap', selectedPipeline, themeView],
     queryFn: () => getThemesBootstrap({ pipeline: selectedPipeline, themeView }),
-    enabled: snapshotEnabled && !bootstrapSettled,
+    enabled: authorityResolved && !economicMode && snapshotEnabled && !bootstrapSettled,
     retry: false,
     staleTime: 60_000,
   });
@@ -355,6 +415,92 @@ function ThemesPage() {
     );
   }
 
+  if (economicCatalogQuery.isPending) {
+    return (
+      <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
+        <Box display="flex" justifyContent="center" alignItems="center" minHeight="400px">
+          <CircularProgress />
+        </Box>
+      </Container>
+    );
+  }
+
+  if (economicMode) {
+    return (
+      <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
+        <Stack
+          direction={{ xs: 'column', md: 'row' }}
+          justifyContent="space-between"
+          alignItems={{ xs: 'flex-start', md: 'center' }}
+          spacing={2}
+          sx={{ mb: 3 }}
+        >
+          <Box>
+            <Typography variant="h4">Economic Themes</Typography>
+            <Typography color="text.secondary">
+              Global taxonomy · generation {economicCatalog.generation_id}
+            </Typography>
+          </Box>
+          <Button
+            variant="outlined"
+            onClick={() => economicReviewQuery.refetch()}
+            disabled={economicReviewQuery.isFetching}
+          >
+            Refresh taxonomy review
+          </Button>
+        </Stack>
+
+        <Grid container spacing={2}>
+          {(economicCatalog.themes || []).map((theme) => (
+            <Grid item xs={12} md={6} lg={4} key={theme.economic_theme_id}>
+              <Card variant="outlined" sx={{ height: '100%' }}>
+                <CardActionArea
+                  sx={{ height: '100%', alignItems: 'stretch' }}
+                  onClick={() => setSelectedEconomicThemeId(theme.economic_theme_id)}
+                >
+                  <CardContent>
+                    <Stack direction="row" justifyContent="space-between" gap={1}>
+                      <Typography variant="h6">{theme.display_name}</Typography>
+                      <Chip size="small" label={theme.lifecycle || 'unavailable'} />
+                    </Stack>
+                    <Typography color="text.secondary" sx={{ my: 1 }}>
+                      {theme.definition || 'Definition unavailable.'}
+                    </Typography>
+                    <Stack spacing={0.5}>
+                      {ECONOMIC_METRICS.map(([key, label]) => (
+                        <Stack direction="row" justifyContent="space-between" key={key}>
+                          <Typography variant="body2">{label}</Typography>
+                          <Typography variant="body2" fontWeight={700}>
+                            {metricValue(theme.metrics?.[key])}
+                          </Typography>
+                        </Stack>
+                      ))}
+                    </Stack>
+                  </CardContent>
+                </CardActionArea>
+              </Card>
+            </Grid>
+          ))}
+        </Grid>
+
+        <Box sx={{ mt: 4 }}>
+          <EconomicTaxonomyReview
+            review={economicReviewQuery.data}
+            onRefresh={() => economicReviewQuery.refetch()}
+            isRefreshing={economicReviewQuery.isFetching}
+          />
+        </Box>
+
+        <EconomicThemeDetailModal
+          open={Boolean(selectedEconomicTheme)}
+          theme={selectedEconomicTheme}
+          generationId={economicCatalog.generation_id}
+          onClose={() => setSelectedEconomicThemeId(null)}
+        />
+      </Container>
+    );
+  }
+
   if (themeView === 'flat' && errorRankings) {
     return (
       <Container maxWidth="xl" sx={{ mt: 4, mb: 4 }}>
@@ -492,6 +638,19 @@ function ThemesPage() {
       />
 
       <ModelSettingsModal open={modelSettingsOpen} onClose={() => setModelSettingsOpen(false)} />
+
+      {economicCatalog?.generation_id && (
+        <Box sx={{ mt: 4 }}>
+          <Alert severity="info" sx={{ mb: 2 }}>
+            Economic Taxonomy preview — production remains on the legacy theme view.
+          </Alert>
+          <EconomicTaxonomyReview
+            review={economicReviewQuery.data}
+            onRefresh={() => economicReviewQuery.refetch()}
+            isRefreshing={economicReviewQuery.isFetching}
+          />
+        </Box>
+      )}
     </Container>
   );
 }

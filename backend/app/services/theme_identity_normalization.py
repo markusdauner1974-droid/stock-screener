@@ -9,8 +9,7 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
-from typing import Iterable
-
+from collections.abc import Iterable
 
 KEY_REGEX = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
 MAX_KEY_LENGTH = 96
@@ -83,6 +82,13 @@ def canonical_theme_key(raw_theme: str) -> str:
     if not KEY_REGEX.fullmatch(key):
         return UNKNOWN_THEME_KEY
     return key
+
+
+def social_membership_key(theme_key: str, security_id: int) -> str:
+    """Return the stable source-membership identity carried through classification."""
+    if isinstance(security_id, bool) or not isinstance(security_id, int):
+        raise TypeError("social membership security_id must be an integer")
+    return f"{canonical_theme_key(theme_key)}:{security_id}"
 
 
 def display_theme_name(raw_theme: str) -> str:

@@ -22,13 +22,10 @@ from app.services.theme_group_coordination import (
 from sqlalchemy.orm import Session
 
 
-@pytest.fixture(params=["sqlite", "postgresql"])
-def engine(request):
-    if request.param == "sqlite":
+def _database_engine(kind):
+    if kind == "sqlite":
         engine = sa.create_engine("sqlite:///:memory:")
-        yield engine
-        engine.dispose()
-        return
+        return engine, lambda: engine.dispose()
     url = os.environ.get("THEME_REVIEW_TEST_DATABASE_URL")
     if not url:
         pytest.skip("Disposable PostgreSQL URL not configured")
@@ -43,13 +40,31 @@ def engine(request):
         max_overflow=0,
         pool_timeout=1,
     )
-    try:
-        yield engine
-    finally:
+    def dispose():
         engine.dispose()
         with admin.begin() as connection:
             connection.execute(sa.text(f"DROP SCHEMA {schema} CASCADE"))
         admin.dispose()
+
+    return engine, dispose
+
+
+@pytest.fixture(params=["sqlite", "postgresql"])
+def engine(request):
+    value, dispose = _database_engine(request.param)
+    try:
+        yield value
+    finally:
+        dispose()
+
+
+@pytest.fixture
+def postgres_engine():
+    value, dispose = _database_engine("postgresql")
+    try:
+        yield value
+    finally:
+        dispose()
 
 
 def test_populated_membership_migration_roundtrip(engine):
@@ -122,9 +137,8 @@ def test_populated_membership_migration_roundtrip(engine):
         )
 
 
-def test_publication_serializes_mutation_across_internal_commits(engine):
-    if engine.dialect.name != "postgresql":
-        pytest.skip("Requires PostgreSQL advisory locks")
+def test_publication_serializes_mutation_across_internal_commits(postgres_engine):
+    engine = postgres_engine
     started, completed = Event(), Event()
 
     def mutate():
@@ -146,9 +160,8 @@ def test_publication_serializes_mutation_across_internal_commits(engine):
         assert completed.is_set()
 
 
-def test_publication_releases_lock_after_failure(engine):
-    if engine.dialect.name != "postgresql":
-        pytest.skip("Requires PostgreSQL advisory locks")
+def test_publication_releases_lock_after_failure(postgres_engine):
+    engine = postgres_engine
     with Session(engine) as db:
         with pytest.raises(ValueError), publication_scope(db):
             raise ValueError("failed refresh")
@@ -162,9 +175,10 @@ def test_publication_releases_lock_after_failure(engine):
         assert pool.submit(publish).result(timeout=3)
 
 
-def test_waiting_publisher_does_not_starve_owner_of_pool_connection(engine):
-    if engine.dialect.name != "postgresql":
-        pytest.skip("Requires PostgreSQL advisory locks")
+def test_waiting_publisher_does_not_starve_owner_of_pool_connection(
+    postgres_engine,
+):
+    engine = postgres_engine
     waiting = Event()
 
     def wait_to_publish():
@@ -181,9 +195,8 @@ def test_waiting_publisher_does_not_starve_owner_of_pool_connection(engine):
         assert future.result(timeout=3)
 
 
-def test_concurrent_identical_developments_share_one_event(engine):
-    if engine.dialect.name != "postgresql":
-        pytest.skip("Requires PostgreSQL row-level concurrency")
+def test_concurrent_identical_developments_share_one_event(postgres_engine):
+    engine = postgres_engine
     from datetime import datetime, timezone
 
     from app.database import Base
@@ -317,9 +330,8 @@ def test_group_post_counts_handle_duplicate_posts_and_missing_tickers(engine):
         assert rows["NVDA"] == 1
 
 
-def test_mutation_holds_publication_until_transaction_finishes(engine):
-    if engine.dialect.name != "postgresql":
-        pytest.skip("Requires PostgreSQL advisory locks")
+def test_mutation_holds_publication_until_transaction_finishes(postgres_engine):
+    engine = postgres_engine
     started, completed = Event(), Event()
 
     def publish():

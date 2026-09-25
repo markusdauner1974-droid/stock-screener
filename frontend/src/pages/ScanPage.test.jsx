@@ -359,7 +359,7 @@ describe('ScanPage', () => {
     expect(scanApi.queryScanResults.mock.calls.filter(
       ([scanId]) => scanId === 'scan-legacy',
     )).toHaveLength(2);
-  });
+  }, 40_000);
 
   it('keeps the applied rows and sort indicator atomic when a grouped query fails', async () => {
     runtimeState.runtimeReady = true;

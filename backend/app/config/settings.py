@@ -155,6 +155,8 @@ class Settings(BaseSettings):
 
     # Admin API key (required for config endpoints)
     admin_api_key: str = ""
+    # Stable audited identity bound to the configured admin key.
+    admin_principal_id: str = ""
 
     # Rate Limiting (global aggregate budgets — divided per market by RateBudgetPolicy)
     yfinance_rate_limit: int = 1  # requests per second (aggregate across all markets)

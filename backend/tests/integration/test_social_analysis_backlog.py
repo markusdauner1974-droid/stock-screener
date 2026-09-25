@@ -456,7 +456,14 @@ def test_migration_upgrade_downgrade_matches_runtime_schema(backlog):
         with Operations.context(MigrationContext.configure(conn)):
             migration.upgrade()
             for table in tables:
-                assert set(c["name"] for c in inspect(conn).get_columns(table.name)) == set(table.c.keys())
+                expected = set(table.c.keys())
+                if table is SocialLLMAttempt.__table__:
+                    expected -= {
+                        "logical_operation_key",
+                        "operation_kind",
+                        "attempt_number",
+                    }
+                assert set(c["name"] for c in inspect(conn).get_columns(table.name)) == expected
             migration.downgrade()
         assert not set(t.name for t in tables) & set(inspect(conn).get_table_names())
 

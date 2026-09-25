@@ -63,6 +63,16 @@ _include("operations", tags=["operations"])
 if settings.feature_themes:
     _include("themes", prefix="/themes", tags=["themes"])
     _include("user_themes", prefix="/user-themes", tags=["user-themes"])
+    _include(
+        "economic_themes",
+        prefix="/economic-themes",
+        tags=["economic-themes"],
+    )
+    _include(
+        "economic_taxonomy",
+        prefix="/economic-taxonomy",
+        tags=["economic-taxonomy"],
+    )
 
 if settings.feature_tasks:
     _include("tasks", prefix="/tasks", tags=["tasks"])

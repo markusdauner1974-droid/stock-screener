@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Optional
+from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -52,7 +53,7 @@ class DigestLeaderItem(BaseModel):
 class DigestThemeItem(BaseModel):
     """One ranked theme row."""
 
-    theme_id: int
+    theme_id: int | UUID
     display_name: str
     category: Optional[str] = None
     momentum_score: Optional[float] = None

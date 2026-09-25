@@ -7,8 +7,10 @@ This is the intelligence layer that identifies what's trending.
 import json
 import logging
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from functools import cached_property
+from hashlib import sha256
 from typing import Optional
 
 import numpy as np
@@ -21,6 +23,7 @@ from app.services.theme_evidence_eligibility_service import legacy_eligibility_e
 
 from ..domain.analytics.scope import AnalyticsFeature, us_only_tag
 from ..models.app_settings import AppSetting
+from ..models.economic_taxonomy_runtime import TaxonomyAuthority
 from ..models.scan_result import ScanResult
 from ..models.stock import StockPrice
 from ..models.theme import (
@@ -36,6 +39,7 @@ from ..models.theme import (
     ThemeRelationship,
 )
 from .theme_lifecycle_service import apply_lifecycle_transition
+from .economic_taxonomy_runtime import EconomicTaxonomyRuntimeService
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +77,13 @@ def _coerce_utc_datetime(value: datetime | None) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
+def _canonical_payload_hash(payload: dict) -> str:
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), default=str
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
 class ThemeDiscoveryService:
     """
     Service for discovering and ranking market themes
@@ -91,6 +102,44 @@ class ThemeDiscoveryService:
         self.pipeline_config = None
         self._load_pipeline_config()
         self.theme_policy_overrides = self._load_theme_policy_overrides()
+
+    def _taxonomy_authority_epoch(self) -> int:
+        authority = self.db.get(TaxonomyAuthority, 1)
+        return int(authority.authority_epoch) if authority is not None else 1
+
+    @contextmanager
+    def _fenced_legacy_mutation(
+        self,
+        *,
+        operation: str,
+        expected_authority_epoch: int | None,
+        auto_commit: bool,
+    ):
+        payload: dict = {}
+        runtime = EconomicTaxonomyRuntimeService(self.db)
+        epoch = (
+            expected_authority_epoch
+            if expected_authority_epoch is not None
+            else self._taxonomy_authority_epoch()
+        )
+        with runtime.legacy_producer_write(
+            expected_epoch=epoch,
+            logical_source_key=f"legacy-theme-pipeline:{self.pipeline}",
+            revision_kind=operation,
+            content_hash=lambda: _canonical_payload_hash(
+                {"operation": operation, "pipeline": self.pipeline, "payload": payload}
+            ),
+            auto_commit=auto_commit,
+        ) as write:
+            yield write, payload
+            safe_payload = json.loads(json.dumps(payload, default=str))
+            write.stage_next_compatibility_projection(
+                source_lineage=f"legacy-theme-pipeline:{self.pipeline}:{operation}",
+                projection_kind=operation,
+                projection_version=1,
+                target="economic",
+                payload=safe_payload,
+            )
 
     def _load_pipeline_config(self):
         """Load pipeline-specific configuration for scoring weights and thresholds"""
@@ -592,31 +641,53 @@ class ThemeDiscoveryService:
         else:
             return "active"
 
-    def update_theme_metrics(self, theme_cluster_id: int, as_of_date: Optional[datetime] = None) -> ThemeMetrics:
+    def update_theme_metrics(
+        self,
+        theme_cluster_id: int,
+        as_of_date: Optional[datetime] = None,
+        *,
+        expected_authority_epoch: int | None = None,
+    ) -> ThemeMetrics:
         """
         Calculate and store all metrics for a theme
 
         Returns the created ThemeMetrics record
         """
         from .theme_group_coordination import lock_grouping_mutation
-        lock_grouping_mutation(self.db)
-        self.__dict__.pop("groups", None)
-        if as_of_date is None:
-            as_of_date = datetime.utcnow()
 
-        # Get cluster
-        cluster = self.db.query(ThemeCluster).filter(ThemeCluster.id == theme_cluster_id).first()
-        if not cluster:
-            raise ValueError(f"Theme cluster {theme_cluster_id} not found")
-
-        # Calculate all metrics
-        mention_metrics = self.calculate_mention_metrics(theme_cluster_id, as_of_date)
-        metrics = self._upsert_theme_metrics(
-            cluster=cluster,
-            as_of_date=as_of_date,
-            mention_metrics=mention_metrics,
+        with self._fenced_legacy_mutation(
+            operation="metrics_refresh",
+            expected_authority_epoch=expected_authority_epoch,
             auto_commit=True,
-        )
+        ) as (_write, payload):
+            lock_grouping_mutation(self.db)
+            self.__dict__.pop("groups", None)
+            if as_of_date is None:
+                as_of_date = datetime.utcnow()
+
+            cluster = self.db.query(ThemeCluster).filter(
+                ThemeCluster.id == theme_cluster_id
+            ).first()
+            if not cluster:
+                raise ValueError(f"Theme cluster {theme_cluster_id} not found")
+
+            mention_metrics = self.calculate_mention_metrics(
+                theme_cluster_id, as_of_date
+            )
+            metrics = self._upsert_theme_metrics(
+                cluster=cluster,
+                as_of_date=as_of_date,
+                mention_metrics=mention_metrics,
+                auto_commit=False,
+            )
+            payload.update(
+                {
+                    "theme_cluster_id": theme_cluster_id,
+                    "as_of_date": as_of_date.date().isoformat(),
+                    "momentum_score": metrics.momentum_score,
+                    "status": metrics.status,
+                }
+            )
         logger.info(
             f"Updated metrics for theme '{cluster.name}': "
             f"score={metrics.momentum_score}, status={metrics.status}"
@@ -697,13 +768,33 @@ class ThemeDiscoveryService:
             self.db.flush()
         return metrics
 
-    def update_all_theme_metrics(self, as_of_date: Optional[datetime] = None) -> dict:
+    def update_all_theme_metrics(
+        self,
+        as_of_date: Optional[datetime] = None,
+        *,
+        expected_authority_epoch: int | None = None,
+    ) -> dict:
         from .theme_group_coordination import publication_scope
-        with publication_scope(self.db):
-            self.__dict__.pop('groups', None)
-            return self._update_all_theme_metrics(as_of_date)
 
-    def _update_all_theme_metrics(self, as_of_date: Optional[datetime] = None) -> dict:
+        with self._fenced_legacy_mutation(
+            operation="metrics_refresh",
+            expected_authority_epoch=expected_authority_epoch,
+            auto_commit=True,
+        ) as (_write, payload):
+            with publication_scope(self.db):
+                self.__dict__.pop("groups", None)
+                result = self._update_all_theme_metrics(
+                    as_of_date, auto_commit=False
+                )
+            payload.update(result)
+        return result
+
+    def _update_all_theme_metrics(
+        self,
+        as_of_date: Optional[datetime] = None,
+        *,
+        auto_commit: bool = True,
+    ) -> dict:
         """
         Update metrics for all active themes in this pipeline and calculate rankings
 
@@ -759,8 +850,12 @@ class ThemeDiscoveryService:
                 logger.error(f"Error updating metrics for {cluster.name}: {e}")
                 results["errors"] += 1
 
-        lifecycle_promotion_result = self.promote_candidate_themes(now=as_of_date, auto_commit=False)
-        lifecycle_state_result = self.apply_dormancy_and_reactivation_policies(now=as_of_date, auto_commit=False)
+        lifecycle_promotion_result = self.promote_candidate_themes(
+            now=as_of_date, auto_commit=False
+        )
+        lifecycle_state_result = self.apply_dormancy_and_reactivation_policies(
+            now=as_of_date, auto_commit=False
+        )
         results["lifecycle"] = {
             "candidate_promotion": lifecycle_promotion_result,
             "state_policies": lifecycle_state_result,
@@ -782,7 +877,10 @@ class ThemeDiscoveryService:
                 "lifecycle_state": cluster.lifecycle_state or "candidate",
             })
 
-        self.db.commit()
+        if auto_commit:
+            self.db.commit()
+        else:
+            self.db.flush()
 
         return results
 
@@ -1289,16 +1387,24 @@ class ThemeDiscoveryService:
         now: datetime | None = None,
         limit: int | None = None,
         auto_commit: bool = True,
+        expected_authority_epoch: int | None = None,
     ) -> dict:
         from .theme_group_coordination import publication_scope
 
-        with publication_scope(self.db):
-            self.__dict__.pop("groups", None)
-            return self._promote_candidate_themes(
-                now=now,
-                limit=limit,
-                auto_commit=auto_commit,
-            )
+        with self._fenced_legacy_mutation(
+            operation="candidate_promotion",
+            expected_authority_epoch=expected_authority_epoch,
+            auto_commit=auto_commit,
+        ) as (_write, payload):
+            with publication_scope(self.db):
+                self.__dict__.pop("groups", None)
+                result = self._promote_candidate_themes(
+                    now=now,
+                    limit=limit,
+                    auto_commit=False,
+                )
+            payload.update(result)
+        return result
 
     def _promote_candidate_themes(
         self,
@@ -1412,16 +1518,24 @@ class ThemeDiscoveryService:
         now: datetime | None = None,
         limit: int | None = None,
         auto_commit: bool = True,
+        expected_authority_epoch: int | None = None,
     ) -> dict:
         from .theme_group_coordination import publication_scope
 
-        with publication_scope(self.db):
-            self.__dict__.pop("groups", None)
-            return self._apply_dormancy_and_reactivation_policies(
-                now=now,
-                limit=limit,
-                auto_commit=auto_commit,
-            )
+        with self._fenced_legacy_mutation(
+            operation="lifecycle_policy",
+            expected_authority_epoch=expected_authority_epoch,
+            auto_commit=auto_commit,
+        ) as (_write, payload):
+            with publication_scope(self.db):
+                self.__dict__.pop("groups", None)
+                result = self._apply_dormancy_and_reactivation_policies(
+                    now=now,
+                    limit=limit,
+                    auto_commit=False,
+                )
+            payload.update(result)
+        return result
 
     def _apply_dormancy_and_reactivation_policies(
         self,
@@ -1981,6 +2095,28 @@ class ThemeDiscoveryService:
         self,
         *,
         max_merge_suggestions: int = 300,
+        expected_authority_epoch: int | None = None,
+    ) -> dict:
+        with self._fenced_legacy_mutation(
+            operation="relationship_inference",
+            expected_authority_epoch=expected_authority_epoch,
+            auto_commit=True,
+        ) as (_write, payload):
+            with self.db.begin_nested():
+                result = self._infer_theme_relationships(
+                    max_merge_suggestions=max_merge_suggestions,
+                    auto_commit=False,
+                    raise_on_error=True,
+                )
+            payload.update(result)
+        return result
+
+    def _infer_theme_relationships(
+        self,
+        *,
+        max_merge_suggestions: int = 300,
+        auto_commit: bool = True,
+        raise_on_error: bool = False,
     ) -> dict:
         """
         Build theme relationship edges from merge analysis + deterministic rules.
@@ -2066,9 +2202,15 @@ class ThemeDiscoveryService:
             result["rule_edges_written"] = overlap_result["subset_edges"] + overlap_result["related_edges"]
             result["created"] += overlap_result["created"]
             result["updated"] += overlap_result["updated"]
-            self.db.commit()
+            if auto_commit:
+                self.db.commit()
+            else:
+                self.db.flush()
         except Exception as exc:
-            self.db.rollback()
+            if raise_on_error:
+                raise
+            if auto_commit:
+                self.db.rollback()
             result["errors"] += 1
             logger.error("Relationship inference failed for pipeline %s: %s", self.pipeline, exc)
 

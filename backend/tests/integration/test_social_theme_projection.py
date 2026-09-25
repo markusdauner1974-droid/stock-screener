@@ -146,6 +146,29 @@ def test_empty_catalog_proposes_accepts_promotes_and_is_idempotent(social_fixtur
     assert theme.lifecycle_state == "active"
 
 
+def test_economic_admission_freezes_accepted_social_membership(social_fixture):
+    from app.models.economic_taxonomy_runtime import EvidencePacket
+
+    f = social_fixture
+    projection = f.prepare([f.save(("AAA",)), f.save(("AAA",))])
+    prepared = f.service.prepare_application(projection)
+    run = f.db.get(SocialSignalRun, projection.run_id)
+    run.status = "published"
+    run.published_at = NOW
+    f.service.admit_economic_evidence(projection, prepared=prepared)
+    f.db.commit()
+
+    packets = f.db.query(EvidencePacket).order_by(
+        EvidencePacket.evidence_revision_ordinal
+    ).all()
+    assert len(packets) == 2
+    assert {
+        row["state"]
+        for packet in packets
+        for row in packet.source_metadata["social_memberships"]
+    } == {"accepted"}
+
+
 @pytest.mark.parametrize("change", [{"author": "same"}, {"support": "uncertain"}, {"thesis": False}, {"repost": True}, {"key": "copied"}, {"age": 15}])
 def test_non_corroborating_evidence_does_not_accept(social_fixture, change):
     f = social_fixture

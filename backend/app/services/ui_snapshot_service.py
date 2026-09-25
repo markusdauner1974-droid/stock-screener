@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from threading import Lock
 from typing import Any
 
@@ -63,6 +63,7 @@ from app.schemas.theme import (
 )
 from app.services.breadth.query import breadth_query, latest_breadth
 from app.services.breadth.types import CURRENT_BREADTH_CALCULATION_REVISION
+from app.services.economic_theme_read_service import EconomicThemeReader
 from app.services.group_ranking_payloads import group_snapshot_metadata
 from app.services.theme_discovery_service import ThemeDiscoveryService
 from app.services.theme_pipeline_state_service import compute_pipeline_observability
@@ -222,7 +223,12 @@ class UISnapshotService:
         except GroupsBootstrapUnavailableError:
             return None
 
-    def get_themes_bootstrap(self, pipeline: str = "technical", theme_view: str = "grouped") -> SnapshotResult | None:
+    def get_themes_bootstrap(
+        self, pipeline: str = "technical", theme_view: str = "grouped"
+    ) -> SnapshotResult | None:
+        economic = self._economic_themes_snapshot()
+        if economic is not None:
+            return economic
         self._ensure_schema()
         variant_key = self._themes_variant_key(pipeline, theme_view)
         return self._run_with_storage_recovery(
@@ -234,10 +240,34 @@ class UISnapshotService:
             )
         )
 
-    def publish_themes_bootstrap(self, pipeline: str = "technical", theme_view: str = "grouped") -> SnapshotResult:
+    def publish_themes_bootstrap(
+        self, pipeline: str = "technical", theme_view: str = "grouped"
+    ) -> SnapshotResult:
+        economic = self._economic_themes_snapshot()
+        if economic is not None:
+            return economic
         from .theme_group_coordination import publication_scope
         with self._session_factory() as db, publication_scope(db):
             return self._publish_themes_bootstrap(pipeline, theme_view)
+
+    def _economic_themes_snapshot(self) -> SnapshotResult | None:
+        with self._session_factory() as db:
+            reader = EconomicThemeReader(db)
+            if reader.source_name != "economic":
+                return None
+            payload = reader.read_current_catalog()
+            published_at = payload["generation"].get("published_at")
+            return SnapshotResult(
+                snapshot_revision=payload["generation_id"],
+                source_revision=payload["generation_input_manifest_hash"],
+                published_at=(
+                    datetime.fromisoformat(published_at)
+                    if published_at
+                    else datetime.now(UTC)
+                ),
+                is_stale=False,
+                payload=payload,
+            )
 
     def _publish_themes_bootstrap(self, pipeline: str, theme_view: str) -> SnapshotResult:
         self._ensure_schema()
