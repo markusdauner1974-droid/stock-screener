@@ -258,6 +258,20 @@ def _enrich_feature_run_with_ibd_metadata(
         batch_size=max(1, int(settings.feature_metadata_repair_batch_size or 500)),
     ).enrich(feature_run_id=feature_run_id, ranking_date=ranking_date)
 
+def _run_covers_ranking_date(feature_run, *, ranking_date: date) -> bool:
+    """Report whether a run stores the snapshot for ``ranking_date``.
+
+    Enrichment writes rankings for ``ranking_date`` into the run's rows, so the
+    run has to *cover* that date: a run from an older session must never be
+    reached, or today's group ranks land in an old run's rows and that run's
+    scan is republished.
+    """
+    as_of = feature_run.as_of_date
+    if isinstance(as_of, datetime):
+        as_of = as_of.date()
+    return as_of == ranking_date
+
+
 def _run_serves_ranking_date(feature_run, *, ranking_date: date) -> bool:
     """Report whether a run's RS identity is coherent for ``ranking_date``.
 
@@ -288,17 +302,22 @@ def _resolve_latest_published_run_for_market(
     Candidates are considered in a fixed order: the market pointer, then the
     global ``latest_published`` pointer, then remaining published runs newest
     first. The first candidate that is published, belongs to the market and —
-    when ``ranking_date`` is given — serves that date wins.
+    when ``ranking_date`` is given — covers and serves that date wins.
 
     Without ``ranking_date`` this is therefore the newest published run for the
     market, which is whatever the ``latest_published*`` pointers say.
 
-    With ``ranking_date`` a run must additionally *serve* that date, so the
-    pointers are skipped over while they stay stale instead of shadowing a
-    matching run: ``None`` is returned when no candidate matches. Callers that
-    enrich a run with rankings from a given date must pass it — enriching an
-    older run with newer rankings raises ``FeatureRunRsIdentityError`` from the
-    identity resolver, which is how the daily chain used to abort.
+    With ``ranking_date`` a candidate must cover that date (``as_of_date``) and
+    serve it (coherent RS identity), so stale pointers are skipped instead of
+    shadowing a matching run and older runs are never reached: ``None`` is
+    returned when no candidate matches. That ``None`` is a normal outcome, not
+    an error — the daily chain runs the groups stage before the snapshot, so on
+    day D the newest run is D-1 and there is nothing to enrich yet.
+
+    Callers that enrich a run with rankings from a given date must pass it:
+    enriching a run that does not cover the date either raises
+    ``FeatureRunRsIdentityError`` from the identity resolver or writes the new
+    date's rankings into an older run's rows.
     """
     from app.domain.feature_store.run_metadata import feature_run_market
     from app.infra.db.models.feature_store import FeatureRun, FeatureRunPointer
@@ -328,12 +347,14 @@ def _resolve_latest_published_run_for_market(
                 db.query(FeatureRun).filter(FeatureRun.id == pointer.run_id).first()
             )
 
-    for run in (
-        db.query(FeatureRun)
-        .filter(FeatureRun.status == "published")
-        .order_by(FeatureRun.published_at.desc(), FeatureRun.id.desc())
-        .all()
-    ):
+    # Bounded by the date when one is given: without the filter this scanned
+    # every published run on the normal daily path.
+    published = db.query(FeatureRun).filter(FeatureRun.status == "published")
+    if ranking_date is not None:
+        published = published.filter(FeatureRun.as_of_date == ranking_date)
+    for run in published.order_by(
+        FeatureRun.published_at.desc(), FeatureRun.id.desc()
+    ).all():
         _remember(run)
 
     for run in candidates:
@@ -341,10 +362,11 @@ def _resolve_latest_published_run_for_market(
             continue
         if feature_run_market(run) != normalized_market:
             continue
-        if ranking_date is not None and not _run_serves_ranking_date(
-            run, ranking_date=ranking_date
-        ):
-            continue
+        if ranking_date is not None:
+            if not _run_covers_ranking_date(run, ranking_date=ranking_date):
+                continue
+            if not _run_serves_ranking_date(run, ranking_date=ranking_date):
+                continue
         return run.id
     return None
 
