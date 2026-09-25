@@ -3,7 +3,7 @@
 import os
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import String, cast, exists, func, or_
 from sqlalchemy.orm import Session
@@ -56,10 +56,8 @@ def preview_equivalence(source_id: int, target_id: int, db: DbSession):
 def apply_equivalence(
     request: GroupRequest,
     db: DbSession,
-    x_admin_actor: str = Header(default="admin", alias="X-Admin-Actor"),
     principal: AdminPrincipal = Depends(require_admin),
 ):
-    _ = x_admin_actor
     service = ThemeEquivalenceService(db)
     try:
         result = service.apply(
@@ -115,10 +113,8 @@ def undo_equivalence(
     operation_id: int,
     request: UndoRequest,
     db: DbSession,
-    x_admin_actor: str = Header(default="admin", alias="X-Admin-Actor"),
     principal: AdminPrincipal = Depends(require_admin),
 ):
-    _ = x_admin_actor
     service = ThemeEquivalenceService(db)
     try:
         result = service.undo(

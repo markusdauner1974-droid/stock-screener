@@ -43,7 +43,6 @@ async def test_theme_policy_preview_does_not_persist(db_session):
             matcher={"fuzzy_attach_threshold": 0.92},
             mode="preview",
         ),
-        x_admin_actor="tester",
         db=db_session,
         _auth=ADMIN,
     )
@@ -68,7 +67,6 @@ async def test_theme_policy_stage_promote_and_revert_flow(db_session):
             note="stage new thresholds",
             mode="stage",
         ),
-        x_admin_actor="tester",
         db=db_session,
         _auth=ADMIN,
     )
@@ -78,7 +76,6 @@ async def test_theme_policy_stage_promote_and_revert_flow(db_session):
     promoted = await promote_staged_theme_policy(
         pipeline="technical",
         note="ship staged policy",
-        x_admin_actor="tester",
         db=db_session,
         _auth=ADMIN,
     )
@@ -104,7 +101,6 @@ async def test_theme_policy_stage_promote_and_revert_flow(db_session):
             note="second version",
             mode="apply",
         ),
-        x_admin_actor="tester",
         db=db_session,
         _auth=ADMIN,
     )
@@ -116,7 +112,6 @@ async def test_theme_policy_stage_promote_and_revert_flow(db_session):
             version_id=applied_version,
             note="restore first version",
         ),
-        x_admin_actor="tester",
         db=db_session,
         _auth=ADMIN,
     )
@@ -149,7 +144,6 @@ async def test_promote_staged_sanitizes_unknown_override_keys(db_session):
     result = await promote_staged_theme_policy(
         pipeline="technical",
         note="promote",
-        x_admin_actor="tester",
         db=db_session,
         _auth=ADMIN,
     )

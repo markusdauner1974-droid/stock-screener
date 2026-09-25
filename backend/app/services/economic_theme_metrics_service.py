@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -26,6 +26,7 @@ from app.services.economic_theme_observation_service import (
     EconomicThemeObservationService,
     signal_rows_for_interpretation,
 )
+from app.utils.datetime_utils import as_aware_utc as _utc
 from app.utils.file_hashing import canonical_json_sha256 as _hash
 
 FORMULA_VERSION = "economic-theme-metrics-v1"
@@ -88,12 +89,6 @@ class ThemeMetricsCalculation:
     emerging: MetricValue
     broad_confirmation: MetricValue
     pinned_eligibility_revision_ids: tuple[str, ...] = ()
-
-
-def _utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
 
 
 def _unavailable(**components: Any) -> MetricValue:

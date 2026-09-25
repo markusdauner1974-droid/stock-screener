@@ -37,7 +37,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Hashable
 
 
 class AuthorityMode(StrEnum):
@@ -51,14 +50,6 @@ class EvidenceChannel(StrEnum):
     TECHNICAL = "technical"
     FUNDAMENTAL = "fundamental"
     NARRATIVE = "narrative"
-
-
-class RankingView(StrEnum):
-    TECHNICAL_ATTENTION = "technical_attention"
-    FUNDAMENTAL_ATTENTION = "fundamental_attention"
-    NARRATIVE_ATTENTION = "narrative_attention"
-    EMERGING = "emerging"
-    BROAD_CONFIRMATION = "broad_confirmation"
 
 
 class ExposureSupport(StrEnum):
@@ -102,28 +93,6 @@ class ServingGenerationEvent(StrEnum):
     ABANDONED = "abandoned"
 
 
-class FailureCode(StrEnum):
-    INVALID_SCHEMA = "invalid_schema"
-    UNSUPPORTED_COMPOSITION = "unsupported_composition"
-    UNKNOWN_DIMENSION = "unknown_dimension"
-    REQUIRES_NAMING_REVIEW = "requires_naming_review"
-    AMBIGUOUS_IDENTITY = "ambiguous_identity"
-    STALE_PROCESSING_HEAD = "stale_processing_head"
-    STALE_AUTHORITY_EPOCH = "stale_authority_epoch"
-    STALE_PROJECTION_REVISION = "stale_projection_revision"
-    AUTHORIZATION_REQUIRED = "authorization_required"
-    BUDGET_EXHAUSTED = "budget_exhausted"
-    CONFLICT_REVIEW_REQUIRED = "conflict_review_required"
-    COMPATIBILITY_PENDING = "compatibility_pending"
-    READER_NOT_READY = "reader_not_ready"
-    MANIFEST_CHANGED = "manifest_changed"
-    PUBLICATION_VALIDATION_FAILED = "publication_validation_failed"
-    ROLLBACK_RECOVERY_REQUIRED = "rollback_recovery_required"
-    PROVIDER_RETRYABLE = "provider_retryable"
-    PROVIDER_OUTCOME_UNCERTAIN = "provider_outcome_uncertain"
-    PROVIDER_TERMINAL = "provider_terminal"
-
-
 def _require_text(value: str, field_name: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{field_name} must be non-empty")
@@ -156,29 +125,6 @@ class SourceLineageKey:
 
 
 @dataclass(frozen=True, slots=True)
-class ProcessingRequestKey:
-    source_lineage: SourceLineageKey
-    evidence_packet_id: str
-    policy_bundle_version: str
-
-    def __post_init__(self) -> None:
-        _require_text(self.evidence_packet_id, "evidence_packet_id")
-        _require_text(self.policy_bundle_version, "policy_bundle_version")
-
-
-@dataclass(frozen=True, slots=True)
-class ProviderAttemptKey:
-    logical_request_id: str
-    operation_kind: str
-    attempt_number: int
-
-    def __post_init__(self) -> None:
-        _require_text(self.logical_request_id, "logical_request_id")
-        _require_text(self.operation_kind, "operation_kind")
-        _require_positive(self.attempt_number, "attempt_number")
-
-
-@dataclass(frozen=True, slots=True)
 class ExtractionArtifactKey:
     evidence_packet_id: str
     extraction_policy_version: str
@@ -186,69 +132,6 @@ class ExtractionArtifactKey:
     def __post_init__(self) -> None:
         _require_text(self.evidence_packet_id, "evidence_packet_id")
         _require_text(self.extraction_policy_version, "extraction_policy_version")
-
-
-@dataclass(frozen=True, slots=True)
-class ClaimReviewArtifactKey:
-    extraction_artifact_id: str | ExtractionArtifactKey
-    claim_review_policy_version: str
-    facet_catalog_semantic_hash: str
-
-    def __post_init__(self) -> None:
-        if isinstance(self.extraction_artifact_id, str):
-            _require_text(self.extraction_artifact_id, "extraction_artifact_id")
-        elif not isinstance(self.extraction_artifact_id, ExtractionArtifactKey):
-            raise TypeError(
-                "extraction_artifact_id must be a string or ExtractionArtifactKey"
-            )
-        _require_text(
-            self.claim_review_policy_version, "claim_review_policy_version"
-        )
-        _require_text(
-            self.facet_catalog_semantic_hash, "facet_catalog_semantic_hash"
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class ClassificationAttemptKey:
-    claim_review_artifact_id: str | ClaimReviewArtifactKey
-    input_taxonomy_version_id: str
-    resolver_policy_version: str
-    naming_policy_version: str
-    derivation_policy_version: str
-
-    def __post_init__(self) -> None:
-        if isinstance(self.claim_review_artifact_id, str):
-            _require_text(
-                self.claim_review_artifact_id, "claim_review_artifact_id"
-            )
-        elif not isinstance(self.claim_review_artifact_id, ClaimReviewArtifactKey):
-            raise TypeError(
-                "claim_review_artifact_id must be a string or ClaimReviewArtifactKey"
-            )
-        for name in (
-            "input_taxonomy_version_id",
-            "resolver_policy_version",
-            "naming_policy_version",
-            "derivation_policy_version",
-        ):
-            _require_text(getattr(self, name), name)
-
-
-@dataclass(frozen=True, slots=True)
-class ProjectionKey:
-    source_lineage: str
-    projection_revision: int
-    projection_kind: str
-    projection_version: int
-    target: str
-
-    def __post_init__(self) -> None:
-        _require_text(self.source_lineage, "source_lineage")
-        _require_positive(self.projection_revision, "projection_revision")
-        _require_text(self.projection_kind, "projection_kind")
-        _require_positive(self.projection_version, "projection_version")
-        _require_text(self.target, "target")
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,21 +209,6 @@ class AdminPrincipal:
 
 
 @dataclass(frozen=True, slots=True)
-class ProviderAttemptRecord:
-    key: ProviderAttemptKey
-    outcome: ProviderAttemptOutcome
-    result_artifact_id: str | None
-
-    def __post_init__(self) -> None:
-        if self.outcome is ProviderAttemptOutcome.SUCCESS:
-            if self.result_artifact_id is None:
-                raise ValueError("successful provider attempt requires an artifact")
-            _require_text(self.result_artifact_id, "result_artifact_id")
-        elif self.result_artifact_id is not None:
-            raise ValueError("failed or uncertain attempts cannot expose an artifact")
-
-
-@dataclass(frozen=True, slots=True)
 class EvidencePacketDescriptor:
     """Minimum immutable evidence metadata needed by precedence policy."""
 
@@ -400,24 +268,9 @@ class InterpretationCandidate:
 
 
 @dataclass(frozen=True, slots=True)
-class MigrationDispositionResult:
-    complete: bool
-    destinations: tuple[str, ...]
-    excluded_claim_ids: frozenset[Hashable] = frozenset()
-
-
-@dataclass(frozen=True, slots=True)
 class SocialDecisionResult:
     state: str
     live: bool
-
-
-@dataclass(frozen=True, slots=True)
-class SplitAllocationResult:
-    complete: bool
-    unallocated_claim_ids: frozenset[Hashable]
-    multiply_allocated_claim_ids: frozenset[Hashable]
-    unexpected_claim_ids: frozenset[Hashable]
 
 
 @dataclass(frozen=True, slots=True)
@@ -479,4 +332,3 @@ FACET_CATALOG_SEMANTIC_FIELDS = frozenset(
 GENERATION_INPUT_SELECTION_FIELDS = tuple(
     field.name for field in GenerationInputSelection.__dataclass_fields__.values()
 )
-

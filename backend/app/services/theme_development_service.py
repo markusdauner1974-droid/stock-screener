@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
@@ -41,18 +40,6 @@ ANALYSIS_CHANNELS = {"technical", "fundamental", "narrative"}
 DEVELOPMENT_SUPPORTS = {support.value for support in DevelopmentSupport}
 
 
-@dataclass(frozen=True, slots=True)
-class DevelopmentMigrationResult:
-    legacy_mapping_count: int
-    canonical_event_ids: tuple[int, ...]
-
-    @property
-    def canonical_event_id(self) -> int:
-        if len(self.canonical_event_ids) != 1:
-            raise ValueError("migration_result_has_multiple_canonical_events")
-        return self.canonical_event_ids[0]
-
-
 def current_development_event(db, event_id: int) -> ThemeDevelopmentEvent:
     """Resolve a legacy event identity without rewriting its historical rows."""
 
@@ -66,66 +53,6 @@ def current_development_event(db, event_id: int) -> ThemeDevelopmentEvent:
     if event is None:
         raise KeyError(f"development event {event_id} not found")
     return event
-
-
-def migrate_legacy_development_events(
-    db,
-    *,
-    migration_run_id: UUID,
-) -> DevelopmentMigrationResult:
-    """Map duplicate legacy identities to one current event, preserving history."""
-
-    authority = db.get(TaxonomyAuthority, 1)
-    expected_epoch = authority.authority_epoch if authority is not None else 1
-    with producer_write(
-        db,
-        expected_epoch=expected_epoch,
-        allowed_modes={"legacy", "shadow", "dual", "economic"},
-    ) as locked_authority:
-        canonical_ids: list[int] = []
-        selection_ids: list[UUID] = []
-        mapping_count = 0
-        changed = False
-        keys = tuple(
-            db.scalars(
-                select(ThemeDevelopmentEvent.event_key)
-                .distinct()
-                .order_by(ThemeDevelopmentEvent.event_key)
-            )
-        )
-        for event_key in keys:
-            canonical, created = _canonicalize_legacy_group(
-                db,
-                event_key=event_key,
-                migration_run_id=migration_run_id,
-            )
-            canonical_ids.append(canonical.id)
-            mapping_count += created
-            _reclassify_event_family(db, canonical.id)
-            selection, selection_changed = _append_selection_revision(
-                db, canonical.id
-            )
-            selection_ids.append(selection.id)
-            changed |= bool(created) or selection_changed
-        if changed:
-            _append_dirty_revision(
-                db,
-                authority_epoch=locked_authority.authority_epoch,
-                logical_source_key=f"development-migration:{migration_run_id}",
-                revision_kind="legacy_event_mapping",
-                content_hash=digest(
-                    [
-                        str(migration_run_id),
-                        canonical_ids,
-                        mapping_count,
-                        sorted(map(str, selection_ids)),
-                    ]
-                ),
-            )
-        return DevelopmentMigrationResult(
-            legacy_mapping_count=mapping_count,
-            canonical_event_ids=tuple(canonical_ids),
-        )
 
 
 def record_developments(

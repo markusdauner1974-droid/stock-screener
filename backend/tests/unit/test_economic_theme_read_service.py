@@ -129,17 +129,6 @@ def test_explicit_read_rejects_generation_without_publication(db_session, final_
         EconomicThemeReader(db_session).read_catalog(generation.id)
 
 
-def test_legacy_compatibility_uses_reviewed_mapping_not_name(db_session):
-    seeded = seed_generation(db_session, display_name="Renamed AI Infrastructure")
-    reader = EconomicThemeReader(db_session)
-
-    theme = reader.read_legacy_theme(42)
-
-    assert theme["economic_theme_id"] == str(seeded["memory"].id)
-    assert theme["display_name"] == "Renamed AI Infrastructure"
-    assert reader.read_legacy_theme(404) is None
-
-
 def test_stock_theme_summaries_use_generation_constituents(db_session):
     seed_generation(db_session)
     reader = EconomicThemeReader(db_session)

@@ -501,13 +501,9 @@ async def get_theme_policy_config(
 @router.post("/config/theme-policies", response_model=ThemePolicyUpdateResponse)
 async def update_theme_policy(
     request: ThemePolicyUpdateRequest,
-    x_admin_actor: str = Header(default="admin", alias="X-Admin-Actor"),
     db: Session = Depends(get_db),
     _auth: AdminPrincipal = Depends(require_admin),
 ):
-    # Kept as a compatibility-only request parameter. Audit attribution is
-    # exclusively derived from the authenticated principal.
-    _ = x_admin_actor
     trusted_actor = _auth.subject
     defaults = _theme_policy_defaults(request.pipeline)
     clean_payload = _clean_override_payload(request)
@@ -637,11 +633,9 @@ async def update_theme_policy(
 async def promote_staged_theme_policy(
     pipeline: str,
     note: str | None = None,
-    x_admin_actor: str = Header(default="admin", alias="X-Admin-Actor"),
     db: Session = Depends(get_db),
     _auth: AdminPrincipal = Depends(require_admin),
 ):
-    _ = x_admin_actor
     staged_all = _get_setting_json(db, "theme_policy_staged", {})
     staged = staged_all.get(pipeline) if isinstance(staged_all, dict) else None
     if not staged:
@@ -656,18 +650,16 @@ async def promote_staged_theme_policy(
         mode="apply",
     )
     return await update_theme_policy(
-        request=request, x_admin_actor="ignored", db=db, _auth=_auth
+        request=request, db=db, _auth=_auth
     )
 
 
 @router.post("/config/theme-policies/revert", response_model=ThemePolicyUpdateResponse)
 async def revert_theme_policy(
     request: ThemePolicyRevertRequest,
-    x_admin_actor: str = Header(default="admin", alias="X-Admin-Actor"),
     db: Session = Depends(get_db),
     _auth: AdminPrincipal = Depends(require_admin),
 ):
-    _ = x_admin_actor
     history_all = _get_setting_json(db, "theme_policy_history", [])
     target = next(
         (
@@ -690,5 +682,5 @@ async def revert_theme_policy(
         mode="apply",
     )
     return await update_theme_policy(
-        request=update_request, x_admin_actor="ignored", db=db, _auth=_auth
+        request=update_request, db=db, _auth=_auth
     )

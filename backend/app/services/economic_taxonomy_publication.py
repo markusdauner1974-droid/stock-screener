@@ -341,14 +341,6 @@ class EconomicTaxonomyPublicationCoordinator:
         EconomicTaxonomyRuntimeService.notify_delivery_workers(notify_delivery_workers)
         return result
 
-    def prepare_cutover(
-        self, cutoff: PublicationCutoff, **kwargs
-    ) -> PreparedGeneration:
-        return self.prepare_generation(cutoff, target_mode="economic", **kwargs)
-
-    def publish_cutover(self, generation_id: UUID, **kwargs) -> PublishedGeneration:
-        return self.publish_generation(generation_id, **kwargs)
-
     def abandon(
         self,
         generation_id: UUID,

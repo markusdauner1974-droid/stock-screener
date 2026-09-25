@@ -655,45 +655,6 @@ class EconomicTaxonomyMigrationService:
                 semantic_hash=_hash(entries),
             )
 
-    def pause(self, run_id: UUID, *, reason: str) -> None:
-        self._append_status_event(run_id, "paused", reason)
-
-    def fail(self, run_id: UUID, *, reason: str) -> None:
-        self._append_status_event(run_id, "failed", reason)
-
-    def record_progress(
-        self, run_id: UUID, *, reason: str, payload: dict[str, Any]
-    ) -> None:
-        self._append_status_event(run_id, "progress", reason, payload)
-
-    def _append_status_event(
-        self,
-        run_id: UUID,
-        event_type: str,
-        reason: str,
-        payload: dict[str, Any] | None = None,
-    ) -> None:
-        self._require_reviewer()
-        with producer_write(
-            self.session,
-            expected_epoch=self.expected_epoch,
-            allowed_modes={"legacy", "shadow", "dual", "economic"},
-        ):
-            run = self.session.execute(
-                select(TaxonomyMigrationRun)
-                .where(TaxonomyMigrationRun.id == run_id)
-                .with_for_update()
-            ).scalar_one_or_none()
-            if run is None:
-                raise MigrationInputError("migration_run_not_found")
-            self._append_event(
-                run,
-                event_type,
-                reason=_required_text(reason, "reason"),
-                payload=payload or {},
-            )
-            self.session.flush()
-
     def _append_event(self, run, event_type, *, reason, payload):
         sequence = (
             self.session.scalar(

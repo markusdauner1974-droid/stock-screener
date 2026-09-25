@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
@@ -50,33 +50,6 @@ class ObservationFact:
     evidence_channel: str
     source_family_id: UUID
     available_at: datetime
-    payload: dict[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class ConstituentFact:
-    exposure_id: UUID
-    claim_assignment_id: UUID
-    economic_theme_id: UUID
-    security_id: int
-    exposure_kind: str
-    exposure_strength: float | None
-    source_family_id: UUID
-    payload: dict[str, Any]
-
-
-@dataclass(frozen=True, slots=True)
-class SignalFact:
-    signal_id: UUID
-    claim_assignment_id: UUID
-    economic_theme_id: UUID
-    security_id: int | None
-    signal_kind: str
-    signal_policy_version: str
-    source_family_id: UUID
-    detected_at: datetime | None
-    available_at: datetime
-    effective_at: datetime
     payload: dict[str, Any]
 
 
@@ -565,109 +538,6 @@ class EconomicThemeObservationService:
                 generation.interpretation_set_id,
                 generation.generation_input_manifest_id,
             )
-
-    def constituents_for_generation(self, generation_id: UUID) -> list[ConstituentFact]:
-        with self.session_factory() as session:
-            generation = session.get(ServingGeneration, generation_id)
-            if generation is None:
-                raise KeyError(f"serving generation {generation_id} not found")
-            rows = session.execute(
-                select(ThemeConstituentExposure, ClaimAssignment)
-                .join(
-                    ClaimAssignment,
-                    ClaimAssignment.id == ThemeConstituentExposure.claim_assignment_id,
-                )
-                .join(
-                    InterpretationSelection,
-                    InterpretationSelection.selected_classification_attempt_id
-                    == ClaimAssignment.classification_attempt_id,
-                )
-                .where(
-                    InterpretationSelection.interpretation_set_id
-                    == generation.interpretation_set_id
-                )
-                .order_by(
-                    ThemeConstituentExposure.created_at,
-                    ThemeConstituentExposure.id,
-                )
-            ).all()
-            return [
-                ConstituentFact(
-                    exposure_id=exposure.id,
-                    claim_assignment_id=assignment.id,
-                    economic_theme_id=assignment.economic_theme_id,
-                    security_id=exposure.security_id,
-                    exposure_kind=exposure.exposure_kind,
-                    exposure_strength=exposure.exposure_strength,
-                    source_family_id=UUID(exposure.payload["source_family_id"]),
-                    payload=dict(exposure.payload),
-                )
-                for exposure, assignment in rows
-            ]
-
-    def signals_for_generation(self, generation_id: UUID) -> list[SignalFact]:
-        with self.session_factory() as session:
-            generation = session.get(ServingGeneration, generation_id)
-            if generation is None:
-                raise KeyError(f"serving generation {generation_id} not found")
-            rows = signal_rows_for_interpretation(
-                session,
-                interpretation_set_id=generation.interpretation_set_id,
-                manifest_id=generation.generation_input_manifest_id,
-            )
-            facts = []
-            for signal, assignment in rows:
-                payload = dict(signal.payload)
-                facts.append(
-                    SignalFact(
-                        signal_id=signal.id,
-                        claim_assignment_id=assignment.id,
-                        economic_theme_id=assignment.economic_theme_id,
-                        security_id=signal.security_id,
-                        signal_kind=signal.signal_kind,
-                        signal_policy_version=signal.signal_policy_version,
-                        source_family_id=UUID(payload["source_family_id"]),
-                        detected_at=(
-                            _as_datetime(
-                                signal.observed_at, fallback=signal.available_at
-                            )
-                            if signal.observed_at is not None
-                            else None
-                        ),
-                        available_at=_as_datetime(
-                            signal.available_at, fallback=datetime.now(timezone.utc)
-                        ),
-                        effective_at=_as_datetime(
-                            payload.get("effective_at"), fallback=signal.available_at
-                        ),
-                        payload=payload,
-                    )
-                )
-            return facts
-
-    def direct_root_count(
-        self,
-        generation_id: UUID,
-        *,
-        economic_theme_id: UUID,
-        evidence_channel: str,
-        utc_day: date,
-    ) -> int:
-        facts = self.observations_for_generation(generation_id)
-        roots = {
-            (
-                fact.source_family_id,
-                fact.economic_theme_id,
-                fact.evidence_channel,
-                fact.available_at.astimezone(timezone.utc).date(),
-            )
-            for fact in facts
-            if fact.observation_kind == "primary"
-            and fact.economic_theme_id == economic_theme_id
-            and fact.evidence_channel == evidence_channel
-            and fact.available_at.astimezone(timezone.utc).date() == utc_day
-        }
-        return len(roots)
 
     @staticmethod
     def _observations_for_set(session, interpretation_set_id, manifest_id):

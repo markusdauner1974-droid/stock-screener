@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import math
 import re
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -17,11 +16,9 @@ from app.models.economic_taxonomy import (
     EconomicThemeFacet,
     EconomicThemeRelationship,
     EconomicThemeRevision,
-    TaxonomyVersion,
 )
 from app.models.economic_taxonomy_runtime import (
     ClaimAssignment,
-    EconomicThemeEmbedding,
     ThemeConstituentExposure,
 )
 
@@ -43,24 +40,12 @@ def _tokens(value: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", value.casefold()))
 
 
-def _cosine(left: Sequence[float], right: Sequence[float]) -> float:
-    if len(left) != len(right) or not left:
-        return 0.0
-    numerator = sum(a * b for a, b in zip(left, right, strict=True))
-    left_norm = math.sqrt(sum(value * value for value in left))
-    right_norm = math.sqrt(sum(value * value for value in right))
-    if not left_norm or not right_norm:
-        return 0.0
-    return numerator / (left_norm * right_norm)
-
-
 def retrieve_candidates(
     session: Session,
     *,
     taxonomy_version_id: UUID,
     proposed: Mapping,
     limit: int = 20,
-    proposed_embedding: Sequence[float] | None = None,
 ) -> list[RetrievedThemeCandidate]:
     """Retrieve candidates without making an identity decision."""
 
@@ -108,26 +93,6 @@ def retrieve_candidates(
             ).all()
         )
 
-    embedding_scores: dict[UUID, float] = {}
-    if proposed_embedding is not None:
-        version = session.get(TaxonomyVersion, taxonomy_version_id)
-        semantic_hash = version.semantic_hash if version is not None else None
-        for row in session.scalars(
-            select(EconomicThemeEmbedding).where(
-                EconomicThemeEmbedding.taxonomy_semantic_hash == semantic_hash
-            )
-        ):
-            try:
-                score = _cosine(
-                    [float(value) for value in proposed_embedding],
-                    [float(value) for value in row.embedding],
-                )
-            except (TypeError, ValueError):
-                continue
-            embedding_scores[row.economic_theme_id] = max(
-                score, embedding_scores.get(row.economic_theme_id, -1.0)
-            )
-
     scored: dict[UUID, tuple[float, set[str]]] = {}
     revision_by_id = {row.theme_id: row for row in revisions}
     for revision in revisions:
@@ -152,10 +117,6 @@ def retrieve_candidates(
         if revision.theme_id in constituent_theme_ids:
             score += 1.5
             reasons.add("constituent")
-        embedding_score = embedding_scores.get(revision.theme_id)
-        if embedding_score is not None and embedding_score > 0:
-            score += embedding_score
-            reasons.add("embedding")
         if reasons:
             scored[revision.theme_id] = (score, reasons)
 

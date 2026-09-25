@@ -62,6 +62,7 @@ from app.services.economic_taxonomy_publication import (
 from app.services.economic_taxonomy_runtime import EconomicTaxonomyRuntimeService
 from app.services.economic_theme_lifecycle_service import EconomicThemeLifecycleService
 from app.services.economic_theme_metrics_service import EconomicThemeMetricsService
+from app.utils.datetime_utils import as_aware_utc as _utc
 
 logger = logging.getLogger(__name__)
 SYSTEM_PRINCIPAL = AdminPrincipal(
@@ -168,12 +169,6 @@ class DirtyRevisionClassification:
     held_revision_ids: tuple[str, ...]
     # Routine revisions that still need operator attention.
     attention_revision_ids: tuple[str, ...] = ()
-
-
-def _utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
 
 
 def _utcnow() -> datetime:
