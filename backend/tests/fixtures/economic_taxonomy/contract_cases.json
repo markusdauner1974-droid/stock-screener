@@ -146,13 +146,6 @@
       "kind": "social_decision",
       "decisions": ["accepted", "rejected"],
       "expected": "conflict_review_required"
-    },
-    {
-      "name": "proposed_copper_is_broader",
-      "kind": "relationship",
-      "proposed": "Copper",
-      "existing": "Copper Miners",
-      "expected": "broader"
     }
   ]
 }

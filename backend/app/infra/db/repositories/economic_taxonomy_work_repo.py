@@ -13,7 +13,6 @@ from app.domain.economic_taxonomy.contracts import ProviderAttemptOutcome
 from app.models.economic_taxonomy_runtime import (
     DimensionProposal,
     EconomicExposureCandidate,
-    NamingProposal,
     ProcessingRequest,
     ProcessingRequestEvent,
     ProviderAttempt,
@@ -311,17 +310,6 @@ class EconomicTaxonomyWorkRepository:
             request_id,
             DimensionProposal.dimension_key,
             dimension_key,
-            payload,
-        )
-
-    def record_naming_proposal(
-        self, request_id: UUID, *, proposal_key: str, payload: dict
-    ) -> NamingProposal:
-        return self._record_child(
-            NamingProposal,
-            request_id,
-            NamingProposal.proposal_key,
-            proposal_key,
             payload,
         )
 

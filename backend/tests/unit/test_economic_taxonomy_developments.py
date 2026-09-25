@@ -22,8 +22,8 @@ from app.models.theme_intelligence import (
 )
 from app.services.economic_taxonomy_fence import AuthorityWritesFenced
 from app.services.theme_development_service import (
+    _canonicalize_legacy_group,
     current_development_event,
-    migrate_legacy_development_events,
     record_developments,
 )
 
@@ -237,15 +237,15 @@ def test_legacy_duplicate_identity_is_preserved_and_resolves_canonical(db_sessio
     db_session.flush()
     historical_event_ids = [row.event_id for row in observations]
 
-    result = migrate_legacy_development_events(
-        db_session, migration_run_id=uuid4()
+    canonical, created = _canonicalize_legacy_group(
+        db_session, event_key=event_key, migration_run_id=uuid4()
     )
 
-    assert result.legacy_mapping_count == 2
+    assert created == 2
     assert {
         current_development_event(db_session, event.id).id
         for event in (technical, fundamental)
-    } == {result.canonical_event_id}
+    } == {canonical.id}
     assert [row.event_id for row in observations] == historical_event_ids
     assert db_session.query(LegacyDevelopmentEventMapping).count() == 2
 
@@ -258,7 +258,9 @@ def test_legacy_development_mapping_is_append_only(db_session):
     )
     db_session.add(event)
     db_session.flush()
-    migrate_legacy_development_events(db_session, migration_run_id=uuid4())
+    _canonicalize_legacy_group(
+        db_session, event_key=event.event_key, migration_run_id=uuid4()
+    )
     mapping = db_session.query(LegacyDevelopmentEventMapping).one()
 
     mapping.old_pipeline = "fundamental"

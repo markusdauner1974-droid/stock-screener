@@ -172,12 +172,6 @@ class EconomicTaxonomyPublicationRepository:
         self.session.flush()
         return manifest
 
-    def get_manifest(self, manifest_id: UUID) -> GenerationInputManifest:
-        manifest = self.session.get(GenerationInputManifest, manifest_id)
-        if manifest is None:
-            raise KeyError(f"generation input manifest {manifest_id} not found")
-        return manifest
-
     def validate_manifest(
         self, manifest: GenerationInputManifest
     ) -> ManifestValidation:

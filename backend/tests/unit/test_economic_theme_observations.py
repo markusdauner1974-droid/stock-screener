@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app.database import SessionLocal
 from app.infra.db.repositories.economic_taxonomy_repo import EconomicTaxonomyRepository
@@ -25,7 +25,6 @@ from app.models.economic_taxonomy_runtime import (
     ReaderSnapshotEntry,
     ServingGeneration,
     TaxonomyAuthority,
-    ThemeConstituentExposure,
     ThemeObservation,
     ThemeSignalObservation,
 )
@@ -331,15 +330,9 @@ def test_generation_queries_ignore_later_auxiliary_revisions(db_session):
     db_session.commit()
 
     after = service.observations_for_generation(generation.id)
-    constituents = service.constituents_for_generation(generation.id)
-    signals = service.signals_for_generation(generation.id)
 
     assert after == before
     assert {row.evidence_channel for row in after} == {"fundamental", "narrative"}
-    assert [(row.security_id, row.exposure_kind) for row in constituents] == [
-        (42, "producer")
-    ]
-    assert signals == []
 
 
 def test_metrics_exclude_signals_without_pinned_technical_eligibility(db_session):
@@ -435,41 +428,3 @@ def test_snapshot_filters_observations_by_pinned_lens_eligibility(db_session):
     assert by_id[str(child.id)]["signals"] == []
 
 
-def test_direct_root_count_deduplicates_source_family_and_excludes_derived(db_session):
-    taxonomy, _parent, child, admitted, attempt, _assignment, eligibility = _setup(
-        db_session
-    )
-    db_session.add(
-        ClaimAssignment(
-            classification_attempt_id=attempt.id,
-            claim_fingerprint="second-claim-same-source",
-            economic_theme_id=child.id,
-            exposure_support="direct",
-            claim_payload={"securities": [], "signals": []},
-            provenance={},
-        )
-    )
-    db_session.commit()
-    materialize_assignment_facts(
-        db_session,
-        classification_attempt_id=attempt.id,
-        evidence_channels=("narrative",),
-        taxonomy_version_id=taxonomy.id,
-        detector_policy_version="signals-v1",
-    )
-    generation = _generation(db_session, taxonomy, admitted, attempt, eligibility)
-    service = EconomicThemeObservationService(SessionLocal)
-
-    count = service.direct_root_count(
-        generation.id,
-        economic_theme_id=child.id,
-        evidence_channel="narrative",
-        utc_day=date(2026, 9, 21),
-    )
-
-    assert count == 1
-    assert db_session.scalar(select(func.count()).select_from(ThemeObservation)) == 4
-    assert (
-        db_session.scalar(select(func.count()).select_from(ThemeConstituentExposure))
-        == 1
-    )

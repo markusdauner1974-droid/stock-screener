@@ -778,32 +778,6 @@ class ThemeSignalObservation(Base):
     )
 
 
-class EconomicThemeEmbedding(Base):
-    __tablename__ = "economic_theme_embeddings"
-
-    id = _uuid_pk()
-    economic_theme_id = Column(
-        Uuid(as_uuid=True), ForeignKey("economic_themes.id"), nullable=False
-    )
-    taxonomy_semantic_hash = Column(String(128), nullable=False)
-    source_text_hash = Column(String(128), nullable=False)
-    embedding_model = Column(String(120), nullable=False)
-    model_version = Column(String(120), nullable=False)
-    embedding = Column(JSON, nullable=False)
-    created_at = _created_at()
-
-    __table_args__ = (
-        UniqueConstraint(
-            "economic_theme_id",
-            "taxonomy_semantic_hash",
-            "source_text_hash",
-            "embedding_model",
-            "model_version",
-            name="uq_economic_theme_embedding_cache_key",
-        ),
-    )
-
-
 class MetricsRevision(Base):
     __tablename__ = "economic_metrics_revisions"
 
@@ -906,7 +880,6 @@ __all__ = (
     "DevelopmentSelectionRevision",
     "DimensionProposal",
     "EconomicExposureCandidate",
-    "EconomicThemeEmbedding",
     "EvidencePacket",
     "EvidencePrecedenceRevision",
     "ExtractionArtifact",

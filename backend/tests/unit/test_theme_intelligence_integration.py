@@ -256,7 +256,7 @@ def test_group_api_preview_apply_search_undo_and_conflict(sessions, monkeypatch)
             expected_version=preview["version"],
         )
         result = api.apply_equivalence(
-            request, db, x_admin_actor="forged", principal=principal
+            request, db, principal=principal
         )
         assert result["refresh_status"] == "pending"
         choices = api.search_equivalent_themes(db, q="CPO", pipeline="technical")[
@@ -265,7 +265,7 @@ def test_group_api_preview_apply_search_undo_and_conflict(sessions, monkeypatch)
         assert [row["id"] for row in choices] == [b.id]
         assert (
             api.apply_equivalence(
-                request, db, x_admin_actor="forged", principal=principal
+                request, db, principal=principal
             )["id"]
             == result["id"]
         )
@@ -276,7 +276,6 @@ def test_group_api_preview_apply_search_undo_and_conflict(sessions, monkeypatch)
             api.apply_equivalence(
                 request.model_copy(update={"operation_key": "stale"}),
                 db,
-                x_admin_actor="forged",
                 principal=principal,
             )
         assert error.value.status_code == 409
@@ -284,7 +283,6 @@ def test_group_api_preview_apply_search_undo_and_conflict(sessions, monkeypatch)
             result["id"],
             api.UndoRequest(reason="Separate again"),
             db,
-            x_admin_actor="forged undo actor",
             principal=principal,
         )
         operation = api.equivalence_history(db, pipeline="technical")["operations"][0]

@@ -13,7 +13,6 @@ from app.infra.db.repositories.economic_taxonomy_work_repo import (
 from app.models.economic_taxonomy_runtime import (
     DimensionProposal,
     EconomicExposureCandidate,
-    NamingProposal,
     ProcessingRequestEvent,
     ProviderAttempt,
     ProviderAttemptEvent,
@@ -208,19 +207,13 @@ def test_candidates_and_proposals_are_durable_request_children(db_session):
     dimension = repo.record_dimension_proposal(
         request.id, dimension_key="workload", payload={"value": "AI training"}
     )
-    naming = repo.record_naming_proposal(
-        request.id, proposal_key="ai-memory", payload={"display_name": "AI Memory"}
-    )
 
-    assert (
-        candidate.id is not None and dimension.id is not None and naming.id is not None
-    )
+    assert candidate.id is not None and dimension.id is not None
     assert (
         db_session.scalar(select(func.count()).select_from(EconomicExposureCandidate))
         == 1
     )
     assert db_session.scalar(select(func.count()).select_from(DimensionProposal)) == 1
-    assert db_session.scalar(select(func.count()).select_from(NamingProposal)) == 1
 
 
 def test_idempotency_key_cannot_silently_replace_candidate_payload(db_session):
