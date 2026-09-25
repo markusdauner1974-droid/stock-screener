@@ -1,9 +1,26 @@
 """Durable semantic work and the separate installation-wide dollar ledger."""
-from sqlalchemy import (Boolean, CheckConstraint, Column, Date, DateTime, ForeignKey,
-                        Integer, JSON, Numeric, Text, UniqueConstraint)
-from sqlalchemy.sql import func
-from sqlalchemy import event
+
+from uuid import uuid4
+
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    Column,
+    Date,
+    DateTime,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    event,
+)
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import func
+
 from app.database import Base
 
 
@@ -47,15 +64,202 @@ class SocialThemeDecision(Base):
     created_at = Column(DateTime(timezone=True), nullable=False)
 
 
+class EconomicSocialAssociation(Base):
+    """Stable global Theme/security membership identity."""
+
+    __tablename__ = "economic_social_associations"
+
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    economic_theme_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_themes.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    security_id = Column(
+        Integer,
+        ForeignKey("stock_universe.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "economic_theme_id",
+            "security_id",
+            name="uq_economic_social_theme_security",
+        ),
+    )
+
+
+class EconomicSocialDecisionRevision(Base):
+    __tablename__ = "economic_social_decision_revisions"
+
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    association_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_social_associations.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    revision_number = Column(Integer, nullable=False)
+    state = Column(String(40), nullable=False)
+    idempotency_key = Column(String(240), nullable=False)
+    actor = Column(String(200), nullable=False)
+    reason = Column(Text, nullable=False)
+    source_payload = Column(JSON, nullable=False, default=dict)
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "association_id",
+            "revision_number",
+            name="uq_economic_social_decision_revision",
+        ),
+        UniqueConstraint(
+            "association_id",
+            "idempotency_key",
+            name="uq_economic_social_decision_idempotency",
+        ),
+        CheckConstraint(
+            "state IN ('proposed','accepted','rejected','conflict_review_required')",
+            name="ck_economic_social_decision_state",
+        ),
+    )
+
+
+class EconomicSocialAssociationRevision(Base):
+    __tablename__ = "economic_social_association_revisions"
+
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    association_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_social_associations.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    revision_number = Column(Integer, nullable=False)
+    decision_revision_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_social_decision_revisions.id", ondelete="RESTRICT"),
+    )
+    state = Column(String(40), nullable=False)
+    live = Column(Boolean, nullable=False)
+    admission_state = Column(String(24), nullable=False)
+    mirror_state = Column(String(24), nullable=False)
+    evidence_packet_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_evidence_packets.id", ondelete="RESTRICT"),
+    )
+    projection_event_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_taxonomy_projection_events.id", ondelete="RESTRICT"),
+    )
+    reconciliation_hash = Column(String(128), nullable=False)
+    details = Column(JSON, nullable=False, default=dict)
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "association_id",
+            "revision_number",
+            name="uq_economic_social_association_revision",
+        ),
+        UniqueConstraint(
+            "association_id",
+            "reconciliation_hash",
+            name="uq_economic_social_association_reconciliation",
+        ),
+        CheckConstraint(
+            "state IN ('proposed','accepted','rejected','conflict_review_required','pending_legacy_mirror')",
+            name="ck_economic_social_association_state",
+        ),
+        CheckConstraint(
+            "admission_state IN ('live','review_only')",
+            name="ck_economic_social_admission_state",
+        ),
+        CheckConstraint(
+            "mirror_state IN ('not_required','pending','acknowledged')",
+            name="ck_economic_social_mirror_state",
+        ),
+        CheckConstraint(
+            "NOT live OR (state = 'accepted' AND admission_state = 'live' AND mirror_state != 'pending')",
+            name="ck_economic_social_live_state",
+        ),
+    )
+
+
+class EconomicSocialAssociationSource(Base):
+    __tablename__ = "economic_social_association_sources"
+
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    association_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_social_associations.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    source_kind = Column(String(40), nullable=False)
+    source_key = Column(String(500), nullable=False)
+    legacy_association_id = Column(
+        Integer,
+        ForeignKey("social_theme_associations.id", ondelete="RESTRICT"),
+    )
+    social_work_id = Column(
+        Integer,
+        ForeignKey("social_extraction_work.id", ondelete="RESTRICT"),
+    )
+    evidence_packet_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_evidence_packets.id", ondelete="RESTRICT"),
+    )
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "association_id",
+            "source_kind",
+            "source_key",
+            name="uq_economic_social_association_source",
+        ),
+        CheckConstraint(
+            "source_kind IN ('legacy_association','social_work','economic_native')",
+            name="ck_economic_social_source_kind",
+        ),
+    )
+
+
 @event.listens_for(Session, "before_flush")
 def _protect_theme_decision_history(session, flush_context, instances):
-    if any(isinstance(row, SocialThemeDecision) for row in session.dirty | session.deleted):
+    protected = (
+        SocialThemeDecision,
+        EconomicSocialAssociation,
+        EconomicSocialDecisionRevision,
+        EconomicSocialAssociationRevision,
+        EconomicSocialAssociationSource,
+    )
+    if any(isinstance(row, protected) for row in session.dirty | session.deleted):
         raise ValueError("social_theme_decision_append_only")
 
 
 @event.listens_for(Session, "do_orm_execute")
 def _protect_theme_decision_bulk_history(state):
-    if (state.is_update or state.is_delete) and state.bind_mapper is not None and state.bind_mapper.class_ is SocialThemeDecision:
+    protected = {
+        SocialThemeDecision,
+        EconomicSocialAssociation,
+        EconomicSocialDecisionRevision,
+        EconomicSocialAssociationRevision,
+        EconomicSocialAssociationSource,
+    }
+    if (
+        (state.is_update or state.is_delete)
+        and state.bind_mapper is not None
+        and state.bind_mapper.class_ in protected
+    ):
         raise ValueError("social_theme_decision_append_only")
 
 
@@ -114,6 +318,9 @@ class SocialLLMAttempt(Base):
     __tablename__ = "social_llm_attempts"
     id = Column(Integer, primary_key=True)
     idempotency_key = Column(Text, nullable=False, unique=True)
+    logical_operation_key = Column(Text, nullable=False)
+    operation_kind = Column(Text, nullable=False)
+    attempt_number = Column(Integer, nullable=False)
     budget_day_id = Column(Integer, ForeignKey("social_llm_budget_days.id", ondelete="RESTRICT"), nullable=False)
     work_ids = Column(JSON, nullable=False)
     estimated_usd = Column(Numeric(24, 12), nullable=False)
@@ -128,6 +335,13 @@ class SocialLLMAttempt(Base):
     created_at = Column(DateTime(timezone=True), nullable=False)
     completed_at = Column(DateTime(timezone=True))
     __table_args__ = (
+        UniqueConstraint(
+            "logical_operation_key",
+            "operation_kind",
+            "attempt_number",
+            name="uq_social_llm_logical_attempt",
+        ),
         CheckConstraint("state IN ('reserved','dispatched','reconciled','uncertain','released')", name="ck_social_attempt_state"),
         CheckConstraint("estimated_usd >= 0 AND (actual_usd IS NULL OR actual_usd >= 0)", name="ck_social_attempt_money"),
+        CheckConstraint("attempt_number >= 1", name="ck_social_attempt_number"),
     )

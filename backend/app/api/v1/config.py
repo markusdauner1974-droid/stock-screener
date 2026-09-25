@@ -1,4 +1,5 @@
 """API endpoints for application configuration including LLM settings."""
+import hmac
 import json
 import logging
 import os
@@ -8,58 +9,99 @@ from typing import Optional
 from uuid import uuid4
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 
+from ...config import settings
+from ...config.pipeline_config import get_pipeline_config
 from ...database import get_db
+from ...domain.economic_taxonomy.contracts import AdminPrincipal
 from ...models.app_settings import AppSetting
 from ...schemas.config import (
     LLMConfigResponse,
     LLMModelUpdate,
     OllamaSettings,
     ThemePolicyConfigResponse,
+    ThemePolicyLifecycleConfig,
+    ThemePolicyMatcherConfig,
     ThemePolicyRevertRequest,
     ThemePolicyUpdateRequest,
     ThemePolicyUpdateResponse,
     ThemePolicyVersionSummary,
-    ThemePolicyMatcherConfig,
-    ThemePolicyLifecycleConfig,
 )
-from ...config.pipeline_config import get_pipeline_config
-from ...services.theme_extraction_service import ThemeExtractionService
 from ...services.llm.config import (
     AVAILABLE_MODELS,
     DEFAULT_MODEL_BY_USE_CASE,
     get_model_by_id,
     is_model_supported_for_use_case,
 )
-from ...config import settings
+from ...services.theme_extraction_service import ThemeExtractionService
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
+# Audit subject for installs that set ADMIN_API_KEY without ADMIN_PRINCIPAL_ID.
+# It keeps pre-existing admin endpoints working but never carries taxonomy
+# review authority.
+UNBOUND_ADMIN_SUBJECT = "admin:unbound-api-key"
+_unbound_admin_warned = False
+
+
+def authenticate_admin(
+    config,
+    *,
+    x_admin_key: str | None = None,
+    authorization: str | None = None,
+) -> AdminPrincipal:
+    """Authenticate the configured key and return its trusted audit identity."""
+    admin_key = config.admin_api_key
+    if not admin_key:
+        logger.error("ADMIN_API_KEY not configured; admin endpoints disabled")
+        raise HTTPException(status_code=503, detail="Admin identity not configured")
+
+    provided = None
+    if isinstance(authorization, str) and authorization.lower().startswith("bearer "):
+        provided = authorization.split(" ", 1)[1].strip()
+    if not provided and isinstance(x_admin_key, str):
+        provided = x_admin_key
+
+    if not provided or not hmac.compare_digest(
+        provided.encode("utf-8"), admin_key.encode("utf-8")
+    ):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    principal_id = config.admin_principal_id
+    if not principal_id:
+        global _unbound_admin_warned
+        if not _unbound_admin_warned:
+            _unbound_admin_warned = True
+            logger.warning(
+                "ADMIN_PRINCIPAL_ID not configured; admin requests are audited "
+                "as %s without taxonomy review authority",
+                UNBOUND_ADMIN_SUBJECT,
+            )
+        return AdminPrincipal(
+            subject=UNBOUND_ADMIN_SUBJECT,
+            auth_method="admin_api_key",
+            roles=frozenset(),
+        )
+    return AdminPrincipal(
+        subject=principal_id,
+        auth_method="admin_api_key",
+        roles=frozenset({"taxonomy:review"}),
+    )
+
+
 def require_admin(
     x_admin_key: str = Header(default=None, alias="X-Admin-Key"),
     authorization: str = Header(default=None),
-):
-    """Simple admin guard for configuration endpoints."""
-    admin_key = settings.admin_api_key
-    if not admin_key:
-        logger.error("ADMIN_API_KEY not configured; config endpoints disabled")
-        raise HTTPException(status_code=503, detail="Admin API key not configured")
-
-    provided = None
-    if authorization and authorization.lower().startswith("bearer "):
-        provided = authorization.split(" ", 1)[1].strip()
-    if not provided:
-        provided = x_admin_key
-
-    if not provided or provided != admin_key:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    return True
+) -> AdminPrincipal:
+    """FastAPI dependency; configuration is read here, never from the request."""
+    return authenticate_admin(
+        settings, x_admin_key=x_admin_key, authorization=authorization
+    )
 
 
 def get_setting(db: Session, key: str, default: str = None) -> Optional[str]:
@@ -233,7 +275,7 @@ async def check_ollama_status(api_base: str) -> str:
 @router.get("/config/llm", response_model=LLMConfigResponse)
 async def get_llm_config(
     db: Session = Depends(get_db),
-    _auth: bool = Depends(require_admin),
+    _auth: AdminPrincipal = Depends(require_admin),
 ):
     """
     Get current LLM configuration.
@@ -302,7 +344,7 @@ async def get_llm_config(
 async def update_llm_model(
     request: LLMModelUpdate,
     db: Session = Depends(get_db),
-    _auth: bool = Depends(require_admin),
+    _auth: AdminPrincipal = Depends(require_admin),
 ):
     """
     Update LLM model selection.
@@ -346,7 +388,7 @@ async def update_llm_model(
 async def update_ollama_settings(
     request: OllamaSettings,
     db: Session = Depends(get_db),
-    _auth: bool = Depends(require_admin),
+    _auth: AdminPrincipal = Depends(require_admin),
 ):
     """
     Update Ollama API base URL.
@@ -382,7 +424,7 @@ async def update_ollama_settings(
 @router.get("/config/ollama/models")
 async def get_ollama_models(
     db: Session = Depends(get_db),
-    _auth: bool = Depends(require_admin),
+    _auth: AdminPrincipal = Depends(require_admin),
 ):
     """
     Get list of available Ollama models.
@@ -427,7 +469,7 @@ async def get_ollama_models(
 async def get_theme_policy_config(
     pipeline: str,
     db: Session = Depends(get_db),
-    _auth: bool = Depends(require_admin),
+    _auth: AdminPrincipal = Depends(require_admin),
 ):
     if pipeline not in {"technical", "fundamental"}:
         raise HTTPException(status_code=400, detail="pipeline must be technical or fundamental")
@@ -461,8 +503,12 @@ async def update_theme_policy(
     request: ThemePolicyUpdateRequest,
     x_admin_actor: str = Header(default="admin", alias="X-Admin-Actor"),
     db: Session = Depends(get_db),
-    _auth: bool = Depends(require_admin),
+    _auth: AdminPrincipal = Depends(require_admin),
 ):
+    # Kept as a compatibility-only request parameter. Audit attribution is
+    # exclusively derived from the authenticated principal.
+    _ = x_admin_actor
+    trusted_actor = _auth.subject
     defaults = _theme_policy_defaults(request.pipeline)
     clean_payload = _clean_override_payload(request)
     overrides_all = _get_setting_json(db, "theme_policy_overrides", {})
@@ -494,7 +540,7 @@ async def update_theme_policy(
     metadata = {
         "version_id": version_id,
         "updated_at": updated_at,
-        "updated_by": x_admin_actor or "admin",
+        "updated_by": trusted_actor,
         "note": request.note,
     }
 
@@ -504,7 +550,7 @@ async def update_theme_policy(
             "version_id": version_id,
             "pipeline": request.pipeline,
             "updated_at": updated_at,
-            "updated_by": x_admin_actor or "admin",
+            "updated_by": trusted_actor,
             "note": request.note,
             "overrides": proposed_override,
             "effective": preview_effective,
@@ -550,7 +596,7 @@ async def update_theme_policy(
             "version_id": version_id,
             "pipeline": request.pipeline,
             "updated_at": updated_at,
-            "updated_by": x_admin_actor or "admin",
+            "updated_by": trusted_actor,
             "note": request.note,
             "previous": base_override,
             "next": proposed_override,
@@ -593,8 +639,9 @@ async def promote_staged_theme_policy(
     note: str | None = None,
     x_admin_actor: str = Header(default="admin", alias="X-Admin-Actor"),
     db: Session = Depends(get_db),
-    _auth: bool = Depends(require_admin),
+    _auth: AdminPrincipal = Depends(require_admin),
 ):
+    _ = x_admin_actor
     staged_all = _get_setting_json(db, "theme_policy_staged", {})
     staged = staged_all.get(pipeline) if isinstance(staged_all, dict) else None
     if not staged:
@@ -608,7 +655,9 @@ async def promote_staged_theme_policy(
         note=note or staged.get("note"),
         mode="apply",
     )
-    return await update_theme_policy(request=request, x_admin_actor=x_admin_actor, db=db, _auth=True)
+    return await update_theme_policy(
+        request=request, x_admin_actor="ignored", db=db, _auth=_auth
+    )
 
 
 @router.post("/config/theme-policies/revert", response_model=ThemePolicyUpdateResponse)
@@ -616,8 +665,9 @@ async def revert_theme_policy(
     request: ThemePolicyRevertRequest,
     x_admin_actor: str = Header(default="admin", alias="X-Admin-Actor"),
     db: Session = Depends(get_db),
-    _auth: bool = Depends(require_admin),
+    _auth: AdminPrincipal = Depends(require_admin),
 ):
+    _ = x_admin_actor
     history_all = _get_setting_json(db, "theme_policy_history", [])
     target = next(
         (
@@ -639,4 +689,6 @@ async def revert_theme_policy(
         note=request.note or f"Reverted from {request.version_id}",
         mode="apply",
     )
-    return await update_theme_policy(request=update_request, x_admin_actor=x_admin_actor, db=db, _auth=True)
+    return await update_theme_policy(
+        request=update_request, x_admin_actor="ignored", db=db, _auth=_auth
+    )

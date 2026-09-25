@@ -4,29 +4,60 @@ ThemeConstituent remains independently supported legacy membership. Live callers
 use effective_live_membership to include accepted Social membership. No provider
 calls, commits, Social pointer changes, or legacy attention writes occur here.
 """
-from datetime import datetime, timedelta, timezone
-from dataclasses import dataclass
-from hashlib import sha256
+
 import json
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 
 from sqlalchemy import select, update
 
 from app.domain.social_signals.records import (
-    EffectiveThemeMembership, ExtractionResult, SocialPostRecord, ThemeProjection,
+    EffectiveThemeMembership,
+    ExtractionResult,
+    SocialPostRecord,
+    ThemeProjection,
     validate_utc_timestamp,
 )
-from app.infra.db.models.social_analysis import SocialExtractionWork, SocialRunWork, SocialThemeAssociation, SocialThemeDecision
+from app.infra.db.models.social_analysis import (
+    EconomicSocialAssociationSource,
+    SocialExtractionWork,
+    SocialRunWork,
+    SocialThemeAssociation,
+    SocialThemeDecision,
+)
 from app.infra.db.models.social_signals import SocialSignalRun, SocialSourceRegistry
+from app.models.economic_taxonomy import (
+    LegacyClaimAllocation,
+    LegacyDestinationMapping,
+)
+from app.models.economic_taxonomy_runtime import TaxonomyAuthority
+from app.models.stock_universe import StockUniverse
 from app.models.theme import ThemeAlias, ThemeCluster, ThemeConstituent, ThemeMention
+from app.services.economic_social_taxonomy_adapter import EconomicSocialTaxonomyAdapter
+from app.services.economic_source_admission import EvidenceAdmission
+from app.services.economic_taxonomy_fence import producer_write
+from app.services.economic_taxonomy_runtime import EconomicTaxonomyRuntimeService
 from app.services.social_company_identity_service import SocialCompanyIdentityService
-from app.services.social_extraction_service import SocialExtractionParser, SocialExtractionService
+from app.services.social_extraction_service import (
+    SocialExtractionParser,
+    SocialExtractionService,
+)
 from app.services.social_ticker_resolver import SocialTickerResolver
 from app.services.theme_extraction_service import find_read_only_theme_match
-from app.services.theme_identity_normalization import canonical_theme_key, display_theme_name, UNKNOWN_THEME_KEY
-from app.services.theme_lifecycle_service import apply_lifecycle_transition, set_initial_lifecycle_defaults
+from app.services.theme_identity_normalization import (
+    UNKNOWN_THEME_KEY,
+    canonical_theme_key,
+    display_theme_name,
+    social_membership_key,
+)
+from app.services.theme_lifecycle_service import (
+    apply_lifecycle_transition,
+    set_initial_lifecycle_defaults,
+)
+from app.utils.file_hashing import canonical_json_sha256 as _semantic_hash
 
 POLICY = "social-theme-v1"
-
 
 @dataclass(frozen=True)
 class PreparedThemeApplication:
@@ -98,7 +129,7 @@ def _decode(work):
         )
         result = ExtractionResult(**{**data, "claims": claims, "judgments": parsed_judgments})
         return post, result
-    except (KeyError, TypeError, AttributeError) as exc:
+    except (KeyError, TypeError, AttributeError):
         raise ValueError("invalid_saved_social_result") from None
 
 
@@ -243,24 +274,253 @@ class SocialThemeProjectionService:
             raise ValueError("social_projection_version_conflict")
         return registry
 
-    def apply_live(self, projection: ThemeProjection, expected_mode_version: int, *, prepared=None) -> None:
+    def admit_economic_evidence(
+        self,
+        projection: ThemeProjection,
+        *,
+        prepared: PreparedThemeApplication | None = None,
+    ) -> None:
+        """Admit the exact saved inputs after their Social run becomes published."""
+
+        run = self.db.get(SocialSignalRun, projection.run_id)
+        if run is None or run.mode != "live" or run.status != "published":
+            raise ValueError("published_social_run_required")
+        identity = SocialCompanyIdentityService(self.db).read()
+        resolver = SocialTickerResolver(
+            self.db, verified_company_ids=identity.verified_company_ids
+        )
+        adapter = EconomicSocialTaxonomyAdapter(self.db)
+        for work_id in projection.work_ids:
+            work = self.db.get(SocialExtractionWork, work_id)
+            post, result = self._decode_work(work)
+            if (
+                work.requested_by_admin
+                or post.created_at < projection.prepared_at - timedelta(days=14)
+                or post.created_at > projection.prepared_at
+            ):
+                continue
+            resolutions = {
+                claim.company_token: resolver.resolve(claim.company_token)
+                for claim in result.claims
+            }
+            accepted_pairs = {
+                (basket.theme_key, basket.market, member.canonical_symbol)
+                for basket in (prepared.baskets if prepared is not None else ())
+                for member in basket.membership
+            }
+            social_memberships = []
+            for claim in result.claims:
+                resolution = resolutions[claim.company_token]
+                if claim.support == "unsupported" or resolution.status != "resolved":
+                    continue
+                matched = find_read_only_theme_match(
+                    self.db, claim.raw_theme, self.pipeline
+                )
+                theme_key = (
+                    matched.canonical_key
+                    if matched is not None
+                    else canonical_theme_key(claim.raw_theme)
+                )
+                state = (
+                    "accepted"
+                    if (theme_key, resolution.market, resolution.symbol)
+                    in accepted_pairs
+                    else "proposed"
+                )
+                if matched is not None and state != "accepted":
+                    legacy = self.db.scalar(
+                        select(SocialThemeAssociation).where(
+                            SocialThemeAssociation.theme_cluster_id == matched.id,
+                            SocialThemeAssociation.market == resolution.market,
+                            SocialThemeAssociation.canonical_symbol
+                            == resolution.symbol,
+                        )
+                    )
+                    if legacy is not None and legacy.state == "rejected":
+                        state = "rejected"
+                social_memberships.append(
+                    {
+                        "membership_key": social_membership_key(
+                            theme_key, int(resolution.security_id)
+                        ),
+                        "theme_key": theme_key,
+                        "security_id": int(resolution.security_id),
+                        "state": state,
+                    }
+                )
+            prepared_evidence = tuple(post.prepared_evidence)
+            admission = adapter.admit_saved_work(
+                work.id,
+                EvidenceAdmission(
+                    provider="x",
+                    canonical_item_id=post.provider_post_id,
+                    canonical_source_family=f"x:post:{post.provider_post_id}",
+                    capture_route="social",
+                    route_record_id=str(work.id),
+                    original_text=post.text,
+                    attachment_hashes=tuple(
+                        item.original_text_sha256 for item in prepared_evidence
+                    ),
+                    extracted_text_hashes=tuple(
+                        item.text_sha256 for item in prepared_evidence
+                    ),
+                    grounding_snapshot={
+                        "company_resolutions": [
+                            asdict(resolutions[token]) for token in sorted(resolutions)
+                        ]
+                    },
+                    preparation_version="social-saved-work-v1",
+                    source_metadata={
+                        "content_item_id": work.content_item_id,
+                        "source_provider": post.provider,
+                        "source_id": post.source_id,
+                        "url": post.url,
+                        "canonical_url": post.canonical_url,
+                        "author_handle": post.author_handle,
+                        "quoted_text": post.quoted_text,
+                        "input_snapshot": dict(work.input_snapshot_json),
+                        "input_hash": work.input_hash,
+                        "prompt_version": work.prompt_version,
+                        "schema_version": work.schema_version,
+                        "actual_provider": work.actual_provider,
+                        "actual_model": work.actual_model,
+                        "social_admission_state": "live",
+                        "social_memberships": sorted(
+                            social_memberships,
+                            key=lambda row: (
+                                row["theme_key"], row["security_id"], row["state"]
+                            ),
+                        ),
+                    },
+                    captured_at=post.observed_at,
+                    observed_at=post.created_at,
+                    available_at=max(
+                        (
+                            post.observed_at,
+                            *(item.available_at for item in prepared_evidence),
+                        )
+                    ),
+                    evidence_channels=("narrative",),
+                ),
+            )
+            if (
+                not admission.live
+                and admission.precedence_state != "equivalent"
+            ):
+                raise ValueError("social_evidence_live_admission_required")
+            authority = self.db.get(TaxonomyAuthority, 1)
+            if (
+                admission.precedence_state == "equivalent"
+                and admission.effective_packet_id is not None
+                and authority is not None
+                and authority.mode == "economic"
+            ):
+                adapter.project_equivalent_social_packet(
+                    evidence_packet_id=admission.packet_id,
+                    effective_packet_id=admission.effective_packet_id,
+                    authority_epoch=authority.authority_epoch,
+                )
+
+    def apply_live(
+        self,
+        projection: ThemeProjection,
+        expected_mode_version: int,
+        *,
+        prepared=None,
+    ) -> bool:
+        authority = self.db.get(TaxonomyAuthority, 1)
+        expected_epoch = authority.authority_epoch if authority is not None else 1
+        if authority is not None and authority.mode == "economic":
+            with producer_write(
+                self.db,
+                expected_epoch=expected_epoch,
+                allowed_modes={"economic"},
+            ):
+                self._validate_application(
+                    projection,
+                    expected_mode_version,
+                    prepared=prepared,
+                )
+            return False
+        payload = {
+            "run_id": projection.run_id,
+            "pipeline": self.pipeline,
+            "work_ids": list(projection.work_ids),
+        }
+        runtime = EconomicTaxonomyRuntimeService(self.db)
+        with runtime.legacy_producer_write(
+            expected_epoch=expected_epoch,
+            logical_source_key=f"social-run:{projection.run_id}:{self.pipeline}",
+            revision_kind="social_theme_projection",
+            content_hash=lambda: _semantic_hash(payload),
+            auto_commit=False,
+        ) as write:
+            projected_count = self._apply_live(
+                projection,
+                expected_mode_version,
+                prepared=prepared,
+            )
+            payload["legacy_association_count"] = projected_count
+            write.stage_next_compatibility_projection(
+                source_lineage=f"social-run:{projection.run_id}:{self.pipeline}",
+                projection_kind="social_theme_projection",
+                projection_version=1,
+                target="economic",
+                payload=payload,
+            )
+        return True
+
+    def _validate_application(
+        self,
+        projection: ThemeProjection,
+        expected_mode_version: int,
+        *,
+        prepared=None,
+    ) -> ThemeProjection:
         self._lock_live(expected_mode_version)
         run = self.db.get(SocialSignalRun, projection.run_id)
-        if run.mode != "live" or run.registry_version != expected_mode_version:
+        if (
+            run is None
+            or run.mode != "live"
+            or run.registry_version != expected_mode_version
+        ):
             raise ValueError("social_live_run_required")
         if prepared is not None:
-            if prepared.projection != projection or prepared.fingerprint != self._fingerprint(projection, tuple(b.theme_key for b in prepared.baskets)):
+            if (
+                prepared.projection != projection
+                or prepared.fingerprint
+                != self._fingerprint(
+                    projection, tuple(b.theme_key for b in prepared.baskets)
+                )
+            ):
                 raise ValueError("social_projection_version_conflict")
-            self._prepared_decoded = {wid: (post, result) for wid, post, result in prepared.decoded_work}
+            self._prepared_decoded = {
+                wid: (post, result) for wid, post, result in prepared.decoded_work
+            }
             current = projection
         else:
             self._prepared_decoded = {}
             current = self.prepare(projection.run_id, projection.prepared_at)
         if current != projection or projection.registry_version != expected_mode_version:
             raise ValueError("social_projection_version_conflict")
+        return current
+
+    def _apply_live(
+        self,
+        projection: ThemeProjection,
+        expected_mode_version: int,
+        *,
+        prepared=None,
+    ) -> int:
+        self._validate_application(
+            projection,
+            expected_mode_version,
+            prepared=prepared,
+        )
         identity = SocialCompanyIdentityService(self.db).read()
         resolver = SocialTickerResolver(self.db, verified_company_ids=identity.verified_company_ids)
         touched = set()
+        projected_association_ids = set()
         for work_id in projection.work_ids:
             work = self.db.get(SocialExtractionWork, work_id)
             post, result = self._decode_work(work)
@@ -315,6 +575,7 @@ class SocialThemeProjectionService:
                     association.evidence_work_ids = sorted(set(association.evidence_work_ids) | {work.id})
                     association.version += 1
                     association.updated_at = projection.prepared_at
+                projected_association_ids.add(association.id)
             for theme_id, claims in by_theme.items():
                 existing = self.db.scalar(select(ThemeMention).where(ThemeMention.social_work_id == work.id, ThemeMention.theme_cluster_id == theme_id))
                 if existing is None:
@@ -332,7 +593,55 @@ class SocialThemeProjectionService:
             # Existing embeddings only: this utility never generates embeddings
             # or commits, and leaves an unembedded new theme unclassified.
             taxonomy.classify_new_l2_to_l1(self.db.get(ThemeCluster, theme_id))
+        for association_id in sorted(projected_association_ids):
+            self._project_legacy_association_to_economic(association_id)
         self.db.flush()
+        return len(projected_association_ids)
+
+    def _project_legacy_association_to_economic(self, association_id: int) -> None:
+        authority = self.db.get(TaxonomyAuthority, 1)
+        if authority is None or authority.processing_taxonomy_version_id is None:
+            return
+        legacy = self.db.get(SocialThemeAssociation, association_id)
+        allocation = self.db.scalar(
+            select(LegacyClaimAllocation).where(
+                LegacyClaimAllocation.taxonomy_version_id
+                == authority.processing_taxonomy_version_id,
+                LegacyClaimAllocation.legacy_theme_cluster_id
+                == legacy.theme_cluster_id,
+                LegacyClaimAllocation.allocation_kind == "social_association",
+                LegacyClaimAllocation.allocation_key
+                == f"social_theme_association:{association_id}",
+                LegacyClaimAllocation.destination_theme_id.is_not(None),
+            )
+        )
+        if allocation is not None:
+            economic_theme_id = allocation.destination_theme_id
+        else:
+            destinations = self.db.scalars(
+                select(LegacyDestinationMapping).where(
+                    LegacyDestinationMapping.taxonomy_version_id
+                    == authority.processing_taxonomy_version_id,
+                    LegacyDestinationMapping.legacy_theme_cluster_id
+                    == legacy.theme_cluster_id,
+                )
+            ).all()
+            if len(destinations) != 1:
+                return
+            economic_theme_id = destinations[0].destination_theme_id
+        security = self.db.scalar(
+            select(StockUniverse).where(
+                StockUniverse.symbol == legacy.canonical_symbol,
+                StockUniverse.market == legacy.market,
+            )
+        )
+        if security is None:
+            return
+        EconomicSocialTaxonomyAdapter(self.db).project_legacy_associations(
+            economic_theme_id=economic_theme_id,
+            security_id=security.id,
+            legacy_association_ids=(legacy.id,),
+        )
 
     def _qualifying(self, theme_id, now, resolver):
         work_ids = self.db.scalars(select(ThemeMention.social_work_id).where(
@@ -378,7 +687,6 @@ class SocialThemeProjectionService:
                 association.company_key = resolution.company_id
                 association.version += 1
             company_evidence = [row for row in qualifying if row[3] == resolution.company_id]
-            authors = {row[4] for row in company_evidence}
             if self._automatic_accepts(association.state, association.decision_owner, resolution, qualifying):
                 self._decision(association, "accepted", "two_independent_authors_14d", "system", projection.prepared_at,
                                projection.run_id, evidence_work_ids=sorted({row[1] for row in company_evidence}))
@@ -415,16 +723,95 @@ class SocialThemeProjectionService:
             raise PermissionError("admin_required")
         if target not in {"accepted", "rejected"} or not isinstance(reason, str) or not reason.strip() or not isinstance(actor, str) or not actor.strip():
             raise ValueError("decision_reason_and_actor_required")
-        registry = self._lock_live()
-        association = self.db.get(SocialThemeAssociation, association_id, populate_existing=True)
+        authority = self.db.get(TaxonomyAuthority, 1)
+        if authority is not None and authority.mode == "economic":
+            return self._decide_economic(
+                association_id,
+                target,
+                reason.strip(),
+                actor.strip(),
+                expected_version,
+            )
+        expected_epoch = authority.authority_epoch if authority is not None else 1
+        payload = {
+            "association_id": association_id,
+            "target": target,
+            "expected_version": expected_version,
+        }
+        runtime = EconomicTaxonomyRuntimeService(self.db)
+        with runtime.legacy_producer_write(
+            expected_epoch=expected_epoch,
+            logical_source_key=f"social-association:{association_id}",
+            revision_kind="administrator_decision",
+            content_hash=lambda: _semantic_hash(payload),
+            auto_commit=False,
+        ) as write:
+            registry = self._lock_live()
+            association = self.db.get(
+                SocialThemeAssociation, association_id, populate_existing=True
+            )
+            if association is None or association.version != expected_version:
+                raise ValueError("association_version_conflict")
+            self._decision(
+                association,
+                target,
+                reason.strip(),
+                actor.strip(),
+                datetime.now(timezone.utc),
+            )
+            association.origin = "social"
+            association.policy_version = POLICY
+            association.decision_owner = "admin"
+            registry.version += 1
+            self.db.flush()
+            self._project_legacy_association_to_economic(association_id)
+            payload["new_version"] = association.version
+            write.stage_next_compatibility_projection(
+                source_lineage=f"social-association:{association_id}",
+                projection_kind="social_administrator_decision",
+                projection_version=1,
+                target="economic",
+                payload=payload,
+            )
+
+    def _decide_economic(self, association_id, target, reason, actor, expected_version):
+        """Revise the bridged global association once economic is authoritative.
+
+        The legacy row is a compatibility mirror after cutover, so it changes
+        only through ordered delivery of the resulting projection event.
+        """
+        association = self.db.get(
+            SocialThemeAssociation, association_id, populate_existing=True
+        )
         if association is None or association.version != expected_version:
             raise ValueError("association_version_conflict")
-        self._decision(association, target, reason.strip(), actor.strip(), datetime.now(timezone.utc))
-        association.origin = "social"
-        association.policy_version = POLICY
-        association.decision_owner = "admin"
-        registry.version += 1
-        self.db.flush()
+        economic_ids = set(
+            self.db.scalars(
+                select(EconomicSocialAssociationSource.association_id).where(
+                    EconomicSocialAssociationSource.source_kind
+                    == "legacy_association",
+                    EconomicSocialAssociationSource.legacy_association_id
+                    == association_id,
+                )
+            )
+        )
+        if not economic_ids:
+            raise ValueError("economic_association_missing")
+        if len(economic_ids) != 1:
+            raise ValueError("economic_association_ambiguous")
+        (economic_id,) = economic_ids
+        idempotency_key = (
+            f"legacy-admin:{association_id}:v{expected_version}:{target}:"
+            f"{_semantic_hash({'reason': reason, 'actor': actor})}"
+        )
+        return EconomicSocialTaxonomyAdapter(self.db).revise(
+            economic_id,
+            state=target,
+            idempotency_key=idempotency_key,
+            actor=actor,
+            reason=reason,
+            mirror_acknowledged=False,
+        )
 
     def effective_live_membership(self, theme_cluster_id):
         """Active legacy UNION accepted Social listings, current trusted grouping.

@@ -4,28 +4,41 @@ All I/O is local database reading. Staged publication may supply an alternative
 trusted AcceptedBasketReader; ordinary callers cannot make proposals accepted
 by passing symbols. Task 9 must recheck registry/basket versions at publication.
 """
+import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
-import json
 from typing import Protocol
 
 import pandas as pd
 from sqlalchemy import select
 
 from app.domain.relative_strength.price_validity import is_valid_adjusted_price
-from app.domain.social_signals.records import EffectiveThemeMembership, ThemeMarketEvidence, validate_utc_timestamp
+from app.domain.social_signals.records import (
+    EffectiveThemeMembership,
+    ThemeMarketEvidence,
+    validate_utc_timestamp,
+)
 from app.models.stock import StockPrice
 from app.models.stock_universe import StockUniverse
 from app.models.theme import ThemeCluster
 from app.services.benchmark_registry_service import BenchmarkRegistryService
+from app.services.economic_theme_read_service import EconomicThemeReader
+from app.services.security_master_service import security_master_resolver
 from app.services.social_company_identity_service import SocialCompanyIdentityService
-from app.services.social_confirmation_reader import PinnedFeatureRun, SocialConfirmationReader, _available_at
+from app.services.social_confirmation_reader import (
+    PinnedFeatureRun,
+    SocialConfirmationReader,
+    _available_at,
+)
+from app.services.economic_social_taxonomy_adapter import EconomicSocialTaxonomyAdapter
 from app.services.social_theme_projection_service import SocialThemeProjectionService
 from app.services.social_ticker_resolver import SocialTickerResolver
-from app.services.security_master_service import security_master_resolver
-from app.services.theme_discovery_service import compound_theme_returns, theme_relative_return_score
+from app.services.theme_discovery_service import (
+    compound_theme_returns,
+    theme_relative_return_score,
+)
 
 COMPONENTS = ("basket_rs_vs_benchmark", "avg_rs_rating", "pct_above_50ma")
 
@@ -53,10 +66,16 @@ class AcceptedBasketReader(Protocol):
 
 
 class LiveAcceptedBasketReader:
-    def __init__(self, db, *, pipeline="technical"):
+    def __init__(self, db, *, pipeline="technical", authority_source=None):
         self.db, self.pipeline = db, pipeline
+        self.authority_source = authority_source
 
     def read(self, theme_key, market):
+        authority_source = self.authority_source or EconomicThemeReader(
+            self.db
+        ).source_name
+        if authority_source == "economic":
+            raise MeasurementUnavailable("legacy_theme_authority_disabled")
         identity = SocialCompanyIdentityService(self.db).read()
         theme = self.db.scalar(select(ThemeCluster).where(
             ThemeCluster.canonical_key == theme_key, ThemeCluster.pipeline == self.pipeline,
@@ -71,15 +90,101 @@ class LiveAcceptedBasketReader:
         return AcceptedBasketSnapshot(theme_key, market, members, stocks, identity.version, identity.policy_version, identity.registry_version)
 
 
+class EconomicAcceptedBasketReader:
+    """Read current or generation-pinned global Social memberships."""
+
+    def __init__(
+        self,
+        db,
+        *,
+        economic_theme_id,
+        association_revision_ref_ids: tuple = (),
+    ):
+        self.db = db
+        self.economic_theme_id = economic_theme_id
+        self.association_revision_ref_ids = tuple(association_revision_ref_ids)
+
+    def read(self, theme_key, market):
+        identity = SocialCompanyIdentityService(self.db).read()
+        adapter = EconomicSocialTaxonomyAdapter(self.db)
+        memberships = (
+            tuple(
+                adapter.membership(ref_id)
+                for ref_id in self.association_revision_ref_ids
+            )
+            if self.association_revision_ref_ids
+            else adapter.current_live_memberships(self.economic_theme_id)
+        )
+        if any(item.economic_theme_id != self.economic_theme_id for item in memberships):
+            raise MeasurementUnavailable("basket_identity_mismatch")
+        securities = {
+            row.id: row
+            for row in self.db.scalars(
+                select(StockUniverse).where(
+                    StockUniverse.id.in_([item.security_id for item in memberships])
+                )
+            )
+        }
+        resolver = SocialTickerResolver(
+            self.db, verified_company_ids=identity.verified_company_ids
+        )
+        accepted = []
+        for item in memberships:
+            if not item.live or item.state != "accepted":
+                continue
+            security = securities.get(item.security_id)
+            if security is None or security.market != market:
+                continue
+            resolved = resolver.resolve(security.symbol, security.market)
+            accepted.append(
+                EffectiveThemeMembership(
+                    security.symbol,
+                    security.market,
+                    resolved.company_id,
+                    resolved.company_count_eligible,
+                    ("economic",),
+                )
+            )
+        accepted = tuple(sorted(accepted, key=lambda item: item.canonical_symbol))
+        stocks = tuple(item.canonical_symbol for item in accepted)
+        return AcceptedBasketSnapshot(
+            theme_key,
+            market,
+            accepted,
+            stocks,
+            identity.version,
+            identity.policy_version,
+            identity.registry_version,
+        )
+
+
 class SocialThemeMarketService:
     def __init__(self, db, *, calendar=None, benchmark_registry=None, membership_reader: AcceptedBasketReader | None = None,
                  grace_minutes=120, pipeline="technical", pinned_feature_run: PinnedFeatureRun | None = None,
-                 benchmark_symbol: str | None = None):
+                 benchmark_symbol: str | None = None, economic_theme_id=None,
+                 association_revision_ref_ids: tuple = ()):
         self.db = db
         self.registry = benchmark_registry or BenchmarkRegistryService()
         self.reader = SocialConfirmationReader(db, calendar=calendar, benchmark_registry=self.registry, grace_minutes=grace_minutes)
         self.calendar = self.reader.calendar
-        self.membership_reader = membership_reader or LiveAcceptedBasketReader(db, pipeline=pipeline)
+        if membership_reader is not None:
+            self.membership_reader = membership_reader
+        else:
+            authority_source = EconomicThemeReader(db).source_name
+            if authority_source == "economic":
+                if economic_theme_id is None:
+                    raise MeasurementUnavailable("economic_theme_id_required")
+                self.membership_reader = EconomicAcceptedBasketReader(
+                    db,
+                    economic_theme_id=economic_theme_id,
+                    association_revision_ref_ids=association_revision_ref_ids,
+                )
+            else:
+                self.membership_reader = LiveAcceptedBasketReader(
+                    db,
+                    pipeline=pipeline,
+                    authority_source=authority_source,
+                )
         self.pinned_feature_run = pinned_feature_run
         self.benchmark_symbol = benchmark_symbol
 

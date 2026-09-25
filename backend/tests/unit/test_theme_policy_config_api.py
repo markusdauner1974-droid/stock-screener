@@ -13,8 +13,15 @@ from app.api.v1.config import (
     update_theme_policy,
 )
 from app.database import Base
+from app.domain.economic_taxonomy.contracts import AdminPrincipal
 from app.models.app_settings import AppSetting
 from app.schemas.config import ThemePolicyRevertRequest, ThemePolicyUpdateRequest
+
+ADMIN = AdminPrincipal(
+    subject="test:admin",
+    auth_method="admin_api_key",
+    roles=frozenset({"taxonomy:review"}),
+)
 
 
 @pytest.fixture
@@ -38,7 +45,7 @@ async def test_theme_policy_preview_does_not_persist(db_session):
         ),
         x_admin_actor="tester",
         db=db_session,
-        _auth=True,
+        _auth=ADMIN,
     )
     assert response.status == "preview"
     assert response.mode == "preview"
@@ -46,7 +53,7 @@ async def test_theme_policy_preview_does_not_persist(db_session):
     fetched = await get_theme_policy_config(
         pipeline="technical",
         db=db_session,
-        _auth=True,
+        _auth=ADMIN,
     )
     assert fetched.overrides == {}
 
@@ -63,7 +70,7 @@ async def test_theme_policy_stage_promote_and_revert_flow(db_session):
         ),
         x_admin_actor="tester",
         db=db_session,
-        _auth=True,
+        _auth=ADMIN,
     )
     assert staged.status == "staged"
     assert staged.version_id is not None
@@ -73,7 +80,7 @@ async def test_theme_policy_stage_promote_and_revert_flow(db_session):
         note="ship staged policy",
         x_admin_actor="tester",
         db=db_session,
-        _auth=True,
+        _auth=ADMIN,
     )
     assert promoted.status == "applied"
     applied_version = promoted.version_id
@@ -82,7 +89,7 @@ async def test_theme_policy_stage_promote_and_revert_flow(db_session):
     fetched = await get_theme_policy_config(
         pipeline="technical",
         db=db_session,
-        _auth=True,
+        _auth=ADMIN,
     )
     assert fetched.overrides["matcher"]["embedding_attach_threshold"] == 0.88
     assert fetched.overrides["lifecycle"]["promotion_min_mentions_7d"] == 7
@@ -99,7 +106,7 @@ async def test_theme_policy_stage_promote_and_revert_flow(db_session):
         ),
         x_admin_actor="tester",
         db=db_session,
-        _auth=True,
+        _auth=ADMIN,
     )
     assert second.status == "applied"
 
@@ -111,14 +118,14 @@ async def test_theme_policy_stage_promote_and_revert_flow(db_session):
         ),
         x_admin_actor="tester",
         db=db_session,
-        _auth=True,
+        _auth=ADMIN,
     )
     assert reverted.status == "applied"
 
     after_revert = await get_theme_policy_config(
         pipeline="technical",
         db=db_session,
-        _auth=True,
+        _auth=ADMIN,
     )
     assert after_revert.overrides["matcher"]["embedding_attach_threshold"] == 0.88
     assert after_revert.overrides["lifecycle"]["promotion_min_mentions_7d"] == 7
@@ -144,14 +151,14 @@ async def test_promote_staged_sanitizes_unknown_override_keys(db_session):
         note="promote",
         x_admin_actor="tester",
         db=db_session,
-        _auth=True,
+        _auth=ADMIN,
     )
     assert result.status == "applied"
 
     fetched = await get_theme_policy_config(
         pipeline="technical",
         db=db_session,
-        _auth=True,
+        _auth=ADMIN,
     )
     assert fetched.overrides["matcher"]["embedding_attach_threshold"] == 0.87
     assert "unexpected_key" not in fetched.overrides["matcher"]

@@ -1,12 +1,12 @@
 """Short serialized dollar reservations. No provider I/O or process-local policy."""
+import json
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
-from decimal import Decimal, ROUND_CEILING
-import json
+from decimal import ROUND_CEILING, Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from app.infra.db.models.social_analysis import SocialLLMAttempt, SocialLLMBudgetDay
 from app.infra.db.models.social_signals import SocialSourceRegistry
@@ -179,29 +179,88 @@ class SocialLLMBudgetService:
             blocks[model] = {"versions": versions}
             db.scalar(select(AppSetting).where(AppSetting.key == "social_llm_pricing_blocks")).value = json.dumps(blocks)
 
-    def reserve(self, attempt_key: str, work_ids: tuple[int, ...], maximum_usd: Decimal,
-                now: datetime, *, pricing_version="manual-v1", input_token_limit=0, output_token_limit=0):
+    def reserve(
+        self,
+        attempt_key: str,
+        work_ids: tuple[int, ...],
+        maximum_usd: Decimal,
+        now: datetime,
+        *,
+        pricing_version="manual-v1",
+        input_token_limit=0,
+        output_token_limit=0,
+        logical_operation_key: str | None = None,
+        operation_kind: str = "social_extraction",
+    ):
         maximum_usd = money(maximum_usd)
         if not attempt_key or not work_ids or any(type(i) is not int or i <= 0 for i in work_ids):
             raise ValueError("invalid_reservation")
+        logical_operation_key = logical_operation_key or attempt_key
+        if not logical_operation_key.strip() or not operation_kind.strip():
+            raise ValueError("invalid_logical_operation")
         with social_analysis_transaction(self.session_factory) as db:
             old = db.scalar(select(SocialLLMAttempt).where(SocialLLMAttempt.idempotency_key == attempt_key))
             if old:
-                if old.work_ids != list(work_ids) or old.estimated_usd != maximum_usd or old.pricing_version != pricing_version:
+                if (
+                    old.work_ids != list(work_ids)
+                    or old.estimated_usd != maximum_usd
+                    or old.pricing_version != pricing_version
+                    or old.logical_operation_key != logical_operation_key
+                    or old.operation_kind != operation_kind
+                ):
                     raise ValueError("idempotency_conflict")
                 return old.id
+            latest = db.scalar(
+                select(SocialLLMAttempt)
+                .where(
+                    SocialLLMAttempt.logical_operation_key == logical_operation_key,
+                    SocialLLMAttempt.operation_kind == operation_kind,
+                )
+                .order_by(SocialLLMAttempt.attempt_number.desc())
+                .limit(1)
+            )
+            if latest is not None and latest.state in {"reserved", "dispatched", "uncertain"}:
+                return None
             day, status = self._day(db, now)
             if maximum_usd > status.remaining_usd:
                 return None
-            attempt = SocialLLMAttempt(idempotency_key=attempt_key, work_ids=list(work_ids),
-                budget_day_id=day.id, estimated_usd=maximum_usd, pricing_version=pricing_version,
-                input_token_limit=input_token_limit, output_token_limit=output_token_limit,
-                state="reserved", created_at=now)
+            attempt_number = int(
+                db.scalar(
+                    select(func.max(SocialLLMAttempt.attempt_number)).where(
+                        SocialLLMAttempt.logical_operation_key
+                        == logical_operation_key,
+                        SocialLLMAttempt.operation_kind == operation_kind,
+                    )
+                )
+                or 0
+            ) + 1
+            attempt = SocialLLMAttempt(
+                idempotency_key=attempt_key,
+                logical_operation_key=logical_operation_key,
+                operation_kind=operation_kind,
+                attempt_number=attempt_number,
+                work_ids=list(work_ids),
+                budget_day_id=day.id,
+                estimated_usd=maximum_usd,
+                pricing_version=pricing_version,
+                input_token_limit=input_token_limit,
+                output_token_limit=output_token_limit,
+                state="reserved",
+                created_at=now,
+            )
             db.add(attempt)
             day.reserved_usd += maximum_usd
             day.version += 1
             db.flush()
             return attempt.id
+
+    def reservation_is_open(self, attempt_id: int) -> bool:
+        with self.session_factory() as db:
+            attempt = db.get(SocialLLMAttempt, attempt_id)
+            return bool(
+                attempt is not None
+                and attempt.state in {"reserved", "dispatched", "uncertain"}
+            )
 
     def mark_dispatched(self, attempt_id):
         with social_analysis_transaction(self.session_factory) as db:
@@ -261,3 +320,81 @@ class SocialLLMBudgetService:
             attempt.actual_usd = actual_usd
             attempt.state = "reconciled"
             attempt.completed_at = datetime.now(timezone.utc)
+
+
+class SocialBudgetReservation:
+    """Provider-reservation protocol backed by one durable Social attempt."""
+
+    def __init__(self, budget: SocialLLMBudgetService, attempt_id: int):
+        self.budget = budget
+        self.attempt_id = attempt_id
+
+    @property
+    def state(self) -> str:
+        with self.budget.session_factory() as db:
+            attempt = db.get(SocialLLMAttempt, self.attempt_id)
+            if attempt is None:
+                raise KeyError(f"social LLM attempt {self.attempt_id} not found")
+            return attempt.state
+
+    def mark_dispatched(self) -> None:
+        if not self.budget.mark_dispatched(self.attempt_id):
+            raise ValueError("social_attempt_not_reserved")
+
+    def release_pre_dispatch(self) -> None:
+        state = self.state
+        released = (
+            self.budget.release(self.attempt_id)
+            if state == "reserved"
+            else self.budget.release_pre_dispatch(self.attempt_id)
+        )
+        if not released:
+            raise ValueError("social_attempt_not_releasable")
+
+    def reconcile(
+        self, *, actual_cost: Decimal | None, provider_request_id: str | None
+    ) -> None:
+        self.budget.reconcile(
+            self.attempt_id,
+            actual_cost,
+            provider_request_id,
+        )
+
+
+class SocialEconomicReservationManager:
+    """Adapt Social's dollar ledger to Economic Taxonomy provider calls."""
+
+    def __init__(
+        self,
+        budget: SocialLLMBudgetService,
+        *,
+        work_ids: tuple[int, ...],
+        maximum_usd: Decimal,
+        now: datetime,
+        pricing_version: str,
+        input_token_limit: int,
+        output_token_limit: int,
+    ):
+        self.budget = budget
+        self.work_ids = work_ids
+        self.maximum_usd = maximum_usd
+        self.now = now
+        self.pricing_version = pricing_version
+        self.input_token_limit = input_token_limit
+        self.output_token_limit = output_token_limit
+
+    def reserve(self, *, attempt_key, logical_request_id, operation_kind):
+        attempt_id = self.budget.reserve(
+            str(attempt_key),
+            self.work_ids,
+            self.maximum_usd,
+            self.now,
+            pricing_version=self.pricing_version,
+            input_token_limit=self.input_token_limit,
+            output_token_limit=self.output_token_limit,
+            logical_operation_key=str(logical_request_id),
+            operation_kind=str(operation_kind),
+        )
+        if attempt_id is None:
+            return None
+        return SocialBudgetReservation(self.budget, attempt_id)

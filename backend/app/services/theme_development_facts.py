@@ -31,7 +31,9 @@ class EventFacts(BaseModel):
 
 
 class DevelopmentFacts(EventFacts):
-    theme_ids: list[int] = Field(min_length=1, max_length=20)
+    # Economic-native developments may have no legacy ThemeCluster link.  The
+    # service still requires at least one legacy or Economic Theme assignment.
+    theme_ids: list[int] = Field(default_factory=list, max_length=20)
     citations: list[Citation] = Field(min_length=1, max_length=8)
 
 
@@ -60,13 +62,22 @@ def identity(facts, item_id):
     return key
 
 
-def normalize_batch(observations, *, item_id, theme_ids, sources):
+def normalize_batch(
+    observations,
+    *,
+    item_id,
+    theme_ids,
+    sources,
+    allow_empty_theme_ids=False,
+):
     if len(observations) > 12:
         raise ValueError("invalid_development_batch")
     result = {}
     for value in observations:
         facts = DevelopmentFacts.model_validate(value)
         facts = facts.model_copy(update={"theme_ids": sorted(set(facts.theme_ids))})
+        if not facts.theme_ids and not allow_empty_theme_ids:
+            raise ValueError("invalid_development_themes")
         if not set(facts.theme_ids).issubset(theme_ids):
             raise ValueError("invalid_development_themes")
         for citation in facts.citations:

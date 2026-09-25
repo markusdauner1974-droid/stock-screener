@@ -1,8 +1,11 @@
 """Audited, non-destructive theme grouping and source-bound event history."""
 
+from uuid import uuid4
+
 from sqlalchemy import (
     JSON,
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     ForeignKey,
@@ -10,8 +13,10 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    Uuid,
+    event,
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import Session, relationship
 from sqlalchemy.sql import func
 
 from app.database import Base
@@ -48,6 +53,8 @@ class ThemeDevelopmentEvent(Base):
     id = Column(Integer, primary_key=True)
     pipeline = Column(String(20), nullable=False, index=True)
     event_key = Column(String(64), nullable=False)
+    canonical_event_key = Column(String(64), unique=True)
+    development_identity = Column(Uuid(as_uuid=True), unique=True)
     identity = Column(JSON, nullable=False)
     created_at = Column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -73,10 +80,19 @@ class ThemeDevelopmentObservation(Base):
         index=True,
     )
     pipeline = Column(String(20), nullable=False)
+    analysis_channel = Column(String(20), nullable=False)
+    development_support = Column(String(20), nullable=False, default="present")
+    source_family_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_source_families.id", ondelete="RESTRICT"),
+    )
     revision = Column(String(64), nullable=False)
     observation_key = Column(String(64), nullable=False, unique=True)
     theme_links = relationship(
         "ThemeDevelopmentTheme", cascade="all, delete-orphan", lazy="selectin"
+    )
+    economic_theme_links = relationship(
+        "EconomicThemeDevelopment", cascade="all, delete-orphan", lazy="selectin"
     )
 
     @property
@@ -92,6 +108,17 @@ class ThemeDevelopmentObservation(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     superseded = Column(Boolean, nullable=False, default=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "analysis_channel IN ('technical','fundamental','narrative')",
+            name="ck_theme_development_analysis_channel",
+        ),
+        CheckConstraint(
+            "development_support IN ('present','absent','unresolved')",
+            name="ck_theme_development_support",
+        ),
+    )
 
 
 class ThemeDevelopmentWork(Base):
@@ -131,3 +158,67 @@ class ThemeDevelopmentTheme(Base):
         primary_key=True,
         index=True,
     )
+
+
+class EconomicThemeDevelopment(Base):
+    __tablename__ = "economic_theme_developments"
+
+    observation_id = Column(
+        Integer,
+        ForeignKey("theme_development_observations.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    economic_theme_id = Column(
+        Uuid(as_uuid=True),
+        ForeignKey("economic_themes.id", ondelete="RESTRICT"),
+        primary_key=True,
+        index=True,
+    )
+    link_origin = Column(String(32), nullable=False, default="economic_native")
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "link_origin IN ('economic_native','legacy_mapping','compatibility')",
+            name="ck_economic_theme_development_origin",
+        ),
+    )
+
+
+class LegacyDevelopmentEventMapping(Base):
+    __tablename__ = "legacy_development_event_mappings"
+
+    id = Column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    old_event_id = Column(
+        Integer,
+        ForeignKey("theme_development_events.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    canonical_event_id = Column(
+        Integer,
+        ForeignKey("theme_development_events.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    old_pipeline = Column(String(20), nullable=False)
+    migration_run_id = Column(Uuid(as_uuid=True), nullable=False, index=True)
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+@event.listens_for(Session, "before_flush")
+def _protect_legacy_development_event_mappings(session, _flush_context, _instances):
+    for row in session.dirty:
+        if isinstance(row, LegacyDevelopmentEventMapping) and session.is_modified(
+            row, include_collections=False
+        ):
+            raise ValueError("legacy_development_event_mapping_append_only")
+    for row in session.deleted:
+        if isinstance(row, LegacyDevelopmentEventMapping):
+            raise ValueError(  # noqa: TRY004 -- Domain immutability violation.
+                "legacy_development_event_mapping_append_only"
+            )

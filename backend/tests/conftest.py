@@ -26,6 +26,10 @@ else:
     os.environ["DATABASE_URL"] = "sqlite://"
     os.environ["STOCKSCANNER_TEST_ALLOW_SQLITE"] = "1"
 
+# Admin endpoint tests configure keys individually. Give those keys a stable
+# test-only audit identity unless a case explicitly overrides it.
+os.environ.setdefault("ADMIN_PRINCIPAL_ID", "test:admin")
+
 import app.models  # noqa: F401
 from app.database import SessionLocal, engine, Base
 

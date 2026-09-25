@@ -3,7 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
+from typing import Any
+
+
+def canonical_json_sha256(payload: Any) -> str:
+    """Hash a JSON-compatible value using the application's canonical encoding."""
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), default=str
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:

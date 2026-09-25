@@ -1,7 +1,12 @@
-import { fireEvent, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import ThemesPage from './ThemesPage';
 import { renderWithProviders } from '../test/renderWithProviders';
+
+const economicApi = vi.hoisted(() => ({
+  getEconomicThemes: vi.fn(),
+  getEconomicTaxonomyReview: vi.fn(),
+}));
 
 const runtimeState = {
   runtimeReady: true,
@@ -21,6 +26,8 @@ vi.mock('../contexts/usePipeline', () => ({
     startPipeline: vi.fn(),
   }),
 }));
+
+vi.mock('../api/economicThemes', () => economicApi);
 
 vi.mock('../components/Themes/ThemeTaxonomyTable', () => ({
   default: ({ pipeline, categoryFilter }) => (
@@ -98,6 +105,10 @@ describe('ThemesPage', () => {
     runtimeState.runtimeReady = true;
     runtimeState.uiSnapshots = { themes: false };
     runtimeState.features = { social_signals: false };
+    economicApi.getEconomicThemes.mockReset();
+    economicApi.getEconomicThemes.mockRejectedValue(new Error('not configured'));
+    economicApi.getEconomicTaxonomyReview.mockReset();
+    economicApi.getEconomicTaxonomyReview.mockResolvedValue(null);
   });
 
   it('resets grouped category filter when pipeline toggles', async () => {
@@ -115,7 +126,7 @@ describe('ThemesPage', () => {
 
   it('supports flat-view switch and opens review surface', async () => {
     renderPage();
-    fireEvent.click(screen.getByRole('button', { name: 'All Themes' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'All Themes' }));
 
     await waitFor(() => {
       expect(screen.getByText('Theme Rankings')).toBeInTheDocument();
@@ -130,5 +141,123 @@ describe('ThemesPage', () => {
     renderPage();
     expect(await screen.findByText('Published Social Pulse')).toBeInTheDocument();
     expect(screen.getByTestId('taxonomy')).toHaveTextContent('technical:none');
+  });
+
+  it('uses the generation-scoped global view in economic authority mode', async () => {
+    economicApi.getEconomicThemes.mockResolvedValue({
+      generation_id: 'generation-1',
+      generation: { authority_mode: 'economic' },
+      themes: [{
+        economic_theme_id: 'theme-1',
+        display_name: 'AI Memory',
+        lifecycle: 'active',
+        definition: 'AI-driven memory demand.',
+        metrics: {
+          technical_attention: { availability: 'available', percentile: 92 },
+          fundamental_attention: { availability: 'unavailable' },
+          narrative_attention: { availability: 'available', percentile: 84 },
+          emerging: { availability: 'available', percentile: 77 },
+          broad_confirmation: { availability: 'available', percentile: 89 },
+        },
+      }],
+    });
+    economicApi.getEconomicTaxonomyReview.mockResolvedValue({
+      generation_id: 'generation-1',
+      allocations: [],
+      reconciliation: [],
+      operation_previews: [],
+    });
+
+    renderPage();
+
+    expect(await screen.findByRole('heading', { name: 'Economic Themes' })).toBeInTheDocument();
+    expect(screen.getByText('AI Memory')).toBeInTheDocument();
+    expect(screen.getByText('Fundamental Attention')).toBeInTheDocument();
+    expect(screen.getByText('Unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('Fundamental Momentum')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('taxonomy')).not.toBeInTheDocument();
+  });
+
+  it('switches to a newly published economic generation while mounted', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    economicApi.getEconomicThemes
+      .mockResolvedValueOnce({
+        generation_id: 'generation-legacy',
+        generation: { authority_mode: 'dual' },
+        themes: [],
+      })
+      .mockResolvedValueOnce({
+        generation_id: 'generation-economic',
+        generation: { authority_mode: 'economic' },
+        themes: [{
+          economic_theme_id: 'theme-1',
+          display_name: 'AI Memory',
+          lifecycle: 'active',
+          definition: 'AI-driven memory demand.',
+          metrics: {},
+        }],
+      });
+
+    const { unmount } = renderPage();
+    expect(await screen.findByTestId('taxonomy')).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+
+    await waitFor(() => expect(economicApi.getEconomicThemes).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole('heading', { name: 'Economic Themes' })).toBeInTheDocument();
+    expect(screen.queryByTestId('taxonomy')).not.toBeInTheDocument();
+
+    unmount();
+    vi.useRealTimers();
+  });
+
+  it('refreshes an open economic-theme detail with the new generation', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    economicApi.getEconomicThemes
+      .mockResolvedValueOnce({
+        generation_id: 'generation-1',
+        generation: { authority_mode: 'economic' },
+        themes: [{
+          economic_theme_id: 'theme-1',
+          display_name: 'AI Memory',
+          lifecycle: 'active',
+          definition: 'Original definition.',
+          metrics: {},
+        }],
+      })
+      .mockResolvedValueOnce({
+        generation_id: 'generation-2',
+        generation: { authority_mode: 'economic' },
+        themes: [{
+          economic_theme_id: 'theme-1',
+          display_name: 'AI Memory Infrastructure',
+          lifecycle: 'established',
+          definition: 'Updated definition.',
+          metrics: {},
+        }],
+      });
+
+    const { unmount } = renderPage();
+    fireEvent.click(await screen.findByText('AI Memory'));
+    expect(screen.getByRole('dialog')).toHaveTextContent('Generation generation-1');
+    expect(screen.getByRole('dialog')).toHaveTextContent('Original definition.');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole('dialog')).toHaveTextContent(
+        'AI Memory Infrastructure',
+      );
+    });
+    expect(screen.getByRole('dialog')).toHaveTextContent('Generation generation-2');
+    expect(screen.getByRole('dialog')).toHaveTextContent('Updated definition.');
+    expect(screen.getByRole('dialog')).not.toHaveTextContent('Original definition.');
+
+    unmount();
+    vi.useRealTimers();
   });
 });
