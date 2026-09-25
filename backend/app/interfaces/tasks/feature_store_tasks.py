@@ -258,42 +258,86 @@ def _enrich_feature_run_with_ibd_metadata(
         batch_size=max(1, int(settings.feature_metadata_repair_batch_size or 500)),
     ).enrich(feature_run_id=feature_run_id, ranking_date=ranking_date)
 
-def _resolve_latest_published_run_for_market(*, db, market: str) -> int | None:
+def _run_serves_ranking_date(feature_run, *, ranking_date: date) -> bool:
+    """Report whether a run's RS identity is coherent for ``ranking_date``.
+
+    Reuses the identity resolver rather than comparing ``rs_as_of_date`` by
+    hand: legacy runs carry no ``rs_formula_version`` and are deliberately
+    accepted for any date, and only the resolver encodes that rule.
+    """
+    from app.services.feature_run_rs_identity import (
+        FeatureRunRsIdentityError,
+        resolve_feature_run_rs_identity,
+    )
+
+    try:
+        resolve_feature_run_rs_identity(feature_run, ranking_date=ranking_date)
+    except FeatureRunRsIdentityError:
+        return False
+    return True
+
+
+def _resolve_latest_published_run_for_market(
+    *,
+    db,
+    market: str,
+    ranking_date: date | None = None,
+) -> int | None:
+    """Return the published run a caller should act on.
+
+    Without ``ranking_date`` this is the newest published run for the market,
+    which is whatever the ``latest_published*`` pointers say.
+
+    With ``ranking_date`` the run must additionally *serve* that date: a run
+    published for an earlier trading date is skipped in favour of the newest
+    run that still matches, and ``None`` is returned when none does. Callers
+    that enrich a run with rankings from a given date must pass it — enriching
+    an older run with newer rankings raises ``FeatureRunRsIdentityError`` from
+    the identity resolver, which is how the daily chain used to abort.
+    """
     from app.domain.feature_store.run_metadata import feature_run_market
     from app.infra.db.models.feature_store import FeatureRun, FeatureRunPointer
 
     normalized_market = market.upper()
     pointer_key = f"latest_published_market:{normalized_market}"
 
-    pointer = (
-        db.query(FeatureRunPointer)
-        .filter(FeatureRunPointer.key == pointer_key)
-        .first()
-    )
-    if pointer is not None:
-        run = db.query(FeatureRun).filter(FeatureRun.id == pointer.run_id).first()
-        if run is not None and run.status == "published" and feature_run_market(run) == normalized_market:
-            return run.id
+    candidates: list = []
+    seen_ids: set[int] = set()
 
-    fallback_pointer = (
-        db.query(FeatureRunPointer)
-        .filter(FeatureRunPointer.key == "latest_published")
-        .first()
-    )
-    if fallback_pointer is not None:
-        run = db.query(FeatureRun).filter(FeatureRun.id == fallback_pointer.run_id).first()
-        if run is not None and run.status == "published" and feature_run_market(run) == normalized_market:
-            return run.id
+    def _remember(run) -> None:
+        if run is not None and run.id not in seen_ids:
+            seen_ids.add(run.id)
+            candidates.append(run)
 
-    published_runs = (
+    for key in (pointer_key, "latest_published"):
+        pointer = (
+            db.query(FeatureRunPointer)
+            .filter(FeatureRunPointer.key == key)
+            .first()
+        )
+        if pointer is not None:
+            _remember(
+                db.query(FeatureRun).filter(FeatureRun.id == pointer.run_id).first()
+            )
+
+    for run in (
         db.query(FeatureRun)
         .filter(FeatureRun.status == "published")
         .order_by(FeatureRun.published_at.desc(), FeatureRun.id.desc())
         .all()
-    )
-    for run in published_runs:
-        if feature_run_market(run) == normalized_market:
-            return run.id
+    ):
+        _remember(run)
+
+    for run in candidates:
+        if getattr(run, "status", None) != "published":
+            continue
+        if feature_run_market(run) != normalized_market:
+            continue
+        if ranking_date is not None and not _run_serves_ranking_date(
+            run, ranking_date=ranking_date
+        ):
+            continue
+        return run.id
     return None
 
 
@@ -311,7 +355,11 @@ def _repair_current_us_group_metadata(
     session_factory = session_factory or SessionLocal
     db = session_factory()
     try:
-        feature_run_id = _resolve_latest_published_run_for_market(db=db, market="US")
+        feature_run_id = _resolve_latest_published_run_for_market(
+            db=db,
+            market="US",
+            ranking_date=ranking_date,
+        )
         feature_run_stats = None
         if feature_run_id is not None:
             feature_run_stats = _enrich_feature_run_with_ibd_metadata(
