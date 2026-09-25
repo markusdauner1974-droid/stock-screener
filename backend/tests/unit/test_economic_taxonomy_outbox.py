@@ -340,6 +340,84 @@ def test_legacy_theme_delivery_materializes_and_retracts_legacy_reader_rows(
     assert fundamental.is_active is False
 
 
+def _legacy_theme_event(service, lineage, revision, theme_id, name, symbols):
+    return service.stage_projection(
+        generation_id=None,
+        source_lineage=lineage,
+        projection_revision=revision,
+        projection_kind="legacy_theme",
+        projection_version=1,
+        target="legacy",
+        payload={
+            "themes": [str(theme_id)] if theme_id else [],
+            "theme_details": (
+                [
+                    {
+                        "economic_theme_id": str(theme_id),
+                        "display_name": name,
+                        "definition": None,
+                        "lifecycle": "established",
+                        "constituents": list(symbols),
+                    }
+                ]
+                if theme_id
+                else []
+            ),
+        },
+        staged_epoch=10,
+        origin_representation="economic",
+        selected_interpretation_version=f"interpretation:{revision}",
+        mapping_version="mapping:1",
+    )
+
+
+def test_legacy_theme_delivery_recomputes_only_affected_themes(db_session):
+    service = EconomicTaxonomyRuntimeService(db_session)
+    memory, power = uuid4(), uuid4()
+    service.apply_projection_event(
+        _legacy_theme_event(service, "post:1", 1, memory, "AI Memory", ["MU"]),
+        authority_epoch=10,
+        now=NOW,
+    )
+    memory_clusters = db_session.scalars(
+        select(ThemeCluster).where(
+            ThemeCluster.canonical_key == f"economic_{memory.hex}"
+        )
+    ).all()
+    assert len(memory_clusters) == 2
+    for cluster in memory_clusters:
+        cluster.display_name = "untouched sentinel"
+    db_session.flush()
+
+    service.apply_projection_event(
+        _legacy_theme_event(service, "post:2", 1, power, "AI Power", ["VST"]),
+        authority_epoch=10,
+        now=NOW,
+    )
+
+    assert {cluster.display_name for cluster in memory_clusters} == {
+        "untouched sentinel"
+    }
+    power_clusters = db_session.scalars(
+        select(ThemeCluster).where(
+            ThemeCluster.canonical_key == f"economic_{power.hex}"
+        )
+    ).all()
+    assert {(row.pipeline, row.display_name) for row in power_clusters} == {
+        ("technical", "AI Power"),
+        ("fundamental", "AI Power"),
+    }
+
+    service.apply_projection_event(
+        _legacy_theme_event(service, "post:1", 2, None, None, []),
+        authority_epoch=10,
+        now=NOW,
+    )
+
+    assert {cluster.is_active for cluster in memory_clusters} == {False}
+    assert {cluster.is_active for cluster in power_clusters} == {True}
+
+
 def test_delivery_eligibility_comes_from_publication_history(db_session):
     taxonomy, published_generation = _generation(
         db_session, events=("prepared", "published", "superseded")

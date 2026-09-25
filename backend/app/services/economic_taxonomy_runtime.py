@@ -472,6 +472,24 @@ class EconomicTaxonomyRuntimeService:
     ) -> bool:
         """Apply a projection and all target-specific side effects atomically."""
 
+        is_legacy_theme = (
+            event.target_representation == "legacy"
+            and event.projection_kind == "legacy_theme"
+        )
+        previous_theme_ids: set[str] = set()
+        if is_legacy_theme:
+            # Read the column, not the entity: the checkpoint upsert below is a
+            # Core statement and would leave a loaded entity stale.
+            previous_payload = self.session.scalar(
+                select(ProjectionCheckpoint.payload).where(
+                    ProjectionCheckpoint.target_representation == "legacy",
+                    ProjectionCheckpoint.source_lineage == event.source_lineage,
+                    ProjectionCheckpoint.projection_kind == "legacy_theme",
+                )
+            )
+            previous_theme_ids = {
+                str(value) for value in (previous_payload or {}).get("themes", ())
+            }
         applied = self.apply_replacement(
             target=event.target_representation,
             source_lineage=event.source_lineage,
@@ -481,12 +499,13 @@ class EconomicTaxonomyRuntimeService:
             origin_representation=event.origin_representation,
             projection_event_id=event.id,
         )
-        if (
-            applied
-            and event.target_representation == "legacy"
-            and event.projection_kind == "legacy_theme"
-        ):
-            self._apply_legacy_theme_projection(now=now)
+        if applied and is_legacy_theme:
+            # Only themes named by the old or new payload can change.
+            self._apply_legacy_theme_projection(
+                now=now,
+                theme_ids=previous_theme_ids
+                | {str(value) for value in (event.payload or {}).get("themes", ())},
+            )
         if (
             applied
             and event.target_representation == "legacy"
@@ -526,11 +545,17 @@ class EconomicTaxonomyRuntimeService:
         except (TypeError, ValueError, AttributeError):
             return f"economic_{_payload_hash(str(theme_id))}"
 
-    def _apply_legacy_theme_projection(self, *, now: datetime) -> None:
-        """Materialize ordered checkpoints into the legacy reader tables."""
+    def _apply_legacy_theme_projection(
+        self, *, now: datetime, theme_ids: set[str] | None = None
+    ) -> None:
+        """Materialize ordered checkpoints into the legacy reader tables.
 
-        checkpoints = self.session.scalars(
-            select(ProjectionCheckpoint)
+        With ``theme_ids`` only those themes' mirror rows are recomputed;
+        without it every mirror row is rebuilt.
+        """
+
+        checkpoint_payloads = self.session.scalars(
+            select(ProjectionCheckpoint.payload)
             .where(
                 ProjectionCheckpoint.target_representation == "legacy",
                 ProjectionCheckpoint.projection_kind == "legacy_theme",
@@ -543,9 +568,11 @@ class EconomicTaxonomyRuntimeService:
         desired_theme_ids: set[str] = set()
         details_by_theme: dict[str, dict[str, Any]] = {}
         symbols_by_theme: dict[str, set[str]] = {}
-        for checkpoint in checkpoints:
-            payload = checkpoint.payload or {}
+        for payload in checkpoint_payloads:
+            payload = payload or {}
             lineage_theme_ids = {str(value) for value in payload.get("themes", ())}
+            if theme_ids is not None:
+                lineage_theme_ids &= theme_ids
             desired_theme_ids.update(lineage_theme_ids)
             for detail in payload.get("theme_details", ()):
                 theme_id = str(detail.get("economic_theme_id") or "")
@@ -658,14 +685,22 @@ class EconomicTaxonomyRuntimeService:
                     ):
                         constituent.is_active = False
 
-            for cluster in self.session.scalars(
-                select(ThemeCluster).where(
-                    ThemeCluster.pipeline == pipeline,
-                    ThemeCluster.discovery_source.in_(
-                        ("taxonomy_mirror", "economic_mirror")
-                    ),
+            retracted = select(ThemeCluster).where(
+                ThemeCluster.pipeline == pipeline,
+                ThemeCluster.discovery_source.in_(
+                    ("taxonomy_mirror", "economic_mirror")
+                ),
+            )
+            if theme_ids is not None:
+                retracted = retracted.where(
+                    ThemeCluster.canonical_key.in_(
+                        {
+                            self._legacy_theme_key(theme_id)
+                            for theme_id in theme_ids - desired_theme_ids
+                        }
+                    )
                 )
-            ):
+            for cluster in self.session.scalars(retracted):
                 if cluster.canonical_key in desired_keys:
                     continue
                 if cluster.discovery_source == "taxonomy_mirror":
