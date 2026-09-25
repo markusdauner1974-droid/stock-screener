@@ -362,10 +362,19 @@ drain, rollback state must become `ready`.
 
 The existing Celery beat entry runs automatic routine publication every minute.
 It coalesces accepted routine revisions to no more than one generation per five
-minutes, reuses the deployed reader capability, and leaves review-required
-structural revisions held. Monitor
-`refresh_economic_taxonomy_generation`; `backlog_preserved: true` is retryable,
-not data loss.
+minutes and reuses the deployed reader capability. Structural revisions
+(dimension proposals, ambiguous identities, structural operations, migration
+and rollback-recovery revisions, and any unrecognized kind) stop automatic
+publication with `status: held` until an operator publishes a reviewed
+generation. Per-request outcomes (`provider_invalid_schema`,
+`provider_terminal_failure`, `provider_outcome_uncertain`,
+`claim_review_required`) do not stop publication: the failed request
+contributes no interpretation, its lineage keeps its previous completed
+attempt, and the result lists the revisions in `attention_revision_ids` with a
+warning log. Find the affected work with
+`SELECT id, source_lineage_id, completion_code FROM economic_processing_requests WHERE status = 'terminal_failure'`.
+Monitor `refresh_economic_taxonomy_generation`; `backlog_preserved: true` is
+retryable, not data loss.
 
 ## 8. Rollback and rollback_recovery
 

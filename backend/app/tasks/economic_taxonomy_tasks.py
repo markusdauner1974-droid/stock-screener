@@ -73,7 +73,19 @@ POLICY_BUNDLE_VERSION = "economic-taxonomy-v1"
 MAX_BATCH_SIZE = 500
 PUBLICATION_COALESCE_WINDOW = timedelta(minutes=5)
 
-_ROUTINE_REVISION_KINDS = frozenset(
+# Per-request provider and claim-review outcomes terminalize one processing
+# request. That request contributes no interpretation (the lineage keeps its
+# previous completed attempt), so routine publication proceeds; the revisions
+# are reported as attention items instead of pausing every refresh.
+_ATTENTION_REVISION_KINDS = frozenset(
+    {
+        "claim_review_required",
+        "provider_invalid_schema",
+        "provider_outcome_uncertain",
+        "provider_terminal_failure",
+    }
+)
+_ROUTINE_REVISION_KINDS = _ATTENTION_REVISION_KINDS | frozenset(
     {
         "administrator_decision",
         "association_revision",
@@ -154,6 +166,8 @@ class EconomicExtractionReviewPipeline:
 class DirtyRevisionClassification:
     routine_revision_ids: tuple[str, ...]
     held_revision_ids: tuple[str, ...]
+    # Routine revisions that still need operator attention.
+    attention_revision_ids: tuple[str, ...] = ()
 
 
 def _utc(value: datetime) -> datetime:
@@ -195,10 +209,13 @@ def _classify_revision_pairs(
 ) -> DirtyRevisionClassification:
     routine: list[str] = []
     held: list[str] = []
+    attention: list[str] = []
     for revision_id, revision_kind in revisions:
         target = routine if revision_kind in _ROUTINE_REVISION_KINDS else held
         target.append(revision_id)
-    return DirtyRevisionClassification(tuple(routine), tuple(held))
+        if revision_kind in _ATTENTION_REVISION_KINDS:
+            attention.append(revision_id)
+    return DirtyRevisionClassification(tuple(routine), tuple(held), tuple(attention))
 
 
 class EconomicTaxonomyTaskService:
@@ -586,11 +603,19 @@ class EconomicTaxonomyTaskService:
                 "prepared_generation_id": str(prepared.id),
                 "backlog_preserved": True,
             }
+        if captured.attention_revision_ids:
+            logger.warning(
+                "Economic Taxonomy published around %d terminal processing "
+                "request(s) that need operator attention: %s",
+                len(captured.attention_revision_ids),
+                ", ".join(captured.attention_revision_ids),
+            )
         return {
             "status": "published",
             "generation_id": str(published.id),
             "authority_epoch": published.authority_epoch,
             "routine_revision_ids": list(captured.routine_revision_ids),
+            "attention_revision_ids": list(captured.attention_revision_ids),
         }
 
     def apply_lifecycle(

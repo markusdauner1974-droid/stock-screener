@@ -591,6 +591,68 @@ def test_economic_refresh_publishes_once_then_coalesces(db_session):
     assert coalesced["dirty_revision_count"] == 1
 
 
+def test_provider_outcomes_are_routine_attention_items():
+    rows = [
+        SimpleNamespace(id=uuid4(), revision_kind=kind)
+        for kind in (
+            "provider_invalid_schema",
+            "provider_terminal_failure",
+            "provider_outcome_uncertain",
+            "claim_review_required",
+            "ambiguous_identity",
+            "unrecognized_kind",
+        )
+    ]
+
+    classified = classify_dirty_revisions(rows)
+
+    per_request = tuple(str(row.id) for row in rows[:4])
+    assert classified.routine_revision_ids == per_request
+    assert classified.attention_revision_ids == per_request
+    assert classified.held_revision_ids == (str(rows[4].id), str(rows[5].id))
+
+
+def test_refresh_publishes_around_terminal_provider_failure(db_session):
+    _coordinator, generation_id, _capability_id = _published_generation(
+        db_session, with_projection=False
+    )
+    published_at = db_session.scalar(
+        select(ServingGenerationEvent.created_at).where(
+            ServingGenerationEvent.serving_generation_id == generation_id,
+            ServingGenerationEvent.event_type == "published",
+        )
+    )
+    clock = _Clock(published_at + timedelta(minutes=6))
+    factory = lambda: db_session.__class__(bind=db_session.get_bind())
+    coordinator = EconomicTaxonomyPublicationCoordinator(factory, clock=clock)
+    authority = db_session.get(TaxonomyAuthority, 1)
+    repository = EconomicTaxonomyPublicationRepository(db_session)
+    failure = repository.append_source_revision(
+        producer_kind="economic_taxonomy",
+        logical_source_key="processing_request:failed",
+        revision_kind="provider_terminal_failure",
+        revision_number=1,
+        content_hash="failed",
+        authority_epoch=authority.authority_epoch,
+    )
+    repository.append_source_revision(
+        producer_kind="economic_taxonomy",
+        logical_source_key="metrics:refresh",
+        revision_kind="metrics_refresh",
+        revision_number=1,
+        content_hash="metrics",
+        authority_epoch=authority.authority_epoch,
+    )
+    db_session.commit()
+
+    result = EconomicTaxonomyTaskService(
+        SessionLocal, coordinator=coordinator, clock=clock
+    ).refresh()
+
+    assert result["status"] == "published"
+    assert result["attention_revision_ids"] == [str(failure.id)]
+
+
 def test_refresh_holds_review_required_structural_change(db_session):
     coordinator, _generation_id, _capability_id = _published_generation(
         db_session, with_projection=False
