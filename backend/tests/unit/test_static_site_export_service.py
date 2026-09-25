@@ -3544,7 +3544,7 @@ def test_export_chart_bundle_writes_top_ranked_payloads_with_sidebar_metadata(
     )
 
     def make_price_frame(closes: list[float]) -> pd.DataFrame:
-        dates = pd.date_range("2026-03-28", periods=len(closes), freq="D")
+        dates = _recent_chart_dates(len(closes))
         return pd.DataFrame(
             {
                 "Open": closes,
@@ -3671,7 +3671,7 @@ def test_export_chart_bundle_backfills_past_skipped_symbols_to_fill_limit(
     )
 
     def make_price_frame(close: float) -> pd.DataFrame:
-        dates = pd.date_range("2026-03-28", periods=2, freq="D")
+        dates = _recent_chart_dates(2)
         return pd.DataFrame(
             {
                 "Open": [close - 1, close],
@@ -3796,8 +3796,14 @@ def test_export_chart_bundle_uses_sorted_scan_order_for_primary_chart_selection(
     assert [entry["rank"] for entry in index_payload["symbols"]] == [1]
 
 
+def _recent_chart_dates(periods: int) -> pd.DatetimeIndex:
+    # The chart exporter keeps bars within STATIC_CHART_PERIOD_DAYS of the
+    # wall clock, so fixed fixture dates silently age out of the window.
+    return pd.date_range(end=pd.Timestamp.now().normalize(), periods=periods, freq="D")
+
+
 def _make_chart_price_frame(close: float = 100.0) -> pd.DataFrame:
-    dates = pd.date_range("2026-03-28", periods=2, freq="D")
+    dates = _recent_chart_dates(2)
     return pd.DataFrame(
         {
             "Open": [close - 1, close],
