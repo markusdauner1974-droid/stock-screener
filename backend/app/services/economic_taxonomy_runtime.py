@@ -28,6 +28,7 @@ from app.models.economic_taxonomy_runtime import (
 )
 from app.models.theme import ThemeCluster, ThemeConstituent
 from app.services.economic_taxonomy_fence import producer_write
+from app.utils.datetime_utils import as_aware_utc as _utc
 from app.utils.file_hashing import canonical_json_sha256 as _payload_hash
 
 _LEGACY_MIRROR_PIPELINES = ("technical", "fundamental")
@@ -69,12 +70,6 @@ class ProjectionDeliveryResult:
     delivery_attempt_id: UUID
     outcome: str
     applied: bool
-
-
-def _utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
 
 
 class _LegacyWrite:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select
@@ -28,6 +28,7 @@ from app.services.economic_taxonomy_operations import (
 from app.services.economic_theme_observation_service import (
     EconomicThemeObservationService,
 )
+from app.utils.datetime_utils import as_aware_utc as _utc
 
 LIFECYCLE_POLICY_VERSION = "economic-theme-lifecycle-v1"
 
@@ -82,12 +83,6 @@ class LifecycleSnapshotResult:
     taxonomy_version_id: UUID
     transition_count: int
     evaluations: tuple[LifecycleEvaluation, ...]
-
-
-def _utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
 
 
 class EconomicThemeLifecycleService:
