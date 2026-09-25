@@ -315,6 +315,39 @@ def test_daily_snapshot_migration_emits_exact_concurrent_drops():
     ]
 
 
+def test_daily_snapshot_migration_extends_the_single_head():
+    """The migration must hang off the current head of the whole tree.
+
+    A branch that adds a revision while ``main`` also adds one ends up with two
+    heads unless the new revision is rewritten onto the new head — and a
+    multi-head tree makes ``alembic upgrade head`` fail, which surfaces as an
+    unhealthy backend container rather than a migration error.
+    """
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    backend_root = Path(__file__).parents[2]
+    config = Config(str(backend_root / "alembic.ini"))
+    config.set_main_option("script_location", str(backend_root / "alembic"))
+
+    script = ScriptDirectory.from_config(config)
+
+    migration = _load_migration(_DAILY_SNAPSHOT_MIGRATION)
+    heads = script.get_heads()
+
+    assert len(heads) == 1, (
+        f"the migration tree has {len(heads)} heads ({sorted(heads)}); "
+        f"alembic upgrade head cannot resolve this"
+    )
+    # The revision must be reachable from that head, not orphaned beside it.
+    reachable = {
+        rev.revision for rev in script.walk_revisions(base="base", head="heads")
+    }
+    assert migration.revision in reachable, (
+        f"{migration.revision} is not on the path to the single head {heads[0]}"
+    )
+
+
 def test_daily_snapshot_migration_recovers_invalid_indexes():
     """CONCURRENTLY is not atomic: an interrupted build leaves an invalid index
     under the target name, which ``IF NOT EXISTS`` would then treat as done."""
