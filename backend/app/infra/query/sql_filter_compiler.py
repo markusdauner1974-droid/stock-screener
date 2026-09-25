@@ -131,11 +131,16 @@ def _range_predicate(
     else:
         raise _unsupported(resolver, "range", condition.field)
 
+    # No explicit IS NOT NULL: a NULL comparison is already UNKNOWN, and these
+    # predicates only ever combine through AND/OR into a WHERE clause (there is
+    # no NOT), where UNKNOWN rejects the row exactly as FALSE would. For a JSON
+    # field the guard was not free either: PostgreSQL re-parses details_json
+    # for every occurrence of the extraction, so it doubled the per-row cost.
     predicates = []
     if minimum is not None:
-        predicates.extend((value.isnot(None), value >= minimum))
+        predicates.append(value >= minimum)
     if maximum is not None:
-        predicates.extend((value.isnot(None), value <= maximum))
+        predicates.append(value <= maximum)
     return and_(*predicates) if predicates else true()
 
 
