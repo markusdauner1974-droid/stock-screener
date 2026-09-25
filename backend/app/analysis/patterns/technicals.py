@@ -91,13 +91,12 @@ def has_incomplete_last_period(
         period = last_ts.to_period(rule)
         period_start = period.start_time.normalize()
         period_end = period.end_time.normalize()
-        schedule = _get_exchange_calendar(exchange).schedule(
-            start_date=period_start.date().isoformat(),
-            end_date=period_end.date().isoformat(),
+        expected_last_session = _last_scheduled_session(
+            str(exchange),
+            period_start.date().isoformat(),
+            period_end.date().isoformat(),
         )
-        if not schedule.empty:
-            scheduled_dates = _to_utc_naive(pd.DatetimeIndex(schedule.index))
-            expected_last_session = scheduled_dates.max().normalize()
+        if expected_last_session is not None:
             return last_ts.normalize() < expected_last_session
 
         # Defensive fallback when schedule is unexpectedly empty.
@@ -107,6 +106,27 @@ def has_incomplete_last_period(
     if period_end.tzinfo is not None:
         period_end = period_end.tz_convert("UTC").tz_localize(None)
     return last_ts.normalize() < period_end.normalize()
+
+
+@lru_cache(maxsize=256)
+def _last_scheduled_session(
+    exchange: str,
+    start_date: str,
+    end_date: str,
+) -> pd.Timestamp | None:
+    """Last scheduled session in ``[start_date, end_date]``, or None if none.
+
+    Every symbol in a scan asks about the same week, and building the exchange
+    schedule costs ~5ms, so the answer is memoized per (exchange, period).
+    """
+    schedule = _get_exchange_calendar(exchange).schedule(
+        start_date=start_date,
+        end_date=end_date,
+    )
+    if schedule.empty:
+        return None
+    scheduled_dates = _to_utc_naive(pd.DatetimeIndex(schedule.index))
+    return scheduled_dates.max().normalize()
 
 
 @lru_cache(maxsize=4)

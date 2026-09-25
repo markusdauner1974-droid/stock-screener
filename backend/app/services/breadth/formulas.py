@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from datetime import date
 from types import MappingProxyType
@@ -70,22 +71,29 @@ def prices_for_feature_window(
 
 
 def _wilder_average(values: pd.Series, period: int) -> pd.Series:
-    result = pd.Series(np.nan, index=values.index, dtype=float)
+    output = np.full(len(values), np.nan, dtype=float)
     if period <= 0 or len(values) < period:
-        return result
+        return pd.Series(output, index=values.index, dtype=float)
 
-    previous = np.nan
-    for position in range(period - 1, len(values)):
-        current = values.iloc[position]
-        if pd.isna(current):
-            previous = np.nan
-        elif pd.isna(previous):
+    # The recursion is sequential, so it stays a loop, but over plain Python
+    # floats: per-element Series.iloc reads and writes cost ~60x more. The
+    # arithmetic is the same IEEE double math, so results are bit-identical.
+    raw = values.to_numpy(dtype=float, na_value=np.nan).tolist()
+    previous = math.nan
+    for position in range(period - 1, len(raw)):
+        current = raw[position]
+        if math.isnan(current):
+            previous = math.nan
+        elif math.isnan(previous):
+            # Seeding stays a pandas mean so its summation, and therefore the
+            # exact float result, is unchanged. It only runs at the start and
+            # after a NaN gap.
             restart = values.iloc[position - period + 1 : position + 1]
-            previous = float(restart.mean()) if not restart.isna().any() else np.nan
+            previous = float(restart.mean()) if not restart.isna().any() else math.nan
         else:
-            previous = ((previous * (period - 1)) + float(current)) / period
-        result.iloc[position] = previous
-    return result
+            previous = ((previous * (period - 1)) + current) / period
+        output[position] = previous
+    return pd.Series(output, index=values.index, dtype=float)
 
 
 def prepare_feature_frame(
