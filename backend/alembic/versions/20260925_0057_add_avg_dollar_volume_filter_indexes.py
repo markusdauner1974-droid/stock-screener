@@ -26,8 +26,20 @@ autocommit block so a large run does not block writes while they are created.
 
 Because the build runs outside a transaction, a failure partway through leaves
 an *invalid* index behind under the target name. ``IF NOT EXISTS`` would then
-treat the name as taken, so ``_ensure_valid`` drops and rebuilds any invalid
-same-named index instead of silently finishing without a usable one.
+treat the name as taken, so ``_rebuild_invalid_indexes`` drops any invalid
+same-named index before the creates instead of silently finishing without a
+usable one.
+
+Deploy note: ``CONCURRENTLY`` avoids blocking writes but still reads every row's
+``details_json`` — every run in ``stock_feature_daily``, not just the newest. On
+a large table the first container start after this revision can spend a while
+here, and a compose healthcheck tighter than that build would fail the rollout.
+Build the two indexes ahead of the deploy if that becomes the case:
+
+    CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_sfd_run_avg_dollar_volume
+        ON stock_feature_daily (run_id, (CAST(details_json ->> 'avg_dollar_volume' AS FLOAT)));
+    CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_sfd_run_ibd_group_rank
+        ON stock_feature_daily (run_id, (CAST(details_json ->> 'ibd_group_rank' AS FLOAT)));
 """
 
 from __future__ import annotations
@@ -35,7 +47,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = "20260925_0046"
+revision = "20260925_0057"
 down_revision = "20260925_0056"
 branch_labels = None
 depends_on = None
@@ -81,6 +93,10 @@ def _rebuild_invalid_indexes() -> None:
     atomic: a failure leaves an invalid index under the target name. The
     following ``IF NOT EXISTS`` would consider the name taken and skip the
     build, so the snapshot would keep full-scanning with no error anywhere.
+
+    Deliberately local to this revision. ``20260821_0028`` shares the lifecycle
+    and has the same exposure, but it has already run in the field; rewriting a
+    released migration is a different change from guarding a new one.
     """
     bind = op.get_bind()
     if op.get_context().as_sql:

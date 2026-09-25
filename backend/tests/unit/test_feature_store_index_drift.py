@@ -1,15 +1,20 @@
 """Drift guard for the feature-store preset-filter expression indexes.
 
-Migration ``20260617_0021`` creates Postgres expression indexes whose SQL must
-stay byte-identical (minus the table qualifier) to what the query builder
-compiles for the same field — otherwise the planner silently declines the
-index and the filter falls back to a full scan with no error. This test pins
-that linkage so a change to ``json_number`` / ``_JSON_FIELD_MAP`` can't rot the
-indexes unnoticed.
+Migrations ``20260617_0021`` and ``20260925_0057`` create Postgres expression
+indexes whose SQL must stay byte-identical (minus the table qualifier) to what
+the query builder compiles for the same field — otherwise the planner silently
+declines the index and the filter falls back to a full scan with no error. This
+test pins that linkage so a change to ``json_number`` / ``_JSON_FIELD_MAP``
+can't rot the indexes unnoticed.
 
-It also enforces that every indexed field is a *flat* top-level details_json
-key, since the migration's ``_index_expr`` only emits the single-segment
-``details_json ->> 'field'`` form (a nested path needs a different expression).
+Two invariants are enforced for the indexed names:
+
+* the expression is flat — ``_index_expr`` only emits the single-segment
+  ``details_json ->> 'field'`` form, so a nested path would index the wrong key.
+* the name is *filterable* — a name that resolves only as a JSON path and not as
+  a filter/sort field would be indexed for nothing, and indexing it under the
+  storage key instead of the public filter name would add a second public name
+  for the same data.
 """
 
 from __future__ import annotations
@@ -45,7 +50,7 @@ _DAILY_SNAPSHOT_MIGRATION = (
     Path(__file__).parents[2]
     / "alembic"
     / "versions"
-    / "20260925_0046_add_avg_dollar_volume_filter_indexes.py"
+    / "20260925_0057_add_avg_dollar_volume_filter_indexes.py"
 )
 _CORRECTION_SURVIVORS_MIGRATION = (
     Path(__file__).parents[2]
@@ -213,27 +218,86 @@ def test_correction_survivor_index_ddl_runs_inside_autocommit_block():
     assert all("CONCURRENTLY" in statement for statement in events[1:-1])
 
 
-# ── Daily Snapshot read-path indexes (20260925_0046) ──────────────────────
+def _mock_ops(bind, emitted):
+    """An ``Operations`` backed by ``bind`` instead of a connection.
+
+    ``_rebuild_invalid_indexes`` needs two things PostgreSQL provides and SQLite
+    does not: a catalog to read and an autocommit block to run the DROP in.
+    ``MigrationContext`` supplies the autocommit block without opening a
+    connection, and the two calls that would need one — the catalog lookup and
+    the DROP — are answered from ``bind`` and ``emitted``.
+    """
+    import contextlib
+
+    context = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": False},
+    )
+    context.autocommit_block = contextlib.nullcontext
+    context.as_sql = False
+    operations = Operations(context)
+    # Operations.get_bind() delegates to the context, which has no connection
+    # here; the migration reads the catalog through it, so answer directly.
+    operations.get_bind = lambda: bind
+    operations.execute = lambda sql, *_a, **_k: emitted.append(sql)
+    return operations
 
 
-def test_daily_snapshot_fields_resolve_under_their_indexed_name():
-    """The field name in ``_FIELDS`` must be resolvable by that same name.
+class _RecordingBind:
+    """Stand-in for the migration's bind: records the lookup, answers with a
+    fixed catalog result."""
 
-    ``test_indexed_fields_are_flat_top_level_keys`` looks each indexed field up
-    in ``_FIELD_BINDINGS``. ``avg_dollar_volume`` used to resolve only as
-    ``volume``, so indexing it under its own key would have failed that lookup.
-    Pin both names to the same JSON path.
+    def __init__(self, invalid, emitted):
+        self._invalid = invalid
+        self.statements: list[str] = []
+        self._emitted = emitted
+
+    def execute(self, clause, _params=None):
+        outer = self
+        self.statements.append(str(clause))
+
+        class _Result:
+            def scalar(self):
+                return outer._invalid
+
+        return _Result()
+
+
+# ── Daily Snapshot read-path indexes (20260925_0057) ──────────────────────
+
+
+def test_daily_snapshot_indexed_keys_are_reachable_as_filter_fields():
+    """Each key in ``_FIELDS`` must be reachable by some filter field name.
+
+    ``_FIELDS`` holds details_json *keys*: ``_index_expr`` builds the SQL from
+    the entry, so the entry has to be the key, not the public name. That does
+    not make the key a filter field of its own — ``avg_dollar_volume`` is reached
+    through the public name ``volume``. Two ways to get this wrong:
+
+    * the key no filter resolves to: the index is built and never used.
+    * indexing the public name instead of the key (``->> 'volume'``): the index
+      covers a JSON key that does not exist, so the planner ignores it.
+
+    Minting a second binding for the key is the third: it exposes the same data
+    under two public filter names, which is why ``avg_dollar_volume`` is
+    deliberately absent from ``_FIELD_BINDINGS``.
     """
     from app.infra.query.feature_store_query import _FIELD_BINDINGS
 
     migration = _load_migration(_DAILY_SNAPSHOT_MIGRATION)
+    reachable = {
+        binding.json_path for binding in _FIELD_BINDINGS.values() if binding.json_path
+    }
     for field in migration._FIELDS:
-        assert field in _FIELD_BINDINGS, (
-            f"{field} is indexed by {_DAILY_SNAPSHOT_MIGRATION.stem} but has no "
-            f"binding under that name; the drift guard cannot resolve it"
+        assert (field,) in reachable, (
+            f"{field} is indexed by {_DAILY_SNAPSHOT_MIGRATION.stem} but no filter "
+            f"field resolves to that JSON key, so the index is built and unused"
         )
 
-    assert _FIELD_BINDINGS["avg_dollar_volume"].json_path == ("avg_dollar_volume",)
+    assert "avg_dollar_volume" not in _FIELD_BINDINGS, (
+        "the storage key must not also be a public filter name; "
+        "the field is exposed as 'volume'"
+    )
     assert _FIELD_BINDINGS["volume"].json_path == ("avg_dollar_volume",)
 
 
@@ -367,50 +431,9 @@ def test_daily_snapshot_migration_recovers_invalid_indexes():
     # A catalog reporting an invalid index must trigger a DROP of that index's
     # schema-qualified name — resolving by bare name could drop an unrelated
     # same-named index that lives in another schema.
-    class _FakeBind:
-        def __init__(self, invalid):
-            self._invalid = invalid
-            self.queries: list[str] = []
-
-        def execute(self, clause, _params=None):
-            outer = self
-            self.queries.append(str(clause))
-
-            class _R:
-                def scalar(self):
-                    return outer._invalid
-
-            return _R()
-
-    class _Ctx:
-        as_sql = False
-
-        def __init__(self, bind):
-            self._bind = bind
-
-        def autocommit_block(self):
-            import contextlib
-
-            return contextlib.nullcontext()
-
-        def get_bind(self):
-            return self._bind
-
     emitted: list[str] = []
-
-    class _Op:
-        def get_context(self):
-            return ctx
-
-        def get_bind(self):
-            return ctx.get_bind()
-
-        def execute(self, sql, *a, **k):
-            emitted.append(sql)
-
-    bind = _FakeBind("public.ix_sfd_run_avg_dollar_volume")
-    ctx = _Ctx(bind)
-    migration.op = _Op()
+    bind = _RecordingBind("public.ix_sfd_run_avg_dollar_volume", emitted)
+    migration.op = _mock_ops(bind, emitted)
     migration._rebuild_invalid_indexes()
 
     assert emitted == [
@@ -421,16 +444,15 @@ def test_daily_snapshot_migration_recovers_invalid_indexes():
     # The lookup must resolve the index through the target table, not by bare
     # name: to_regclass(name) can pick up an unrelated same-named index from
     # another schema and drop that one instead.
-    assert bind.queries, "no lookup query was executed"
-    for query in bind.queries:
-        assert "pg_index" in query and "indrelid" in query, query
-        assert "to_regclass('stock_feature_daily')" in query, query
-        assert "indexrelid = to_regclass(:index_name)" not in query, query
+    assert bind.statements, "no lookup query was executed"
+    for statement in bind.statements:
+        assert "pg_index" in statement and "indrelid" in statement, statement
+        assert "to_regclass('stock_feature_daily')" in statement, statement
+        assert "indexrelid = to_regclass(:index_name)" not in statement, statement
 
     # A valid catalog (no invalid index) must emit nothing.
     emitted.clear()
-    ctx = _Ctx(_FakeBind(None))
-    migration.op = _Op()
+    migration.op = _mock_ops(_RecordingBind(None, emitted), emitted)
     migration._rebuild_invalid_indexes()
     assert emitted == []
 
@@ -453,9 +475,10 @@ def test_default_scan_filter_field_is_indexed():
     indexed_paths = set()
     for fields in migration_fields:
         for field in fields:
+            # Each entry is the details_json key the migration indexes; a field
+            # may also be a public name with its own binding.
             binding = _FIELD_BINDINGS.get(field)
-            if binding is not None:
-                indexed_paths.add(binding.json_path)
+            indexed_paths.add(binding.json_path if binding is not None else (field,))
 
     for market in ("US", "DE"):
         minimum_volume = resolve_default_scan_filters(market).get("minVolume")

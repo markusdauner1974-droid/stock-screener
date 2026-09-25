@@ -58,10 +58,6 @@ _FIELD_BINDINGS = column_bindings({
     "price": ("current_price",),
     "current_price": ("current_price",),
     "volume": ("avg_dollar_volume",),
-    # Alias of `volume` so the field name in details_json itself resolves.
-    # The preset-index migration indexes this JSON path, and its drift
-    # guard looks the field up by that same name.
-    "avg_dollar_volume": ("avg_dollar_volume",),
     "market_cap": ("market_cap",),
     # Technicals
     "stage": ("stage",),
