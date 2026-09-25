@@ -11,7 +11,10 @@ from app.database import engine
 from app.infra.db.repositories.economic_taxonomy_publication_repo import (
     EconomicTaxonomyPublicationRepository,
 )
-from app.models.economic_taxonomy_runtime import TaxonomyAuthority
+from app.models.economic_taxonomy_runtime import (
+    GenerationInputManifest,
+    TaxonomyAuthority,
+)
 from app.services.economic_taxonomy_fence import (
     StaleAuthorityEpoch,
     exclusive_publication,
@@ -149,7 +152,7 @@ def test_manifest_cutoff_includes_late_lower_id_and_ignores_later_ordinary_work(
         check = factory()
         try:
             repo = EconomicTaxonomyPublicationRepository(check)
-            frozen = repo.get_manifest(manifest_id)
+            frozen = check.get(GenerationInputManifest, manifest_id)
             assert len(frozen.committed_revision_tuples) == 2
             assert repo.validate_manifest(frozen).valid is True
             repo.append_semantic_invalidation(reason="reviewed split", actor="operator:alice")

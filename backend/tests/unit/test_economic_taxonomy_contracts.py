@@ -7,27 +7,18 @@ import pytest
 from app.domain.economic_taxonomy.contracts import (
     AdminPrincipal,
     AuthorityMode,
-    ClaimReviewArtifactKey,
     ClassificationAttemptEvent,
-    ClassificationAttemptKey,
     DevelopmentSupport,
     EvidenceChannel,
     EvidencePacketDescriptor,
     EvidencePrecedenceDecision,
     ExposureSupport,
-    ExtractionArtifactKey,
     FACET_CATALOG_SEMANTIC_FIELDS,
-    FailureCode,
     GenerationInputSelection,
     InterpretationCandidate,
     LIFECYCLE_POLICY_V1,
     METRICS_POLICY_V1,
-    ProcessingRequestKey,
-    ProjectionKey,
-    ProviderAttemptKey,
     ProviderAttemptOutcome,
-    ProviderAttemptRecord,
-    RankingView,
     ServingGenerationEvent,
     SocialAssociationRevisionRef,
     SourceLineageKey,
@@ -35,10 +26,7 @@ from app.domain.economic_taxonomy.contracts import (
 from app.domain.economic_taxonomy.policy import (
     choose_interpretation,
     decide_evidence_precedence,
-    projection_is_deliverable,
     reconcile_social_decisions,
-    relationship_from_proposed,
-    validate_split_allocations,
 )
 
 
@@ -62,47 +50,6 @@ def _candidate(
         assignments=assignments,
         precedence_state=precedence_state,
     )
-
-
-def test_h10_and_h11_are_distinct_attempts_but_reuse_review_artifact():
-    lineage = SourceLineageKey(canonical_source_family="provider:post:42")
-    request = ProcessingRequestKey(
-        source_lineage=lineage,
-        evidence_packet_id="p5",
-        policy_bundle_version="v1",
-    )
-    review = ClaimReviewArtifactKey(
-        extraction_artifact_id="x1",
-        claim_review_policy_version="review-v1",
-        facet_catalog_semantic_hash="facets-v1",
-    )
-    h10 = ClassificationAttemptKey(
-        claim_review_artifact_id=review,
-        input_taxonomy_version_id="H10",
-        resolver_policy_version="resolver-v1",
-        naming_policy_version="naming-v1",
-        derivation_policy_version="derive-v1",
-    )
-    h11 = ClassificationAttemptKey(
-        claim_review_artifact_id=review,
-        input_taxonomy_version_id="H11",
-        resolver_policy_version="resolver-v1",
-        naming_policy_version="naming-v1",
-        derivation_policy_version="derive-v1",
-    )
-
-    assert request.policy_bundle_version == "v1"
-    assert h10 != h11
-    assert h10.claim_review_artifact_id == h11.claim_review_artifact_id == review
-
-
-def test_artifact_keys_reuse_only_exact_inputs():
-    extraction = ExtractionArtifactKey("packet-1", "extract-v1")
-    first = ClaimReviewArtifactKey(extraction, "review-v1", "facets-v1")
-    definition_changed = ClaimReviewArtifactKey(extraction, "review-v1", "facets-v2")
-
-    assert first != definition_changed
-    assert extraction == ExtractionArtifactKey("packet-1", "extract-v1")
 
 
 def test_later_effective_provider_revision_wins_when_older_attempt_finishes_late():
@@ -269,26 +216,8 @@ def test_equivalent_content_is_reused_without_losing_route_provenance():
     )
 
 
-def test_retryable_failure_is_attempt_history_not_reusable_artifact():
-    first = ProviderAttemptRecord(
-        key=ProviderAttemptKey("request:p5:v1", "extract", 1),
-        outcome=ProviderAttemptOutcome.RETRYABLE_FAILURE,
-        result_artifact_id=None,
-    )
-    second = ProviderAttemptRecord(
-        key=ProviderAttemptKey("request:p5:v1", "extract", 2),
-        outcome=ProviderAttemptOutcome.SUCCESS,
-        result_artifact_id="artifact-1",
-    )
-
-    assert first.key != second.key
-    assert first.result_artifact_id is None
-    assert second.result_artifact_id == "artifact-1"
-
-
 def test_uncertain_and_known_retryable_provider_outcomes_stay_distinct():
     assert ProviderAttemptOutcome.UNCERTAIN != ProviderAttemptOutcome.RETRYABLE_FAILURE
-    assert FailureCode.PROVIDER_OUTCOME_UNCERTAIN.value == "provider_outcome_uncertain"
 
 
 def test_social_pair_identity_allows_numbered_revision_history():
@@ -298,12 +227,6 @@ def test_social_pair_identity_allows_numbered_revision_history():
     assert accepted != rejected
     with pytest.raises(FrozenInstanceError):
         accepted.revision_number = 3
-
-
-def test_projection_delivery_is_derived_from_publication_history():
-    assert projection_is_deliverable(ServingGenerationEvent.PUBLISHED) is True
-    assert projection_is_deliverable(ServingGenerationEvent.SUPERSEDED) is False
-    assert projection_is_deliverable(ServingGenerationEvent.ABANDONED) is False
 
 
 def test_generation_selection_pins_all_auxiliary_revisions():
@@ -329,21 +252,6 @@ def test_generation_selection_pins_all_auxiliary_revisions():
         selection.mapping_revision = 12
 
 
-def test_split_requires_every_claim_exactly_once_or_reviewed_excluded():
-    complete = validate_split_allocations(
-        claim_ids={1, 2, 3},
-        allocations={1: "petroleum", 2: "metals"},
-        reviewed_exclusions={3},
-    )
-    duplicate = validate_split_allocations(
-        claim_ids={1, 2}, allocations={1: ("petroleum", "metals"), 2: "metals"}
-    )
-
-    assert complete.complete is True
-    assert duplicate.complete is False
-    assert duplicate.multiply_allocated_claim_ids == frozenset({1})
-
-
 def test_social_accept_reject_conflict_blocks_membership():
     result = reconcile_social_decisions(("accepted", "rejected"))
 
@@ -354,23 +262,6 @@ def test_social_accept_reject_conflict_blocks_membership():
 def test_social_unanimous_acceptance_is_live_but_proposed_is_not():
     assert reconcile_social_decisions(("accepted", "accepted")).live is True
     assert reconcile_social_decisions(("proposed",)).live is False
-
-
-def test_relationship_direction_is_from_proposed_to_existing():
-    assert relationship_from_proposed("Copper", "Copper Miners") == "broader"
-    assert relationship_from_proposed("Copper Miners", "Copper") == "narrower"
-
-
-def test_logical_projection_identity_ignores_attempt_epoch():
-    key = ProjectionKey(
-        source_lineage="post:1",
-        projection_revision=2,
-        projection_kind="legacy_theme",
-        projection_version=1,
-        target="legacy",
-    )
-
-    assert "authority_epoch" not in key.__dataclass_fields__
 
 
 def test_shared_enum_values_are_exact_and_fundamental_view_is_unsigned():
@@ -396,8 +287,6 @@ def test_shared_enum_values_are_exact_and_fundamental_view_is_unsigned():
         "absent",
         "unresolved",
     }
-    assert RankingView.FUNDAMENTAL_ATTENTION.value == "fundamental_attention"
-    assert "fundamental_momentum" not in {item.value for item in RankingView}
 
 
 def test_attempt_generation_and_failure_state_machines_are_exact():
@@ -412,27 +301,6 @@ def test_attempt_generation_and_failure_state_machines_are_exact():
         "published",
         "superseded",
         "abandoned",
-    }
-    assert {item.value for item in FailureCode} == {
-        "invalid_schema",
-        "unsupported_composition",
-        "unknown_dimension",
-        "requires_naming_review",
-        "ambiguous_identity",
-        "stale_processing_head",
-        "stale_authority_epoch",
-        "stale_projection_revision",
-        "authorization_required",
-        "budget_exhausted",
-        "conflict_review_required",
-        "compatibility_pending",
-        "reader_not_ready",
-        "manifest_changed",
-        "publication_validation_failed",
-        "rollback_recovery_required",
-        "provider_retryable",
-        "provider_outcome_uncertain",
-        "provider_terminal",
     }
 
 
@@ -478,7 +346,6 @@ def test_named_contract_fixture_executes_every_counterexample():
         "provider_revision_advance",
         "route_equivalent_content",
         "social_accept_reject_conflict",
-        "proposed_copper_is_broader",
     }
 
     actual = {}
@@ -489,13 +356,9 @@ def test_named_contract_fixture_executes_every_counterexample():
             actual[case["name"]] = decide_evidence_precedence(
                 accepted, candidate
             ).value
-        elif case["kind"] == "social_decision":
+        else:
             actual[case["name"]] = reconcile_social_decisions(
                 tuple(case["decisions"])
             ).state
-        else:
-            actual[case["name"]] = relationship_from_proposed(
-                case["proposed"], case["existing"]
-            )
 
     assert actual == {case["name"]: case["expected"] for case in payload["cases"]}

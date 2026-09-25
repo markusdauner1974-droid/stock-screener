@@ -170,19 +170,6 @@ class EconomicExposureExtractor:
         )
         self.reservations = reservations
 
-    def get_extraction_artifact(
-        self, evidence_packet_id: UUID
-    ) -> ExtractionArtifact | None:
-        with self.session_factory() as session:
-            artifact = session.execute(
-                select(ExtractionArtifact).where(
-                    ExtractionArtifact.evidence_packet_id == evidence_packet_id,
-                    ExtractionArtifact.extraction_policy_version
-                    == self.extraction_policy_version,
-                )
-            ).scalar_one_or_none()
-            return self._detach(session, artifact)
-
     def extract(self, request: ProcessingRequest | UUID) -> ExtractionArtifact:
         request_id = request if isinstance(request, UUID) else request.id
         with self.session_factory() as session:

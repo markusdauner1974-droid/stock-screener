@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-import re
-from collections.abc import Hashable, Iterable, Mapping
+from collections.abc import Iterable
 
 from .contracts import (
     AdminPrincipal,
     EvidencePacketDescriptor,
     EvidencePrecedenceDecision,
     InterpretationCandidate,
-    ServingGenerationEvent,
     SocialDecisionResult,
-    SplitAllocationResult,
 )
 
 
@@ -96,38 +93,6 @@ def choose_interpretation(
     )
 
 
-def projection_is_deliverable(
-    generation_event: ServingGenerationEvent | str | Iterable[ServingGenerationEvent | str],
-) -> bool:
-    """A committed ``published`` event is the durable delivery eligibility."""
-
-    if isinstance(generation_event, (str, ServingGenerationEvent)):
-        values = {str(generation_event)}
-    else:
-        values = {str(event) for event in generation_event}
-    return ServingGenerationEvent.PUBLISHED.value in values
-
-
-def _name_tokens(value: str) -> frozenset[str]:
-    return frozenset(token for token in re.split(r"[^a-z0-9]+", value.lower()) if token)
-
-
-def relationship_from_proposed(proposed: str, existing: str) -> str:
-    """Return direction with the proposed candidate as the first endpoint."""
-
-    proposed_tokens = _name_tokens(proposed)
-    existing_tokens = _name_tokens(existing)
-    if not proposed_tokens or not existing_tokens:
-        return "ambiguous"
-    if proposed_tokens == existing_tokens:
-        return "equivalent"
-    if proposed_tokens < existing_tokens:
-        return "broader"
-    if proposed_tokens > existing_tokens:
-        return "narrower"
-    return "ambiguous"
-
-
 def reconcile_social_decisions(decisions: Iterable[str]) -> SocialDecisionResult:
     normalized = tuple(decision.strip().lower() for decision in decisions)
     states = set(normalized)
@@ -154,36 +119,3 @@ def _allocation_count(destination: object) -> int:
     if isinstance(destination, Iterable):
         return len(tuple(destination))
     return 1
-
-
-def validate_split_allocations(
-    *,
-    claim_ids: Iterable[Hashable],
-    allocations: Mapping[Hashable, object],
-    reviewed_exclusions: Iterable[Hashable] = (),
-) -> SplitAllocationResult:
-    """Require exactly one destination or reviewed exclusion per current claim."""
-
-    claims = frozenset(claim_ids)
-    exclusions = frozenset(reviewed_exclusions)
-    allocation_ids = frozenset(allocations)
-    unexpected = (allocation_ids | exclusions) - claims
-    unallocated: set[Hashable] = set()
-    multiplied: set[Hashable] = set()
-
-    for claim_id in claims:
-        count = _allocation_count(allocations.get(claim_id))
-        if claim_id in exclusions:
-            count += 1
-        if count == 0:
-            unallocated.add(claim_id)
-        elif count > 1:
-            multiplied.add(claim_id)
-
-    return SplitAllocationResult(
-        complete=not unallocated and not multiplied and not unexpected,
-        unallocated_claim_ids=frozenset(unallocated),
-        multiply_allocated_claim_ids=frozenset(multiplied),
-        unexpected_claim_ids=frozenset(unexpected),
-    )
-

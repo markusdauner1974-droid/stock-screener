@@ -159,16 +159,6 @@ class EconomicTaxonomyProcessor:
             return committed
         raise RuntimeError("processing_head_changed_repeatedly")
 
-    def processing_head(self) -> tuple[int, UUID | None]:
-        with self.session_factory() as session:
-            authority = session.get(TaxonomyAuthority, 1)
-            if authority is None:
-                raise RuntimeError("taxonomy_authority_missing")
-            return (
-                authority.processing_head_revision,
-                authority.processing_taxonomy_version_id,
-            )
-
     def _prepare(self, request_id: UUID, lease_token: UUID) -> _PreparedPlan:
         with self.session_factory() as session:
             request = session.get(ProcessingRequest, request_id)

@@ -122,16 +122,6 @@ class EconomicThemeReader:
             self._catalog_cache = self.read_catalog(authority.generation_id)
         return deepcopy(self._catalog_cache)
 
-    def read_current_taxonomy_review(self) -> dict:
-        authority = self.select_authority()
-        if authority.source_name != "economic":
-            raise LegacyThemeAuthority("legacy_theme_authority")
-        if authority.generation_id is None:
-            raise ServingGenerationUnavailable("serving_generation_unavailable")
-        if self._review_cache is None:
-            self._review_cache = self.read_taxonomy_review(authority.generation_id)
-        return deepcopy(self._review_cache)
-
     def read_catalog(self, generation_id: UUID | None = None) -> dict:
         generation = self.resolve_generation(generation_id)
         return self._read_entry(generation, "economic_themes", "catalog")
@@ -162,12 +152,6 @@ class EconomicThemeReader:
             for theme in catalog.get("themes", [])
             if str(theme.get("economic_theme_id")) in destination_ids
         ]
-
-    def read_legacy_theme(self, legacy_theme_cluster_id: int) -> dict | None:
-        themes = self.read_legacy_themes(legacy_theme_cluster_id)
-        if len(themes) > 1:
-            raise LegacyMappingAmbiguous("legacy_theme_split_requires_allocation")
-        return themes[0] if themes else None
 
     def theme_summaries_for_symbol(self, symbol: str, *, limit: int = 8) -> list[dict]:
         normalized = symbol.strip().casefold()
