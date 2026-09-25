@@ -257,22 +257,32 @@ def test_daily_snapshot_migration_emits_exact_concurrent_indexes():
     )
     migration.op = Operations(context)
 
-    calls: list[str] = []
+    # Record recovery and creation in ONE ordered sequence. Asserting that
+    # recovery merely *ran* would still pass if it moved after the creates --
+    # which is exactly the case where ``IF NOT EXISTS`` skips the rebuild.
+    events: list[str] = []
     real_rebuild = migration._rebuild_invalid_indexes
-    migration._rebuild_invalid_indexes = lambda: calls.append("rebuild")
+    real_execute = migration.op.execute
+    migration._rebuild_invalid_indexes = lambda: events.append("rebuild")
 
+    def _record(statement, *args, **kwargs):
+        if str(statement).startswith("CREATE INDEX"):
+            events.append("create")
+        return real_execute(statement, *args, **kwargs)
+
+    migration.op.execute = _record
     migration._create_indexes()
-
-    # A retry after an interrupted CONCURRENTLY build must repair the invalid
-    # index first, otherwise IF NOT EXISTS skips the build entirely.
-    assert calls == ["rebuild"], calls
     migration._rebuild_invalid_indexes = real_rebuild
+    migration.op.execute = real_execute
+
+    assert events == ["rebuild", "create", "create"], events
 
     statements = [
         line
         for line in output.getvalue().splitlines()
         if line.startswith("CREATE INDEX")
     ]
+    assert len(statements) == len(migration._FIELDS)
     assert statements == [
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
         "ix_sfd_run_avg_dollar_volume ON stock_feature_daily (run_id, "
@@ -321,14 +331,17 @@ def test_daily_snapshot_migration_recovers_invalid_indexes():
     migration._rebuild_invalid_indexes()
     assert output.getvalue().strip() == ""
 
-    # A catalog reporting an invalid index must trigger a DROP before the CREATE.
+    # A catalog reporting an invalid index must trigger a DROP of that index's
+    # schema-qualified name — resolving by bare name could drop an unrelated
+    # same-named index that lives in another schema.
     class _FakeBind:
         def __init__(self, invalid):
             self._invalid = invalid
-            self.statements: list[str] = []
+            self.queries: list[str] = []
 
-        def execute(self, _clause, _params=None):
+        def execute(self, clause, _params=None):
             outer = self
+            self.queries.append(str(clause))
 
             class _R:
                 def scalar(self):
@@ -362,18 +375,28 @@ def test_daily_snapshot_migration_recovers_invalid_indexes():
         def execute(self, sql, *a, **k):
             emitted.append(sql)
 
-    ctx = _Ctx(_FakeBind(1))
+    bind = _FakeBind("public.ix_sfd_run_avg_dollar_volume")
+    ctx = _Ctx(bind)
     migration.op = _Op()
     migration._rebuild_invalid_indexes()
 
     assert emitted == [
-        "DROP INDEX CONCURRENTLY IF EXISTS ix_sfd_run_avg_dollar_volume",
-        "DROP INDEX CONCURRENTLY IF EXISTS ix_sfd_run_ibd_group_rank",
+        "DROP INDEX CONCURRENTLY IF EXISTS public.ix_sfd_run_avg_dollar_volume",
+        "DROP INDEX CONCURRENTLY IF EXISTS public.ix_sfd_run_avg_dollar_volume",
     ], emitted
 
-    # A valid catalog must emit nothing.
+    # The lookup must resolve the index through the target table, not by bare
+    # name: to_regclass(name) can pick up an unrelated same-named index from
+    # another schema and drop that one instead.
+    assert bind.queries, "no lookup query was executed"
+    for query in bind.queries:
+        assert "pg_index" in query and "indrelid" in query, query
+        assert "to_regclass('stock_feature_daily')" in query, query
+        assert "indexrelid = to_regclass(:index_name)" not in query, query
+
+    # A valid catalog (no invalid index) must emit nothing.
     emitted.clear()
-    ctx = _Ctx(_FakeBind(0))
+    ctx = _Ctx(_FakeBind(None))
     migration.op = _Op()
     migration._rebuild_invalid_indexes()
     assert emitted == []
@@ -431,6 +454,9 @@ def test_daily_snapshot_service_filters_the_volume_field(monkeypatch):
 
     monkeypatch.setattr(svc, "_query_scan_rows", _fake_query_scan_rows)
     monkeypatch.setattr(svc, "resolve_default_scan_filters", lambda _m: {"minVolume": 5})
+    # Top groups resolve through the process runtime, which unit tests do not
+    # start; the filters under test are built before that point either way.
+    monkeypatch.setattr(svc, "_build_top_groups", lambda *_a, **_k: ([], None))
 
     class _Query:
         def filter(self, *_a):
@@ -456,33 +482,53 @@ def test_daily_snapshot_service_filters_the_volume_field(monkeypatch):
         scan_id="s-1",
         completed_at=datetime(2026, 6, 11, tzinfo=timezone.utc),
         feature_run=None,
+        # The correction-survivor path reads these after both queries ran, so
+        # they must exist for the snapshot to complete instead of raising.
+        feature_run_id=None,
+        metadata_json=None,
     )
 
-    try:
-        svc.build_daily_snapshot_payload(
-            _Db(),
-            market="US",
-            market_display_name="United States",
-            scan=scan,
-            uow=object(),
-            scan_results_use_case=object(),
-        )
-    except Exception:  # noqa: BLE001 - only the captured filters matter here.
-        pass
-
-    filtered = {
-        f.field
-        for spec in captured
-        for group in (
-            getattr(spec, "range_filters", []),
-            getattr(spec, "categorical_filters", []),
-            getattr(spec, "boolean_filters", []),
-        )
-        for f in group
-    }
-
-    assert filtered, "the snapshot issued no filtered query; cannot assert coverage"
-    assert svc.VOLUME_FILTER_FIELD in filtered, (
-        f"build_daily_snapshot_payload did not constrain "
-        f"{svc.VOLUME_FILTER_FIELD}; it constrained {sorted(filtered)}"
+    svc.build_daily_snapshot_payload(
+        _Db(),
+        market="US",
+        market_display_name="United States",
+        scan=scan,
+        uow=object(),
+        scan_results_use_case=object(),
     )
+
+    filtered_by_call = []
+    for spec in captured:
+        fields = {
+            f.field
+            for group in (
+                getattr(spec, "range_filters", []),
+                getattr(spec, "categorical_filters", []),
+                getattr(spec, "boolean_filters", []),
+            )
+            for f in group
+        }
+        if fields:
+            filtered_by_call.append((fields, spec))
+
+    assert len(filtered_by_call) >= 2, (
+        f"expected the candidate and leader queries; got {len(filtered_by_call)}"
+    )
+
+    # Both the candidate and the leader query must constrain the volume field.
+    # A union over every call would still pass if only one of them did, which is
+    # the regression this guards: the other query goes back to a full JSON scan.
+    for fields, spec in filtered_by_call:
+        assert svc.VOLUME_FILTER_FIELD in fields, (
+            f"a snapshot query skipped {svc.VOLUME_FILTER_FIELD}; "
+            f"it constrained {sorted(fields)}"
+        )
+        minimums = {
+            f.field: f.min_value
+            for f in getattr(spec, "range_filters", [])
+            if f.field == svc.VOLUME_FILTER_FIELD
+        }
+        assert minimums.get(svc.VOLUME_FILTER_FIELD) == 5, (
+            f"{svc.VOLUME_FILTER_FIELD} was not bounded by the market minimum: "
+            f"{minimums}"
+        )

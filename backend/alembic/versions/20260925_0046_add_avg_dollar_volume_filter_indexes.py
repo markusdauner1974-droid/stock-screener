@@ -48,9 +48,14 @@ _FIELDS = [
     "ibd_group_rank",
 ]
 
-_COUNT_INVALID_SQL = """
-SELECT count(*) FROM pg_index
-WHERE indexrelid = to_regclass(:index_name) AND NOT indisvalid
+_INVALID_INDEX_SQL = """
+SELECT pg_catalog.format('%I.%I', n.nspname, idx.relname)
+FROM pg_catalog.pg_index AS i
+JOIN pg_catalog.pg_class AS idx ON idx.oid = i.indexrelid
+JOIN pg_catalog.pg_namespace AS n ON n.oid = idx.relnamespace
+WHERE i.indrelid = pg_catalog.to_regclass('stock_feature_daily')
+  AND idx.relname = :index_name
+  AND NOT i.indisvalid
 """
 
 
@@ -85,14 +90,16 @@ def _rebuild_invalid_indexes() -> None:
     for field in _FIELDS:
         name = _index_name(field)
         invalid = bind.execute(
-            sa.text(_COUNT_INVALID_SQL), {"index_name": name}
+            sa.text(_INVALID_INDEX_SQL), {"index_name": name}
         ).scalar()
         if invalid:
             with op.get_context().autocommit_block():
-                op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {name}")
+                op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {invalid}")
 
 
 def _create_indexes() -> None:
+    # Recovery runs before the creates: an invalid index left by an interrupted
+    # CONCURRENTLY build would otherwise make ``IF NOT EXISTS`` skip the rebuild.
     _rebuild_invalid_indexes()
     with op.get_context().autocommit_block():
         for field in _FIELDS:
