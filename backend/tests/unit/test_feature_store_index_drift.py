@@ -39,6 +39,12 @@ _MIGRATION = (
     / "versions"
     / "20260617_0021_add_feature_store_preset_filter_indexes.py"
 )
+_DAILY_SNAPSHOT_MIGRATION = (
+    Path(__file__).parents[2]
+    / "alembic"
+    / "versions"
+    / "20260925_0046_add_avg_dollar_volume_filter_indexes.py"
+)
 _CORRECTION_SURVIVORS_MIGRATION = (
     Path(__file__).parents[2]
     / "alembic"
@@ -203,3 +209,117 @@ def test_correction_survivor_index_ddl_runs_inside_autocommit_block():
     assert events[0] == "enter"
     assert events[-1] == "exit"
     assert all("CONCURRENTLY" in statement for statement in events[1:-1])
+
+
+# ── Daily Snapshot read-path indexes (20260925_0046) ──────────────────────
+
+
+def test_daily_snapshot_fields_resolve_under_their_indexed_name():
+    """The field name in ``_FIELDS`` must be resolvable by that same name.
+
+    ``test_indexed_fields_are_flat_top_level_keys`` looks each indexed field up
+    in ``_FIELD_BINDINGS``. ``avg_dollar_volume`` used to resolve only as
+    ``volume``, so indexing it under its own key would have failed that lookup.
+    Pin both names to the same JSON path.
+    """
+    from app.infra.query.feature_store_query import _FIELD_BINDINGS
+
+    migration = _load_migration(_DAILY_SNAPSHOT_MIGRATION)
+    for field in migration._FIELDS:
+        assert field in _FIELD_BINDINGS, (
+            f"{field} is indexed by {_DAILY_SNAPSHOT_MIGRATION.stem} but has no "
+            f"binding under that name; the drift guard cannot resolve it"
+        )
+
+    assert _FIELD_BINDINGS["avg_dollar_volume"].json_path == ("avg_dollar_volume",)
+    assert _FIELD_BINDINGS["volume"].json_path == ("avg_dollar_volume",)
+
+
+def test_daily_snapshot_index_expr_matches_query_builder():
+    """Index expression must match the compiled filter predicate, or the
+    planner declines the index and falls back to a full JSON scan."""
+    migration = _load_migration(_DAILY_SNAPSHOT_MIGRATION)
+    for field in migration._FIELDS:
+        assert migration._index_expr(field) == _builder_expr(field), (
+            f"index expression for {field} drifted from json_number(); the "
+            f"Postgres planner will stop using ix_sfd_run_{field}"
+        )
+
+
+def test_daily_snapshot_migration_emits_exact_concurrent_indexes():
+    migration = _load_migration(_DAILY_SNAPSHOT_MIGRATION)
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    migration.op = Operations(context)
+
+    migration._create_indexes()
+
+    statements = [
+        line
+        for line in output.getvalue().splitlines()
+        if line.startswith("CREATE INDEX")
+    ]
+    assert statements == [
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+        "ix_sfd_run_avg_dollar_volume ON stock_feature_daily (run_id, "
+        "(CAST(details_json ->> 'avg_dollar_volume' AS FLOAT)));",
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
+        "ix_sfd_run_ibd_group_rank ON stock_feature_daily (run_id, "
+        "(CAST(details_json ->> 'ibd_group_rank' AS FLOAT)));",
+    ]
+
+
+def test_daily_snapshot_migration_emits_exact_concurrent_drops():
+    migration = _load_migration(_DAILY_SNAPSHOT_MIGRATION)
+    output = StringIO()
+    context = MigrationContext.configure(
+        dialect_name="postgresql",
+        opts={"as_sql": True, "output_buffer": output},
+    )
+    migration.op = Operations(context)
+
+    migration._drop_indexes()
+
+    statements = [
+        line
+        for line in output.getvalue().splitlines()
+        if line.startswith("DROP INDEX")
+    ]
+    assert statements == [
+        "DROP INDEX CONCURRENTLY IF EXISTS ix_sfd_run_avg_dollar_volume;",
+        "DROP INDEX CONCURRENTLY IF EXISTS ix_sfd_run_ibd_group_rank;",
+    ]
+
+
+def test_default_scan_filter_field_is_indexed():
+    """The Daily Snapshot constrains minVolume for every market, so the field
+    that filter maps to must be indexed -- that miss is what made the snapshot
+    exceed the client timeout."""
+    from app.domain.scanning.default_filters import resolve_default_scan_filters
+    from app.infra.query.feature_store_query import _FIELD_BINDINGS
+
+    # 20260821_0028 predates the `_FIELDS` convention and keeps its two fields
+    # inline in `_create_indexes`, so read them the same way the migration does.
+    migration_fields = (
+        _load_migration(_MIGRATION)._FIELDS,
+        _load_migration(_DAILY_SNAPSHOT_MIGRATION)._FIELDS,
+        ("correction_survivor", "resilience_score"),
+    )
+    indexed_paths = set()
+    for fields in migration_fields:
+        for field in fields:
+            binding = _FIELD_BINDINGS.get(field)
+            if binding is not None:
+                indexed_paths.add(binding.json_path)
+
+    for market in ("US", "DE"):
+        minimum_volume = resolve_default_scan_filters(market).get("minVolume")
+        assert minimum_volume is not None, f"{market} has no default minVolume"
+        binding = _FIELD_BINDINGS["volume"]
+        assert binding.json_path in indexed_paths, (
+            f"minVolume ({minimum_volume}) filters {binding.json_path} but no "
+            f"migration indexes it; the snapshot will full-scan the run"
+        )
