@@ -46,15 +46,32 @@ Column order is load-bearing. ``(run_id, action_state, survivor)`` serves both
 ``(run_id, survivor, action_state)`` measured 19.7 s because the filtered column
 is not the one directly after the equality prefix.
 
-Measured on a copy of the production table (63,333 rows), same cluster:
+Measured on a copy of the production table (63,333 rows, 10,079 in the run):
 
-    GROUP BY, index present        19,176 – 19,465 ms
-    16 scalar counts, no index     19,752 ms
-    16 scalar counts + this index  6,281 / 6,162 / 8,667 / 9,646 / 12,537 ms
+    GROUP BY, no index              19,357 ms   (cold: every row re-parses)
+    16 scalar counts, no index     154,462 ms   (16 independent passes)
+    16 scalar counts + this index    6,281 – 12,537 ms
 
-The last two lines are why the repository change and this index belong together:
-without the index the scalar form is *slower* than the grouped one (16 passes
-instead of one), so neither half is worth deploying alone.
+``EXPLAIN (ANALYZE, BUFFERS)`` for the final statement, with this index and its
+``ANALYZE`` in place — the subplans that still reach the heap:
+
+    Result                                       12.292 ms
+      ->  Index Only Scan ix_sfd_run_* (rows_total)   1.189 ms   10 buffers
+      ->  Index Scan      this index  (survivor)      0.054 ms   11 buffers
+      ->  Bitmap Heap Scan this index (per state)     7.069 ms  826 buffers
+
+``rows_total`` and the survivor count are served from the index. The per-state
+counts are not: when ``action_state = …`` matches thousands of rows the planner
+takes a ``Bitmap Index Scan`` plus a ``Bitmap Heap Scan`` instead of an
+index-only scan, so those tuples still visit the heap. That is the residual cost,
+and it is why the grouped pass and this index belong together — the grouped shape
+reads every document instead of a subset.
+
+Timings move with cache state and must not be compared across sessions. The
+6,281–12,537 ms figures above were disk-bound (``read=`` in ``Buffers``); the
+12.292 ms above is buffer-warm (``hit=``). Quoting either without its cache state
+is what made an earlier projection of ≈4.2 s look contradicted by a measured
+6–12 s: both were real, on different cache states.
 
 ``ANALYZE`` runs here on purpose. ``CREATE INDEX CONCURRENTLY`` leaves expression
 statistics empty, and without them the planner rates the new index as unusable
@@ -80,7 +97,7 @@ index ahead of the deploy if that becomes the case:
         ON stock_feature_daily (
             run_id,
             (CAST(details_json ->> 'action_state' AS VARCHAR)),
-            (CAST((details_json ->> 'correction_survivor') AS BOOLEAN) IS true)
+            (lower(details_json ->> 'correction_survivor') IN ('true', '1'))
         );
 
 The ``ANALYZE`` has to run in the same pass — an index built ahead of the deploy
@@ -107,6 +124,13 @@ _INDEX_NAME = "ix_sfd_run_action_state_survivor"
 _STATE_KEY = "action_state"
 _SURVIVOR_KEY = "correction_survivor"
 
+# The two spellings of JSON ``true`` that ``->>`` can yield, one per backend.
+# PostgreSQL keeps the boolean and renders it as text ``'true'``; SQLite stores
+# it as the integer ``1``, so ``->>`` returns ``'1'``. The predicate has to match
+# both or the survivor counts differ by backend.
+_SURVIVOR_TRUE_TEXT = "true"
+_SURVIVOR_TRUE_SQLITE = "1"
+
 _INVALID_INDEX_SQL = """
 SELECT pg_catalog.format('%I.%I', n.nspname, idx.relname)
 FROM pg_catalog.pg_index AS i
@@ -130,20 +154,35 @@ def _state_expr() -> str:
 
 
 def _survivor_expr() -> str:
-    """SQL for the indexed survivor flag. Same linkage as ``_state_expr``.
+    """SQL for the indexed survivor flag. Same linkage as ``_state_expr()``.
 
-    ``IS true`` is part of the expression, not decoration: the repository tests
-    the flag rather than selecting it, so the indexed form has to be the tested
-    one or the two never match.
+    Cast-free on purpose. The earlier spelling
+    ``CAST(details_json ->> 'correction_survivor' AS BOOLEAN) IS true`` raises
+    ``invalid input syntax for type boolean`` on any non-boolean text (``"2"``,
+    ``"maybe"``). Inside an index that is a foot-gun rather than a filter:
 
-    Written without inner parentheses because that is what
-    ``cast(json_text(...), Boolean).is_(True)`` compiles to, and the drift guard
-    compares the two as text. The parentheses would be harmless -- PostgreSQL
-    normalises them away, and both spellings matched the index in a measured
-    comparison (0.227 ms and 0.092 ms for the same count) -- but a byte-exact
-    guard is worth more than the redundant pair.
+    * ``CREATE INDEX`` evaluates the expression for **every row of every
+      historical run**, so one bad value fails the startup migration and blocks
+      the deploy.
+    * Once the index exists, **any insert or update** carrying such a value
+      fails — a feature-run write breaks instead of a summary read.
+
+    ``lower(...) IN ('true', '1')`` cannot raise for any input, and it is the
+    predicate the repository compiles, which keeps the drift guard byte-exact.
+
+    Both list members are needed for the two backends to agree. PostgreSQL stores
+    a JSON ``true`` and ``->>`` hands it back as the text ``'true'``; SQLite
+    stores the same value as the integer ``1``, so its ``->>`` yields ``'1'``.
+    Matching only ``'true'`` -- which is what ``20260821_0028``'s index on this
+    key does, and what this migration did at first -- silently counts every
+    survivor as a non-survivor on SQLite, where the grouped pivot used to read it
+    as truthy. ``'1'`` never occurs in the Postgres text form, so the extra
+    member is inert there.
     """
-    return f"CAST(details_json ->> '{_SURVIVOR_KEY}' AS BOOLEAN) IS true"
+    return (
+        f"lower(details_json ->> '{_SURVIVOR_KEY}') "
+        f"IN ('{_SURVIVOR_TRUE_TEXT}', '{_SURVIVOR_TRUE_SQLITE}')"
+    )
 
 
 def _rebuild_invalid_indexes() -> None:

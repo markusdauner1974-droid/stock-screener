@@ -622,7 +622,31 @@ def _opportunity_summary_exprs() -> tuple[object, object]:
 
 
 def _pg_text(expr) -> str:
-    """Compile to Postgres text, minus the table qualifier (DDL is unqualified)."""
+    """Compile to Postgres text, minus the table qualifier (DDL is unqualified).
+
+    ``literal_binds`` is required: the survivor predicate is an ``IN`` list, which
+    SQLAlchemy renders as an expanding (``POSTCOMPILE``) parameter in a plain
+    compile. The DDL needs the literal spelling, and so does the server — under
+    psycopg2 the driver interpolates the values client-side, so the planner sees
+    ``IN ('true', '1')`` and matches the index. Comparing the unexpanded form
+    would flag a drift that does not exist.
+    """
+    return str(
+        expr.compile(
+            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    ).replace("stock_feature_daily.", "")
+
+
+def _pg_text_runtime(expr) -> str:
+    """Compile as the *runtime* statement renders it, expanding params unexpanded.
+
+    The counted statement is compiled without ``literal_binds``, so the ``IN``
+    list appears as ``__[POSTCOMPILE_lower_1]``. Comparing a literal-bound
+    predicate against that text would always fail; this is the matching form for
+    statement-level checks. The server still sees literals, because psycopg2
+    interpolates client-side.
+    """
     return str(expr.compile(dialect=postgresql.dialect())).replace(
         "stock_feature_daily.", ""
     )
@@ -728,8 +752,8 @@ def test_opportunity_summary_migration_matches_the_repository_shape():
         "projection and the expression index cannot serve them"
     )
     for expr in _opportunity_summary_exprs():
-        assert _pg_text(expr) in sql, (
-            f"the counted predicate {_pg_text(expr)!r} is missing from the "
+        assert _pg_text_runtime(expr) in sql, (
+            f"the counted predicate {_pg_text_runtime(expr)!r} is missing from the "
             f"statement, so the index cannot match it: {sql}"
         )
 
@@ -750,7 +774,7 @@ def test_opportunity_summary_migration_matches_the_repository_shape():
         "CREATE INDEX CONCURRENTLY IF NOT EXISTS "
         "ix_sfd_run_action_state_survivor ON stock_feature_daily (run_id, "
         "(CAST(details_json ->> 'action_state' AS VARCHAR)), "
-        "(CAST(details_json ->> 'correction_survivor' AS BOOLEAN) IS true));"
+        "(lower(details_json ->> 'correction_survivor') IN ('true', '1')));"
     ], statements
 
     # Column order is load-bearing: action_state must directly follow run_id.

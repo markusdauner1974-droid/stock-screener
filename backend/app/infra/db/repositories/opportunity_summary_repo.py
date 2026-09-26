@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections import defaultdict
 
 from sqlalchemy import (
-    Boolean,
     ColumnElement,
     Select,
     String,
@@ -30,6 +29,14 @@ from app.models.scan_result import ScanResult
 ACTION_STATE_KEY = "action_state"
 CORRECTION_SURVIVOR_KEY = "correction_survivor"
 
+# The two spellings of JSON ``true`` that ``->>`` can yield, one per backend.
+# PostgreSQL keeps the boolean and renders it as text ``'true'``; SQLite stores it
+# as the integer ``1``, so ``->>`` returns ``'1'``. The counted predicate has to
+# match both, or identical data counts differently depending on the backend --
+# see ``counted_opportunity_predicates``.
+_SURVIVOR_TRUE_TEXT = "true"
+_SURVIVOR_TRUE_SQLITE = "1"
+
 
 def counted_opportunity_predicates() -> tuple[ColumnElement, ColumnElement]:
     """The two predicates ``ix_sfd_run_action_state_survivor`` was built for.
@@ -45,11 +52,28 @@ def counted_opportunity_predicates() -> tuple[ColumnElement, ColumnElement]:
     but a generic plan (and every server-side-binding driver) sees a parameter,
     cannot match it to the index's literal, and silently drops the index -- which
     on this table means a 154 s full scan instead of milliseconds.
+
+    The survivor test is a cast-free ``lower(...) IN ('true', '1')`` rather than
+    ``CAST(... AS BOOLEAN) IS true``. A boolean cast raises
+    ``invalid input syntax for type boolean`` on non-boolean text, and inside the
+    index that fails the startup migration (one bad value anywhere in the table)
+    and every later insert/update carrying such a value. The ``IN`` list cannot
+    raise for any input.
+
+    Both list members are needed for the two backends to agree. PostgreSQL stores
+    a JSON ``true`` and ``->>`` hands it back as the text ``'true'``; SQLite
+    stores the same value as the integer ``1``, so its ``->>`` yields ``'1'``.
+    Matching only ``'true'`` silently counts every survivor as a non-survivor on
+    SQLite, where the grouped pivot used to read it as truthy -- so the survivor
+    counts would differ by backend for identical data. ``'1'`` never occurs in
+    the Postgres text form, so the extra member is inert there.
     """
     details = StockFeatureDaily.details_json
     return (
         cast(json_text(details, (ACTION_STATE_KEY,)), String),
-        cast(json_text(details, (CORRECTION_SURVIVOR_KEY,)), Boolean).is_(True),
+        func.lower(json_text(details, (CORRECTION_SURVIVOR_KEY,))).in_(
+            [_SURVIVOR_TRUE_TEXT, _SURVIVOR_TRUE_SQLITE]
+        ),
     )
 
 
@@ -87,14 +111,19 @@ class SqlOpportunityStateSummaryRepository:
 
         Counting per state instead of grouping moves both keys into ``WHERE``,
         where ``ix_sfd_run_action_state_survivor`` (migration ``20260926_0058``)
-        serves them as index conditions and the stored document is never read.
+        serves them as index conditions and the stored document is read far less.
         Measured against a copy of the production table, with the index and its
-        ``ANALYZE``: 6,281 / 6,162 / 8,667 / 9,646 / 12,537 ms. In the same
-        session the grouped pass stayed at 19,176-19,465 ms.
+        ``ANALYZE``: 6,281 / 6,162 / 8,667 / 9,646 / 12,537 ms disk-bound, and
+        12.292 ms buffer-warm. In the same session the grouped pass stayed at
+        19,176-19,465 ms.
 
-        The index is not optional. Without it this shape costs 154,462 ms, since
-        each of the sixteen counts scans the run on its own -- so this rewrite
-        and that migration only make sense together.
+        ``rows_total`` and ``survivor_count`` are served as index-only scans; the
+        per-state counts fall back to a ``Bitmap Heap Scan`` when the state
+        matches thousands of rows, so they still visit the heap. That residual
+        cost is why this rewrite and the migration only make sense together --
+        the grouped shape reads every document rather than a subset. Without the
+        index this shape costs 154,462 ms, since each of the sixteen counts scans
+        the run on its own.
 
         The keys are extracted through ``json_text`` rather than
         ``details["key"].as_string()``. That is not a stylistic choice: the
