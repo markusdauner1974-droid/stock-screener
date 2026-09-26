@@ -46,6 +46,14 @@ _SURVIVOR_TRUE_SQLITE = "1"
 # still returns the right answer, just slowly.
 _COUNT_INDEX_NAME = "ix_sfd_run_action_state_survivor"
 
+# The probe is matched against the relation the aggregation actually reads, not
+# against the name alone: PostgreSQL allows the same index name in another
+# schema, and a valid index there would otherwise answer for a missing or
+# invalid one here -- selecting the slow counted path on the strength of an
+# index it cannot use. ``current_schemas(false)`` confines the match to the
+# search path, so the unqualified relation name resolves the way Django's
+# ``stock_feature_daily`` reference does.
+#
 # ``indisvalid AND indisready`` -- an interrupted ``CREATE INDEX CONCURRENTLY``
 # leaves a same-named index that exists, refuses inserts, and cannot serve a
 # sequential scan. Present is not the same as usable, so both flags are checked.
@@ -53,8 +61,12 @@ _INDEX_USABLE_SQL = text(
     """
     SELECT count(*)
     FROM pg_index i
-    JOIN pg_class c ON c.oid = i.indexrelid
-    WHERE c.relname = :name
+    JOIN pg_class idx ON idx.oid = i.indexrelid
+    JOIN pg_class tbl ON tbl.oid = i.indrelid
+    JOIN pg_namespace n ON n.oid = tbl.relnamespace
+    WHERE idx.relname = :name
+      AND tbl.relname = :table
+      AND n.nspname = ANY (current_schemas(false))
       AND i.indisvalid
       AND i.indisready
     """
@@ -62,24 +74,61 @@ _INDEX_USABLE_SQL = text(
 
 
 def _count_index_is_usable(session: Session) -> bool:
-    """Whether the index the counted path needs exists *and* can be scanned.
+    """Whether the index the counted path needs is present, usable, and here.
 
     The counted shape only pays off with this index. Its own measurement puts
     the same sixteen counts at 6.8 ms with the index and 56.7 s without, so a
     build that was never run, was rolled back, or failed halfway would turn the
     Daily Snapshot into a multi-minute scan rather than a slow query.
 
-    A dialect without the PostgreSQL catalogs returns ``False``, which keeps the
-    grouped fallback in charge -- correct on every backend, fastest on one.
+    A backend without these catalogs returns ``False``, which keeps the grouped
+    fallback in charge -- correct on every backend, fastest on one.
+
+    The probe runs inside a savepoint. A statement PostgreSQL rejects otherwise
+    leaves the transaction aborted, and every later statement on that session
+    fails with ``current transaction is aborted`` -- so the fallback this
+    function exists to trigger could not run at all on the very path it is for.
+    The savepoint clears the error state and leaves unrelated session work
+    intact. Verified against PostgreSQL:
+
+        BEGIN; SELECT 1/0; SELECT 99;
+          ERROR: current transaction is aborted, commands ignored
+        BEGIN; SAVEPOINT sp; SELECT 1/0; ROLLBACK TO sp; SELECT 99;
+          99
     """
     try:
-        return bool(session.execute(_INDEX_USABLE_SQL, {"name": _COUNT_INDEX_NAME}).scalar())
+        with session.begin_nested():
+            return bool(
+                session.execute(
+                    _INDEX_USABLE_SQL,
+                    {
+                        "name": _COUNT_INDEX_NAME,
+                        "table": StockFeatureDaily.__tablename__,
+                    },
+                ).scalar()
+            )
     except Exception as exc:  # noqa: BLE001 - an unreadable catalog means "not usable".
+        _recover_aborted_probe(session)
         logger.warning(
             "Opportunity summary: index probe failed, using the grouped fallback (%s)",
             exc,
         )
         return False
+
+
+def _recover_aborted_probe(session: Session) -> None:
+    """Make sure the session can still serve the fallback query.
+
+    ``begin_nested()`` unwinds its savepoint on the way out, but a dialect that
+    cannot open one at all leaves the aborted transaction in place. If the
+    session is still unusable, roll it back rather than hand it to the caller.
+    """
+    try:
+        if session.is_active:
+            return
+        session.rollback()
+    except Exception as exc:  # noqa: BLE001 - recovery must not mask the original failure.
+        logger.warning("Opportunity summary: probe recovery failed (%s)", exc)
 
 
 def survivor_predicate(details) -> ColumnElement:

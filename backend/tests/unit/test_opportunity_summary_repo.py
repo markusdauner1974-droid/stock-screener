@@ -415,6 +415,17 @@ def test_index_probe_treats_an_unreadable_catalog_as_not_usable():
     SQLite has no ``pg_index``, so the probe's own query fails there. The
     fallback is correct on every backend, so an unreadable catalog has to mean
     "not usable" rather than propagate the error to the caller.
+
+    The second half is the point: the failed probe must leave the session able
+    to run the grouped query. A statement PostgreSQL rejects aborts the
+    transaction, and every later statement on that session is refused -- so
+    without the savepoint the fallback could not run on the very path it exists
+    for. Verified against PostgreSQL:
+
+        BEGIN; SELECT 1/0; SELECT 99;
+          ERROR: current transaction is aborted, commands ignored
+        BEGIN; SAVEPOINT sp; SELECT 1/0; ROLLBACK TO sp; SELECT 99;
+          99
     """
     with _feature_session_with(
         [("A", {"correction_survivor": True, "action_state": "watch"})]
@@ -424,8 +435,89 @@ def test_index_probe_treats_an_unreadable_catalog_as_not_usable():
         )
 
         assert _count_index_is_usable(session) is False
+        # The session has to stay usable, not just report "not usable".
+        assert session.is_active, "the failed probe left the transaction aborted"
         # And the caller still answers correctly.
         assert SqlOpportunityStateSummaryRepository(session).for_feature_run(7).rows_total == 1
+
+
+def test_index_probe_wraps_its_query_in_a_savepoint():
+    """The probe must run inside ``begin_nested()``, not bare.
+
+    This cannot be asserted by running the probe on SQLite: SQLite has no
+    aborted-transaction state, so a failed statement is followed by a working
+    one either way. The test that observed the failure is therefore blind here,
+    and would stay green with the savepoint removed -- measured: with
+    ``begin_nested`` replaced by ``nullcontext`` all twelve tests still pass.
+
+    So the mechanism is asserted instead of its effect. On PostgreSQL the
+    difference is not cosmetic:
+
+        BEGIN; SELECT 1/0; SELECT 99;
+          ERROR: current transaction is aborted, commands ignored
+        BEGIN; SAVEPOINT sp; SELECT 1/0; ROLLBACK TO sp; SELECT 99;
+          99
+    """
+    from app.infra.db.repositories import opportunity_summary_repo as mod
+
+    calls: list[str] = []
+
+    class _Session:
+        is_active = True
+
+        def begin_nested(self):
+            calls.append("begin_nested")
+            import contextlib
+
+            return contextlib.nullcontext()
+
+        def execute(self, _statement, _params=None):
+            class _R:
+                @staticmethod
+                def scalar():
+                    return 1
+
+            return _R()
+
+    assert mod._count_index_is_usable(_Session()) is True
+    assert calls == ["begin_nested"], (
+        "the probe queried the catalogs outside a savepoint; on PostgreSQL a "
+        f"rejected statement would abort the session: {calls}"
+    )
+
+
+def test_index_probe_rolls_back_when_it_cannot_use_a_savepoint():
+    """A dialect that cannot open a savepoint must still leave a usable session.
+
+    Falling out of ``begin_nested`` with the transaction still aborted would
+    hand the caller a session that refuses every further statement -- the
+    fallback could not run on the path it exists for.
+    """
+
+    class _AbortedSession:
+        def __init__(self):
+            self.is_active = True
+            self.rolled_back = False
+
+        def begin_nested(self):
+            raise RuntimeError("SAVEPOINT unsupported")
+
+        def execute(self, _statement, _params=None):
+            raise RuntimeError("current transaction is aborted")
+
+        def rollback(self):
+            self.rolled_back = True
+            self.is_active = True
+
+    from app.infra.db.repositories import opportunity_summary_repo as mod
+
+    session = _AbortedSession()
+    session.is_active = False  # the failed statement left it aborted
+    assert mod._count_index_is_usable(session) is False
+    assert session.rolled_back, (
+        "the probe left the session aborted and did not recover it, so the "
+        "grouped fallback could not run"
+    )
 
 
 def test_index_probe_reads_validity_and_readiness_not_just_presence():
@@ -441,3 +533,27 @@ def test_index_probe_reads_validity_and_readiness_not_just_presence():
     assert "indisvalid" in sql
     assert "indisready" in sql
     assert _INDEX_USABLE_SQL._bindparams["name"] is not None
+
+
+def test_index_probe_is_scoped_to_the_table_that_is_queried():
+    """The probe must not match a same-named index on another relation.
+
+    PostgreSQL allows one index name per schema per table, so a valid
+    ``ix_sfd_run_action_state_survivor`` on some other table would answer for a
+    missing or invalid one on ``stock_feature_daily``. The counted path would
+    then be selected on the strength of an index it cannot use -- the slow shape
+    with no warning.
+    """
+    from app.infra.db.repositories.opportunity_summary_repo import (
+        _INDEX_USABLE_SQL,
+        _count_index_is_usable,
+    )
+    from app.infra.db.models.feature_store import StockFeatureDaily
+
+    sql = str(_INDEX_USABLE_SQL).lower()
+    assert "indrelid" in sql, "the probe does not tie the index to a relation"
+    assert "tbl.relname = :table" in sql, "the probe does not name the relation"
+    assert _INDEX_USABLE_SQL._bindparams["table"] is not None
+
+    # And the caller passes the relation the aggregation actually reads.
+    assert StockFeatureDaily.__tablename__ == "stock_feature_daily"

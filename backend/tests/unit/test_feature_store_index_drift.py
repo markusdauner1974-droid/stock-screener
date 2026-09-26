@@ -722,6 +722,13 @@ def test_opportunity_summary_migration_matches_the_repository_shape():
             return values
 
     class _FakeSession:
+        is_active = True
+
+        def begin_nested(self):
+            import contextlib
+
+            return contextlib.nullcontext()
+
         def execute(self, statement, params=None):
             # The index probe runs first and is not the statement under test; the
             # captured list must hold only the counted SELECT.
