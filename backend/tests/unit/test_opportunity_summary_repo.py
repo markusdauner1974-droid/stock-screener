@@ -186,6 +186,76 @@ def test_survivor_predicate_is_shared_and_cast_free():
     assert "BOOLEAN" not in str(survivor_predicate(details)).upper()
 
 
+def test_both_read_paths_agree_on_the_same_rows():
+    """``for_scan`` and ``for_feature_run`` must classify a row identically.
+
+    Raised as a nitpick on #385 and correct: the test above compares ``for_scan``
+    against a hand-written ``survivor_predicate`` call, so it pinned the shared
+    *predicate* without ever running the counted ``for_feature_run`` path. If the
+    two paths drifted apart again -- which is exactly what #382 merged and #385
+    undid -- that test would keep passing on the grouped side alone.
+
+    These two are the production read paths: ``for_scan`` serves the legacy
+    scan-results projection, ``for_feature_run`` the feature-store projection the
+    Daily Snapshot uses. Same rows in, same summary out -- compared against each
+    other, not against a number that would only restate one of them.
+    """
+    rows = [
+        ("REAL-TRUE", {"correction_survivor": True, "action_state": "watch"}),
+        ("REAL-FALSE", {"correction_survivor": False, "action_state": "watch"}),
+        ("STR-TRUE", {"correction_survivor": "true", "action_state": "setup_ready"}),
+        ("STR-FALSE", {"correction_survivor": "false", "action_state": "watch"}),
+        ("INT-1", {"correction_survivor": 1, "action_state": "setup_ready"}),
+        ("INT-2", {"correction_survivor": 2, "action_state": "watch"}),
+        ("MISSING", {"correction_survivor": True}),
+        ("UNKNOWN", {"correction_survivor": True, "action_state": "nope"}),
+    ]
+
+    with _session_with(rows) as scan_session:
+        via_scan = SqlOpportunityStateSummaryRepository(scan_session).for_scan("scan-extra")
+    with _feature_session_with(rows) as feature_session:
+        via_feature = SqlOpportunityStateSummaryRepository(feature_session).for_feature_run(7)
+
+    assert via_scan == via_feature, (
+        "the two read paths disagree on identical rows: "
+        f"for_scan={via_scan} for_feature_run={via_feature}"
+    )
+
+    # Anchor the fixture, so agreement cannot be reached by both sides being
+    # empty or both sides ignoring the same keys.
+    assert via_scan.rows_total == 8
+    assert via_scan.survivor_count == 5
+    assert via_scan.action_state_counts[ActionState.WATCH] == 4
+    assert via_scan.action_state_counts[ActionState.SETUP_READY] == 2
+    assert sum(via_scan.survivor_action_state_counts.values()) == 3
+
+
+def test_both_read_paths_agree_that_a_cast_would_raise():
+    """A stored ``2`` must not make either path raise.
+
+    ``CAST('2' AS BOOLEAN)`` is rejected by PostgreSQL, so the grouped path as
+    it was merged could not summarise a run containing that value -- it raised
+    instead. The counted path treated the row as a non-survivor. Both must now
+    answer, and answer the same.
+    """
+    rows = [
+        ("INT-2", {"correction_survivor": 2, "action_state": "watch"}),
+        ("YES-TEXT", {"correction_survivor": "yes", "action_state": "watch"}),
+        ("ON-TEXT", {"correction_survivor": "on", "action_state": "watch"}),
+    ]
+
+    with _session_with(rows) as scan_session:
+        via_scan = SqlOpportunityStateSummaryRepository(scan_session).for_scan("scan-extra")
+    with _feature_session_with(rows) as feature_session:
+        via_feature = SqlOpportunityStateSummaryRepository(feature_session).for_feature_run(7)
+
+    assert via_scan == via_feature
+    # None of these is a survivor under the narrow text contract: PostgreSQL's
+    # boolean input grammar is a parser detail, not a data contract.
+    assert via_scan.survivor_count == 0
+    assert via_scan.rows_total == 3
+
+
 # ── Feature-store path: counted, not grouped ──────────────────────────────
 
 
