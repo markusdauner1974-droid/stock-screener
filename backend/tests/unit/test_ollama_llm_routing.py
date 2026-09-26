@@ -8,6 +8,12 @@ from app.services.llm.llm_service import LLMService
 
 
 def _service(*, key: str = "", base: str = "https://ollama.com") -> LLMService:
+    """An ``LLMService`` with the Ollama attributes set and nothing else wired.
+
+    Built via ``__new__`` so the provider overrides can be exercised without a
+    real client; every attribute ``_apply_provider_overrides`` reads is set here
+    explicitly, so a missing one fails loudly instead of falling back.
+    """
     service = LLMService.__new__(LLMService)
     service._groq_key_manager = GroqKeyManager(keys=[])
     service._zai_key_manager = ZAIKeyManager(keys=[])
@@ -21,11 +27,13 @@ def _service(*, key: str = "", base: str = "https://ollama.com") -> LLMService:
 
 
 def test_is_ollama_model_detects_both_prefixes() -> None:
+    """Both spellings count as Ollama; ``ollama/`` is the one users configure."""
     assert LLMService._is_ollama_model("ollama/deepseek-v4.1-flash") is True
     assert LLMService._is_ollama_model("ollama_chat/deepseek-v4.1-flash") is True
 
 
 def test_is_ollama_model_rejects_other_providers() -> None:
+    """A substring match would catch these; the check must be prefix-based."""
     assert LLMService._is_ollama_model("minimax/MiniMax-M2.7") is False
     assert LLMService._is_ollama_model("openai/glm-4.7-flash") is False
     assert LLMService._is_ollama_model("groq/qwen/qwen3-32b") is False
@@ -33,6 +41,11 @@ def test_is_ollama_model_rejects_other_providers() -> None:
 
 
 def test_apply_provider_overrides_routes_ollama_to_chat_endpoint() -> None:
+    """``ollama/`` is rewritten to LiteLLM's ``ollama_chat/`` route.
+
+    ``ollama_chat`` makes LiteLLM append ``/api/chat`` itself, which is what the
+    Ollama Cloud endpoint expects. The key is injected only when one is set.
+    """
     service = _service(key="test-ollama-key")
     params = {"model": "ollama/deepseek-v4.1-flash"}
 
@@ -78,6 +91,11 @@ def test_apply_provider_overrides_is_idempotent_for_ollama() -> None:
 
 
 def test_apply_provider_overrides_does_not_affect_other_providers() -> None:
+    """An unrelated provider must come out of the override untouched.
+
+    Guards against a rewritten branch matching too broadly and attaching the
+    Ollama key or base URL to another provider's request.
+    """
     service = _service(key="test-ollama-key")
     params = {"model": "groq/qwen/qwen3-32b"}
 
@@ -89,6 +107,7 @@ def test_apply_provider_overrides_does_not_affect_other_providers() -> None:
 
 
 def test_ollama_model_is_sanctioned_for_extraction() -> None:
+    """The allowlist must accept it, or the config API rejects the selection."""
     from app.services.llm.config import is_model_supported_for_use_case
 
     assert is_model_supported_for_use_case(
@@ -106,12 +125,14 @@ def test_ollama_model_is_not_sanctioned_for_chatbot() -> None:
 
 
 def test_ollama_provider_has_env_var_mapping() -> None:
+    """Without a mapping the provider never receives its key."""
     from app.services.llm.config import PROVIDER_ENV_VARS
 
     assert PROVIDER_ENV_VARS["ollama"] == "OLLAMA_API_KEY"
 
 
 def test_ollama_model_is_listed_as_available() -> None:
+    """It must appear in the catalogue the UI and the config API read."""
     from app.services.llm.config import AVAILABLE_MODELS
 
     entry = next(
@@ -132,6 +153,7 @@ def test_settings_expose_ollama_fields() -> None:
 
 
 def test_settings_default_ollama_base_points_at_cloud() -> None:
+    """With nothing configured, the default must reach Ollama Cloud."""
     from app.config.settings import Settings
 
     assert Settings().ollama_api_base == "https://ollama.com"
