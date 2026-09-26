@@ -201,6 +201,14 @@ def counted_opportunity_predicates() -> tuple[ColumnElement, ColumnElement]:
 
 
 class SqlOpportunityStateSummaryRepository:
+    """Reads the opportunity projection from the feature store, two ways.
+
+    ``for_feature_run`` counts the projection with both keys in the ``WHERE``
+    clause; ``for_scan``/``_aggregate`` group it. Both classify a row through
+    the shared ``survivor_predicate``, so the shape differs but the answer
+    cannot.
+    """
+
     def __init__(self, session: Session) -> None:
         self._session = session
 

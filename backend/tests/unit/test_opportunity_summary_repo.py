@@ -533,18 +533,31 @@ def test_index_probe_wraps_its_query_in_a_savepoint():
     calls: list[str] = []
 
     class _Session:
+        """A session that records whether it was asked for a savepoint.
+
+        Deliberately minimal: the assertion is about *which* call the probe
+        makes, not about what the query returns, so ``execute`` only has to
+        produce a scalar.
+        """
+
         is_active = True
 
         def begin_nested(self):
+            """Record the savepoint request and open a no-op one."""
             calls.append("begin_nested")
             import contextlib
 
             return contextlib.nullcontext()
 
         def execute(self, _statement, _params=None):
+            """Return a one-row result, i.e. "the index is usable"."""
+
             class _R:
+                """Stand-in for a SQLAlchemy ``Result`` with one row."""
+
                 @staticmethod
                 def scalar():
+                    """The probe only ever reads the single count."""
                     return 1
 
             return _R()
@@ -565,17 +578,28 @@ def test_index_probe_rolls_back_when_it_cannot_use_a_savepoint():
     """
 
     class _AbortedSession:
+        """A session on which both the savepoint and the probe fail.
+
+        Models the state PostgreSQL leaves behind after a rejected statement:
+        ``is_active`` is false and nothing can be executed. It records whether
+        the probe recovered it, which is the whole point of the assertion.
+        """
+
         def __init__(self):
+            """Start usable; the test sets ``is_active`` false before calling."""
             self.is_active = True
             self.rolled_back = False
 
         def begin_nested(self):
+            """Fail, as a dialect without savepoint support would."""
             raise RuntimeError("SAVEPOINT unsupported")
 
         def execute(self, _statement, _params=None):
+            """Fail, as an aborted transaction refuses every statement."""
             raise RuntimeError("current transaction is aborted")
 
         def rollback(self):
+            """Record the recovery and become usable again."""
             self.rolled_back = True
             self.is_active = True
 

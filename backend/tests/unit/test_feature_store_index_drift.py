@@ -722,14 +722,24 @@ def test_opportunity_summary_migration_matches_the_repository_shape():
             return values
 
     class _FakeSession:
+        """Enough of a ``Session`` for the probe plus one counted ``SELECT``.
+
+        ``_count_index_is_usable`` opens a savepoint and reads the catalogs
+        through ``execute``; the statement under test is captured by the
+        caller. The two are told apart by the ``name`` bind parameter, which
+        only the probe carries -- so ``execute`` must accept ``params``.
+        """
+
         is_active = True
 
         def begin_nested(self):
+            """Stand in for the savepoint the probe opens; nothing to unwind."""
             import contextlib
 
             return contextlib.nullcontext()
 
         def execute(self, statement, params=None):
+            """Answer the probe; capture every other statement for the caller."""
             # The index probe runs first and is not the statement under test; the
             # captured list must hold only the counted SELECT.
             if params is not None and "name" in params:
