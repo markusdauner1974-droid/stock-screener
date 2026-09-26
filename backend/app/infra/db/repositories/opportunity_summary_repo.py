@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 
 from sqlalchemy import (
@@ -12,6 +13,7 @@ from sqlalchemy import (
     func,
     literal_column,
     select,
+    text,
 )
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -20,6 +22,8 @@ from app.domain.scanning.opportunity_summary import OpportunityStateSummary
 from app.infra.db.models.feature_store import StockFeatureDaily
 from app.infra.db.portability import json_text
 from app.models.scan_result import ScanResult
+
+logger = logging.getLogger(__name__)
 
 # The two details_json keys the opportunity projection carries, in the order the
 # index ``ix_sfd_run_action_state_survivor`` (migration ``20260926_0058``) stores
@@ -36,6 +40,46 @@ CORRECTION_SURVIVOR_KEY = "correction_survivor"
 # see ``counted_opportunity_predicates``.
 _SURVIVOR_TRUE_TEXT = "true"
 _SURVIVOR_TRUE_SQLITE = "1"
+
+# Migration 20260926_0058 carries the index the counted path depends on. It is
+# asked for by name because a missing index is not an error anywhere: the query
+# still returns the right answer, just slowly.
+_COUNT_INDEX_NAME = "ix_sfd_run_action_state_survivor"
+
+# ``indisvalid AND indisready`` -- an interrupted ``CREATE INDEX CONCURRENTLY``
+# leaves a same-named index that exists, refuses inserts, and cannot serve a
+# sequential scan. Present is not the same as usable, so both flags are checked.
+_INDEX_USABLE_SQL = text(
+    """
+    SELECT count(*)
+    FROM pg_index i
+    JOIN pg_class c ON c.oid = i.indexrelid
+    WHERE c.relname = :name
+      AND i.indisvalid
+      AND i.indisready
+    """
+)
+
+
+def _count_index_is_usable(session: Session) -> bool:
+    """Whether the index the counted path needs exists *and* can be scanned.
+
+    The counted shape only pays off with this index. Its own measurement puts
+    the same sixteen counts at 6.8 ms with the index and 56.7 s without, so a
+    build that was never run, was rolled back, or failed halfway would turn the
+    Daily Snapshot into a multi-minute scan rather than a slow query.
+
+    A dialect without the PostgreSQL catalogs returns ``False``, which keeps the
+    grouped fallback in charge -- correct on every backend, fastest on one.
+    """
+    try:
+        return bool(session.execute(_INDEX_USABLE_SQL, {"name": _COUNT_INDEX_NAME}).scalar())
+    except Exception as exc:  # noqa: BLE001 - an unreadable catalog means "not usable".
+        logger.warning(
+            "Opportunity summary: index probe failed, using the grouped fallback (%s)",
+            exc,
+        )
+        return False
 
 
 def survivor_predicate(details) -> ColumnElement:
@@ -125,7 +169,24 @@ class SqlOpportunityStateSummaryRepository:
         Counted rather than grouped: the feature-store table is large enough per
         run that the grouped shape's per-row document reads dominate the Daily
         Snapshot build. See ``_count_feature_run``.
+
+        Falls back to the grouped shape when the index the counted path needs is
+        absent or unusable. Both shapes return the same summary, so the caller
+        only sees a latency difference -- and the counted shape without its index
+        is the slow one.
         """
+        if not _count_index_is_usable(self._session):
+            logger.warning(
+                "Opportunity summary: %s is missing or unusable; falling back to the "
+                "grouped aggregate for run %s",
+                _COUNT_INDEX_NAME,
+                run_id,
+            )
+            return self._aggregate(
+                model=StockFeatureDaily,
+                details=StockFeatureDaily.details_json,
+                predicate=StockFeatureDaily.run_id == int(run_id),
+            )
         return self._count_feature_run(int(run_id))
 
     def _count_feature_run(self, run_id: int) -> OpportunityStateSummary:

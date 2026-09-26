@@ -281,12 +281,17 @@ def test_feature_run_unknown_states_stay_out_of_buckets_but_in_totals():
 
 
 def test_feature_run_issues_a_single_statement():
-    """One round trip, not sixteen.
+    """One index probe plus one counted statement -- not sixteen round trips.
 
     The counts are correlated scalar subqueries in one ``SELECT``. Sixteen
     separate queries would be correct and sixteen times the latency on a slow
     link -- and would quietly reintroduce the round-trip cost this rewrite is
     meant to remove.
+
+    The probe is a second statement by design: it decides whether the counted
+    shape has the index it needs. It is one cheap catalog lookup, so the
+    guarantee that matters is "no per-state round trip", not "exactly one
+    statement". Both are asserted to keep either from regressing.
     """
     with _feature_session_with(
         [("A", {"correction_survivor": True, "action_state": "watch"})]
@@ -304,4 +309,135 @@ def test_feature_run_issues_a_single_statement():
         finally:
             event.remove(engine, "before_cursor_execute", capture)
 
+    assert len(statements) == 2, statements
+    # The probe is the catalog lookup. On SQLite it fails ("no such table:
+    # pg_index"), which is the documented fallback -- so the second statement is
+    # legitimately the grouped one. The guarantee is that the shape is chosen by
+    # the probe and issued once, not split per state.
+    assert sum("pg_index" in s for s in statements) <= 1, statements
+    counted = [s for s in statements if "pg_index" not in s]
+    assert len(counted) == 1, statements
+    assert "GROUP BY" not in counted[0].upper() or "JSON_EXTRACT" in counted[0], counted[0]
+
+
+# ── The fallback when the count index is missing or unusable ──────────────
+
+
+def test_feature_run_falls_back_to_grouping_without_the_index(monkeypatch):
+    """A missing or invalid index must degrade, not stall.
+
+    Measured on a copy of the production table: the same sixteen counts take
+    6.8 ms with this index and 56.7 s without it, because each count scans the
+    run on its own. A build that never ran, was rolled back, or died halfway
+    would turn the Daily Snapshot into a minute-long scan.
+
+    Both shapes answer the same question, so the fallback has to return the same
+    summary -- asserted by comparing them rather than by a written-out number.
+    """
+    rows = [
+        ("READY-SURV", {"correction_survivor": True, "action_state": "setup_ready"}),
+        ("WATCH-SURV", {"correction_survivor": True, "action_state": "watch"}),
+        ("WATCH-NOSURV", {"correction_survivor": False, "action_state": "watch"}),
+        ("UNKNOWN", {"correction_survivor": False, "action_state": "not-a-state"}),
+    ]
+    with _feature_session_with(rows) as session:
+        repo = SqlOpportunityStateSummaryRepository(session)
+        expected = repo._aggregate(
+            model=StockFeatureDaily,
+            details=StockFeatureDaily.details_json,
+            predicate=StockFeatureDaily.run_id == 7,
+        )
+        monkeypatch.setattr(
+            "app.infra.db.repositories.opportunity_summary_repo._count_index_is_usable",
+            lambda _session: False,
+        )
+        engine = session.get_bind()
+        statements = []
+
+        def capture(_conn, _cursor, statement, *_args):
+            if statement.lstrip().upper().startswith("SELECT"):
+                statements.append(statement)
+
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            fallen_back = repo.for_feature_run(7)
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+
+    # The result alone cannot prove the fallback ran: on this fixture the counted
+    # path happens to produce the same numbers, so asserting only the summary
+    # would pass with the fallback deleted. The shape is what is asserted.
+    assert fallen_back == expected
+    assert fallen_back.rows_total == 4
+    assert fallen_back.survivor_count == 2
+    shapes = [s for s in statements if "pg_index" not in s]
+    assert len(shapes) == 1, statements
+    assert "GROUP BY" in shapes[0].upper(), (
+        "the fallback did not group; the counted shape ran without its index: "
+        f"{shapes[0]}"
+    )
+
+
+def test_feature_run_uses_the_counted_shape_when_the_index_is_usable(monkeypatch):
+    """The probe gates the counted shape; with a usable index it is used.
+
+    Without this, making the probe always return False would silently keep the
+    slower grouped path forever and no test would notice.
+    """
+    monkeypatch.setattr(
+        "app.infra.db.repositories.opportunity_summary_repo._count_index_is_usable",
+        lambda _session: True,
+    )
+    with _feature_session_with(
+        [("A", {"correction_survivor": True, "action_state": "watch"})]
+    ) as session:
+        engine = session.get_bind()
+        statements = []
+
+        def capture(_conn, _cursor, statement, *_args):
+            if statement.lstrip().upper().startswith("SELECT"):
+                statements.append(statement)
+
+        event.listen(engine, "before_cursor_execute", capture)
+        try:
+            summary = SqlOpportunityStateSummaryRepository(session).for_feature_run(7)
+        finally:
+            event.remove(engine, "before_cursor_execute", capture)
+
+    assert summary.rows_total == 1
     assert len(statements) == 1, statements
+    assert "GROUP BY" not in statements[0].upper(), statements[0]
+
+
+def test_index_probe_treats_an_unreadable_catalog_as_not_usable():
+    """A backend without ``pg_index`` falls back instead of raising.
+
+    SQLite has no ``pg_index``, so the probe's own query fails there. The
+    fallback is correct on every backend, so an unreadable catalog has to mean
+    "not usable" rather than propagate the error to the caller.
+    """
+    with _feature_session_with(
+        [("A", {"correction_survivor": True, "action_state": "watch"})]
+    ) as session:
+        from app.infra.db.repositories.opportunity_summary_repo import (
+            _count_index_is_usable,
+        )
+
+        assert _count_index_is_usable(session) is False
+        # And the caller still answers correctly.
+        assert SqlOpportunityStateSummaryRepository(session).for_feature_run(7).rows_total == 1
+
+
+def test_index_probe_reads_validity_and_readiness_not_just_presence():
+    """An interrupted CONCURRENTLY build leaves a same-named, unusable index.
+
+    ``indisvalid`` is false while a concurrent build is in progress or after it
+    failed. Counting the name alone would treat that index as present and hand
+    the query back to a plan that cannot use it.
+    """
+    from app.infra.db.repositories.opportunity_summary_repo import _INDEX_USABLE_SQL
+
+    sql = str(_INDEX_USABLE_SQL).lower()
+    assert "indisvalid" in sql
+    assert "indisready" in sql
+    assert _INDEX_USABLE_SQL._bindparams["name"] is not None

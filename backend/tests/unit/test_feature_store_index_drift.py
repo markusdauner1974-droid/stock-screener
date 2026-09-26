@@ -722,7 +722,16 @@ def test_opportunity_summary_migration_matches_the_repository_shape():
             return values
 
     class _FakeSession:
-        def execute(self, statement):
+        def execute(self, statement, params=None):
+            # The index probe runs first and is not the statement under test; the
+            # captured list must hold only the counted SELECT.
+            if params is not None and "name" in params:
+                class _ProbeResult:
+                    @staticmethod
+                    def scalar():
+                        return 1
+
+                return _ProbeResult()
             captured.append(
                 str(statement.compile(dialect=postgresql.dialect())).replace(
                     "stock_feature_daily.", ""
