@@ -47,6 +47,39 @@ _OLLAMA_API_BASE_DEFAULT = "https://ollama.com"
 _OPENCODE_GO_SESSION_ID = f"social-{uuid4().hex}"
 
 
+def _load_ollama_api_base() -> Optional[str]:
+    """Read the admin's saved Ollama destination, or ``None``.
+
+    ``POST /config/ollama`` writes the ``ollama_api_base`` row, and that row is
+    the one source that reflects what an admin actually selected. It is read here
+    rather than pushed into ``settings`` because a Settings instance is built
+    from the environment once and is shared; mutating it would not reach the
+    worker containers, and the settings module cannot depend on the database.
+
+    The import is local so this module keeps working in contexts without a
+    database (for example a plain import in a script), and a session that cannot
+    be opened is treated as "nothing saved" rather than as a hard failure: the
+    environment override and the cloud default behind it still apply.
+
+    Returns:
+        The saved base URL, or ``None`` when nothing is stored or the lookup is
+        unavailable.
+    """
+    try:
+        from ...database import SessionLocal
+        from ...models.app_settings import AppSetting
+        from sqlalchemy import select
+
+        with SessionLocal() as session:
+            row = session.scalar(
+                select(AppSetting.value).where(AppSetting.key == "ollama_api_base")
+            )
+    except Exception:  # noqa: BLE001 - any lookup failure means "nothing saved".
+        logger.debug("Ollama base: no saved setting readable, using env or default")
+        return None
+    return row or None
+
+
 class LLMError(Exception):
     """Base exception for LLM errors."""
     pass
@@ -102,12 +135,21 @@ class LLMService:
             preset: Optional custom ModelPreset (overrides use_case)
         """
         self.preset = preset or get_preset_for_use_case(use_case)
-        self._setup_api_keys()
+        self._setup_api_keys(_load_ollama_api_base())
         self._groq_key_manager = get_groq_key_manager()
         self._zai_key_manager = get_zai_key_manager()
 
-    def _setup_api_keys(self):
-        """Set up API keys from settings or environment."""
+    def _setup_api_keys(self, runtime_ollama_base: Optional[str] = None):
+        """Set up API keys from settings or environment.
+
+        Args:
+            runtime_ollama_base: The admin's saved Ollama destination, if the
+                caller could read it. ``POST /config/ollama`` persists it to the
+                ``ollama_api_base`` row, which only a caller holding a database
+                session can see -- the API route and each worker through
+                ``SessionLocal``. Passing it in keeps one source authoritative
+                instead of a truthy Settings default shadowing the saved value.
+        """
         # Groq
         groq_key = getattr(settings, "groq_api_key", None) or os.environ.get("GROQ_API_KEY")
         if groq_key:
@@ -159,8 +201,26 @@ class LLMService:
             or os.environ.get("OLLAMA_API_KEY")
             or ""
         )
+        # The destination the admin selected, or the documented cloud default.
+        #
+        # An earlier version read ``settings.ollama_api_base`` first. That was wrong:
+        # the field carries a truthy default ("https://ollama.com"), so an admin who
+        # pointed the deployment at a local daemon through ``POST /config/ollama`` --
+        # which writes the ``ollama_api_base`` row *and* ``OLLAMA_API_BASE``, but
+        # cannot reach a Settings instance built from the environment -- kept getting
+        # the cloud host back, including from a freshly constructed LLMService
+        # (reproduced: saved base http://127.0.0.1:9, resolved https://ollama.com).
+        # Extraction prompts could then be sent to the wrong destination, or fail
+        # unauthenticated when only a local daemon had been intended.
+        #
+        # Resolution order is therefore explicit, not first-truthy:
+        #   1. the admin's saved selection, passed in by the caller that could read it
+        #   2. ``OLLAMA_API_BASE`` in the process environment
+        #   3. the cloud default
+        # The Settings field is no longer consulted: it cannot reflect the saved row,
+        # and a truthy fallback in front of the environment is what caused the bug.
         self._ollama_api_base = (
-            getattr(settings, "ollama_api_base", None)
+            runtime_ollama_base
             or os.environ.get("OLLAMA_API_BASE")
             or _OLLAMA_API_BASE_DEFAULT
         )

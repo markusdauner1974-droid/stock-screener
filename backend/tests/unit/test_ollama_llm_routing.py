@@ -2,9 +2,28 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.services.llm.groq_key_manager import GroqKeyManager
 from app.services.llm.zai_key_manager import ZAIKeyManager
 from app.services.llm.llm_service import LLMService
+
+
+def _settings_with_ollama_key(key: str, base: str = "https://ollama.com"):
+    """A stand-in that still carries the cloud base, as a Settings instance does.
+
+    ``base`` mirrors the real field default on purpose. A stub without it would
+    let the "saved selection wins" test pass even if the code went back to
+    reading Settings first, because ``getattr`` would find nothing to prefer.
+    """
+
+    class _Settings:
+        """Carries both Ollama fields, key included."""
+
+        ollama_api_key = key
+        ollama_api_base = base
+
+    return _Settings()
 
 
 def _service(*, key: str = "", base: str = "https://ollama.com") -> LLMService:
@@ -160,17 +179,21 @@ def test_settings_default_ollama_base_points_at_cloud() -> None:
 
 
 def test_setup_api_keys_reads_ollama_settings(monkeypatch) -> None:
-    """Exercise the real wiring path from settings into the cached instance attributes."""
-    from app.config.settings import settings as live_settings
-    from app.services.llm.llm_service import LLMService
+    """Exercise the real wiring path from the saved selection into the attributes."""
     from app.services.llm.config import get_preset_for_use_case
+    from app.services.llm.llm_service import LLMService
 
-    monkeypatch.setattr(live_settings, "ollama_api_key", "wired-key", raising=False)
-    monkeypatch.setattr(live_settings, "ollama_api_base", "http://ollama:11434", raising=False)
+    monkeypatch.setattr(
+        "app.services.llm.llm_service._load_ollama_api_base",
+        lambda: "http://ollama:11434",
+    )
+    monkeypatch.setattr(
+        "app.services.llm.llm_service.settings", _settings_with_ollama_key("wired-key")
+    )
 
     service = LLMService.__new__(LLMService)
     service.preset = get_preset_for_use_case("extraction")
-    service._setup_api_keys()
+    service._setup_api_keys("http://ollama:11434")
 
     assert service._ollama_api_key == "wired-key"
     assert service._ollama_api_base == "http://ollama:11434"
@@ -178,18 +201,242 @@ def test_setup_api_keys_reads_ollama_settings(monkeypatch) -> None:
 
 def test_setup_api_keys_falls_back_to_cloud_default(monkeypatch) -> None:
     """With nothing configured the base must still resolve to Ollama Cloud."""
-    from app.config.settings import settings as live_settings
-    from app.services.llm.llm_service import LLMService
     from app.services.llm.config import get_preset_for_use_case
+    from app.services.llm.llm_service import LLMService
 
-    monkeypatch.setattr(live_settings, "ollama_api_key", "", raising=False)
-    monkeypatch.setattr(live_settings, "ollama_api_base", "", raising=False)
     monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
     monkeypatch.delenv("OLLAMA_API_BASE", raising=False)
+    monkeypatch.setattr(
+        "app.services.llm.llm_service.settings", _settings_with_ollama_key("")
+    )
 
     service = LLMService.__new__(LLMService)
     service.preset = get_preset_for_use_case("extraction")
-    service._setup_api_keys()
+    service._setup_api_keys(None)
 
     assert service._ollama_api_key == ""
     assert service._ollama_api_base == "https://ollama.com"
+
+
+def test_saved_selection_beats_the_settings_default(monkeypatch) -> None:
+    """The admin's saved destination wins over the cloud default in Settings.
+
+    Raised by @xang1234 as P1. ``POST /config/ollama`` writes the
+    ``ollama_api_base`` row and ``OLLAMA_API_BASE``, but it cannot reach a
+    Settings instance built from the environment -- and that instance carries a
+    truthy default. Reading Settings first therefore returned the cloud host for
+    a deployment an admin had pointed at a local daemon:
+
+        saved base http://127.0.0.1:9  ->  resolved https://ollama.com
+        (reproduced before the fix)
+
+    The saved value is authoritative now, whatever Settings says.
+    """
+    from app.config.settings import Settings
+    from app.services.llm.config import get_preset_for_use_case
+    from app.services.llm.llm_service import LLMService
+
+    monkeypatch.delenv("OLLAMA_API_BASE", raising=False)
+    # The default a Settings instance carries when nothing is in the environment.
+    assert Settings.model_fields["ollama_api_base"].default == "https://ollama.com"
+    monkeypatch.setattr(
+        "app.services.llm.llm_service.settings",
+        _settings_with_ollama_key("cloud-key", base="https://ollama.com"),
+    )
+
+    service = LLMService.__new__(LLMService)
+    service.preset = get_preset_for_use_case("extraction")
+    service._setup_api_keys("http://127.0.0.1:9")
+
+    assert service._ollama_api_base == "http://127.0.0.1:9", (
+        "a saved local-daemon base was overridden; extraction prompts would go "
+        "to ollama.com"
+    )
+
+
+def test_environment_applies_when_nothing_is_saved(monkeypatch) -> None:
+    """``OLLAMA_API_BASE`` still configures a deployment with no saved row."""
+    from app.services.llm.config import get_preset_for_use_case
+    from app.services.llm.llm_service import LLMService
+
+    monkeypatch.setenv("OLLAMA_API_BASE", "http://ollama:11434")
+    monkeypatch.setattr(
+        "app.services.llm.llm_service.settings", _settings_with_ollama_key("")
+    )
+
+    service = LLMService.__new__(LLMService)
+    service.preset = get_preset_for_use_case("extraction")
+    service._setup_api_keys(None)
+
+    assert service._ollama_api_base == "http://ollama:11434"
+
+
+def test_a_fresh_service_resolves_the_saved_selection(monkeypatch) -> None:
+    """A newly constructed LLMService must pick up the saved value by itself.
+
+    The point of the fix: the admin's choice is not a constructor argument that
+    a route has to remember, and it is not pushed into the process environment
+    of the API container only. A worker building its own service reads the row.
+    """
+    import app.services.llm.llm_service as mod
+
+    monkeypatch.setattr(mod, "_load_ollama_api_base", lambda: "http://127.0.0.1:9")
+    monkeypatch.delenv("OLLAMA_API_BASE", raising=False)
+
+    service = mod.LLMService(use_case="extraction")
+
+    assert service._ollama_api_base == "http://127.0.0.1:9"
+
+
+def test_saved_selection_is_read_from_the_app_settings_row(monkeypatch) -> None:
+    """``_load_ollama_api_base`` reads the row ``POST /config/ollama`` writes."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    import app.database as db_module
+    import app.services.llm.llm_service as mod
+    from app.database import Base
+    from app.models.app_settings import AppSetting
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    with factory() as session:
+        session.add(
+            AppSetting(
+                key="ollama_api_base",
+                value="http://127.0.0.1:9",
+                category="llm",
+                description="Ollama API base URL",
+            )
+        )
+        session.commit()
+
+    monkeypatch.setattr(db_module, "SessionLocal", factory)
+    assert mod._load_ollama_api_base() == "http://127.0.0.1:9"
+
+
+def test_missing_saved_selection_yields_none(monkeypatch) -> None:
+    """An empty table, or no readable session, means "nothing saved"."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    import app.database as db_module
+    import app.services.llm.llm_service as mod
+    from app.database import Base
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(db_module, "SessionLocal", sessionmaker(bind=engine))
+    assert mod._load_ollama_api_base() is None
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(db_module, "SessionLocal", _boom)
+    assert mod._load_ollama_api_base() is None
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "ollama/deepseek-v4.1-flash",
+        "ollama/deepseek-v4.1-flash:cloud",
+    ],
+)
+def test_both_ollama_destinations_are_sanctioned_for_extraction(model_id: str) -> None:
+    """Cloud and local-daemon identifiers must both pass the extraction allowlist.
+
+    Raised by @xang1234 as P1 on the model list. Ollama's documentation uses the
+    bare name for a direct request to ollama.com and the ``:cloud`` tag for a
+    model reached through a local daemon's ``/api/chat``. Only the bare form was
+    registered, so selecting a local daemon left the allowlist rejecting the one
+    sanctioned model:
+
+        ollama/deepseek-v4.1-flash        extraction -> True
+        ollama/deepseek-v4.1-flash:cloud  extraction -> False   (before the fix)
+    """
+    from app.services.llm.config import is_model_supported_for_use_case
+
+    assert is_model_supported_for_use_case(model_id=model_id, use_case="extraction")
+
+
+def test_both_ollama_destinations_are_offered_in_the_registry() -> None:
+    """A sanctioned model must also be selectable, or the allowlist is unusable."""
+    from app.services.llm.config import AVAILABLE_MODELS
+
+    ids = {model["id"] for model in AVAILABLE_MODELS}
+    assert "ollama/deepseek-v4.1-flash" in ids
+    assert "ollama/deepseek-v4.1-flash:cloud" in ids
+
+
+def test_local_daemon_model_still_reaches_the_native_endpoint() -> None:
+    """The ``:cloud`` tag must survive into LiteLLM's model parameter.
+
+    The routing strips the ``ollama/`` prefix; the tag is part of the model the
+    daemon is asked for and must not be dropped on the way.
+    """
+    params: dict = {"model": "ollama/deepseek-v4.1-flash:cloud"}
+
+    provider, _key, _manager = _service()._apply_provider_overrides(params)
+
+    assert provider == "ollama"
+    assert params["model"] == "ollama_chat/deepseek-v4.1-flash:cloud"
+    assert params["api_base"] == "https://ollama.com"
+
+
+@pytest.mark.asyncio
+async def test_saved_endpoint_through_the_api_reaches_a_new_service(monkeypatch) -> None:
+    """The endpoint-to-service path @xang1234 asked for, end to end.
+
+    Reproduces his report through the real API route rather than by writing the
+    row by hand: ``POST /config/ollama`` persists the admin's choice, and a
+    freshly constructed ``LLMService`` must then resolve *that* destination --
+    not the cloud host the settings default carries.
+
+    Before the fix this resolved ``https://ollama.com`` for a saved
+    ``http://127.0.0.1:9``, because the route cannot reach a Settings instance
+    built from the environment and the truthy default won over ``OLLAMA_API_BASE``.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    import app.database as db_module
+    import app.services.llm.llm_service as mod
+    from app.api.v1 import config as config_api
+    from app.api.v1.config import update_ollama_settings
+    from app.database import Base
+    from app.models.app_settings import AppSetting
+    from app.schemas.config import OllamaSettings
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine)
+    monkeypatch.setattr(db_module, "SessionLocal", factory)
+    monkeypatch.delenv("OLLAMA_API_BASE", raising=False)
+
+    async def _fake_check_ollama_status(_api_base: str) -> str:
+        return "connected"
+
+    monkeypatch.setattr(config_api, "check_ollama_status", _fake_check_ollama_status)
+
+    with factory() as db:
+        await update_ollama_settings(
+            request=OllamaSettings(api_base="http://127.0.0.1:9"),
+            db=db,
+            _auth=True,
+        )
+
+    # The route wrote the row the service reads.
+    with factory() as db:
+        saved = db.query(AppSetting).filter(AppSetting.key == "ollama_api_base").first()
+    assert saved is not None
+    assert saved.value == "http://127.0.0.1:9"
+
+    # The route also exports the value in the API process' environment. A worker
+    # is a separate container with its own environment, so drop it: what remains
+    # is exactly what a worker sees -- the database and the shared defaults.
+    monkeypatch.delenv("OLLAMA_API_BASE", raising=False)
+
+    # A service constructed afterwards must still resolve the saved destination.
+    assert mod.LLMService(use_case="extraction")._ollama_api_base == "http://127.0.0.1:9"
