@@ -426,9 +426,13 @@ class LLMService:
             provider_key = self._opencode_go_api_key
             provider_name = "opencode-go"
         elif is_ollama:
-            # A local Ollama daemon ignores the key; Ollama Cloud requires it. Only a
-            # configured key is injected so local hosts keep working without one.
-            provider_key = self._ollama_api_key
+            # Ollama Cloud authenticates with the key. A local daemon does not use one,
+            # and ``ollama_chat`` would forward whatever it is given as an
+            # ``Authorization`` header -- so a key configured for Cloud would be sent to
+            # a local or third-party host. The key is therefore attached only when the
+            # destination is the cloud host; every other base gets the request without it.
+            if self._ollama_api_base.rstrip("/") == _OLLAMA_API_BASE_DEFAULT:
+                provider_key = self._ollama_api_key
             provider_name = "ollama"
 
         if provider_key:

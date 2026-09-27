@@ -440,3 +440,74 @@ async def test_saved_endpoint_through_the_api_reaches_a_new_service(monkeypatch)
 
     # A service constructed afterwards must still resolve the saved destination.
     assert mod.LLMService(use_case="extraction")._ollama_api_base == "http://127.0.0.1:9"
+
+
+def test_cloud_key_is_not_forwarded_to_a_local_daemon() -> None:
+    """A key configured for Ollama Cloud must not reach another host.
+
+    Raised by @coderabbitai. ``ollama_chat`` forwards whatever key it is given
+    as an ``Authorization`` header, so a deployment with ``OLLAMA_API_KEY`` set
+    was sending that secret to a local or third-party base as soon as the admin
+    pointed it at one -- and a local daemon ignores it anyway.
+
+    The key is now attached only when the destination is the cloud host. The
+    pre-existing local test could not catch this: it passes ``key=""``, so
+    ``api_key`` is absent either way.
+    """
+    params: dict = {"model": "ollama/deepseek-v4.1-flash:cloud"}
+
+    _service(key="test-ollama-key", base="http://ollama:11434")._apply_provider_overrides(
+        params
+    )
+
+    assert "api_key" not in params, (
+        "the cloud API key was forwarded to a local daemon base: "
+        f"{params.get('api_key')!r}"
+    )
+
+
+def test_cloud_key_is_not_forwarded_to_a_third_party_base() -> None:
+    """Any non-cloud base is treated the same way, not just a known local host."""
+    params: dict = {"model": "ollama/deepseek-v4.1-flash"}
+
+    _service(
+        key="test-ollama-key", base="https://ollama-proxy.internal.example"
+    )._apply_provider_overrides(params)
+
+    assert "api_key" not in params
+
+
+def test_cloud_key_is_attached_at_the_cloud_destination() -> None:
+    """The cloud host still authenticates; the fix must not disable that."""
+    params: dict = {"model": "ollama/deepseek-v4.1-flash"}
+
+    _service(key="test-ollama-key", base="https://ollama.com")._apply_provider_overrides(
+        params
+    )
+
+    assert params["api_key"] == "test-ollama-key"
+    assert params["api_base"] == "https://ollama.com"
+
+
+def test_a_trailing_slash_does_not_defeat_the_cloud_check() -> None:
+    """``POST /config/ollama`` strips the slash, but env configs may not."""
+    params: dict = {"model": "ollama/deepseek-v4.1-flash"}
+
+    _service(key="test-ollama-key", base="https://ollama.com/")._apply_provider_overrides(
+        params
+    )
+
+    assert params["api_key"] == "test-ollama-key"
+
+
+def test_a_local_daemon_needs_no_key_to_route() -> None:
+    """Without a key the local path must still resolve, as it always did."""
+    params: dict = {"model": "ollama/deepseek-v4.1-flash:cloud"}
+
+    provider, key, _manager = _service(base="http://ollama:11434")._apply_provider_overrides(
+        params
+    )
+
+    assert provider == "ollama"
+    assert key is None
+    assert params["api_base"] == "http://ollama:11434"
