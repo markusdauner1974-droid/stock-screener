@@ -6,14 +6,20 @@ called from ``app.main``). Compose gives it a fixed start-up grace:
 
     start_period
 
-While that grace runs, a failing probe does not count towards ``retries``, so a migration
-that fits inside it is never reported unhealthy. Every dependent that declares
-``condition: service_healthy`` aborts once the grace is spent and a probe has failed:
+Probe failures during that grace are not counted towards ``retries``. The grace does not
+run to its end unconditionally, though: if a probe succeeds before it is spent, the
+container counts as started and every later consecutive failure is counted, including
+inside the remaining grace. Once ``retries`` consecutive failures have been counted, the
+container is reported unhealthy.
+
+``depends_on: condition: service_healthy`` gates the *start* of the containers declaring
+it. While the backend is starting they are held back; if it never becomes healthy, their
+start is abandoned and nothing retries it:
 
     dependency failed to start: container <backend> is unhealthy
 
-A migration that legitimately outlives the grace therefore takes the whole worker tier
-down, and nothing retries it afterwards.
+A migration that legitimately outlives the grace therefore keeps the whole worker tier from
+starting.
 
 ``start_period + interval * retries`` is deliberately not used here, in prose or in an
 assertion. Docker does not define the unhealthy deadline as that sum -- probe scheduling
@@ -68,9 +74,10 @@ def _duration_seconds(value: object) -> int:
 def test_backend_start_period_covers_a_long_migration():
     """A running migration must never be reported as an unhealthy backend.
 
-    ``start_period`` is the whole grace: while it runs, a failing probe does not count
-    towards ``retries``, so a migration that fits inside it is never reported unhealthy.
-    That is the property to assert.
+    ``start_period`` is the grace a bootstrapping container gets for free: probe failures
+    during it are not counted towards ``retries``. A migration that fits inside the grace
+    and succeeds on a probe afterwards is therefore never reported unhealthy, which is the
+    property to assert.
 
     ``start_period + interval * retries`` deliberately is *not* asserted anywhere. Docker
     does not define the unhealthy deadline that way -- probe scheduling also depends on
