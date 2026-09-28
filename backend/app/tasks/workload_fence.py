@@ -21,7 +21,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 import threading
 
-from sqlalchemy import event, select, update
+from sqlalchemy import event, select
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.orm import Session
 
 from ..models.workload_fence import WorkloadFence
@@ -53,18 +54,18 @@ def _claim_generation(key: str) -> int:
     from ..database import SessionLocal
 
     with SessionLocal() as db:
-        bumped = db.execute(
-            update(WorkloadFence)
-            .where(WorkloadFence.key == key)
-            .values(generation=WorkloadFence.generation + 1)
-        ).rowcount
-        if not bumped:
-            # ponytail: first claim per key only; the Redis lease keeps two
-            # first claims from racing, and a lost race fails the task loudly.
-            db.add(WorkloadFence(key=key, generation=1))
-            db.flush()
+        # One atomic upsert, so concurrent first claims for a key never race.
+        # SQLite is the unit-test harness only.
+        dialect = db.get_bind().dialect.name
+        insert = postgresql.insert if dialect == "postgresql" else sqlite.insert
         generation = db.execute(
-            select(WorkloadFence.generation).where(WorkloadFence.key == key)
+            insert(WorkloadFence)
+            .values(key=key, generation=1)
+            .on_conflict_do_update(
+                index_elements=[WorkloadFence.key],
+                set_={"generation": WorkloadFence.generation + 1},
+            )
+            .returning(WorkloadFence.generation)
         ).scalar_one()
         db.commit()
     return generation

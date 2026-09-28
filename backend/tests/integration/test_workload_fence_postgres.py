@@ -65,3 +65,15 @@ def test_successor_claim_waits_for_a_commit_already_past_the_fence_check():
                 db.commit()  # the old holder's commit lands before the takeover
         assert claim.result(timeout=5) == 2
     assert _breadth_rows() == 1
+
+
+def test_concurrent_first_claims_for_a_new_key_both_succeed():
+    barrier = threading.Barrier(2)
+
+    def claim():
+        barrier.wait()
+        return _claim_generation(KEY)
+
+    with ThreadPoolExecutor(2) as pool:
+        claims = [pool.submit(contextvars.Context().run, claim) for _ in range(2)]
+        assert sorted(f.result(timeout=5) for f in claims) == [1, 2]
