@@ -94,38 +94,51 @@ Enables assistant web research fallback.
 
 The backend runs its Alembic migrations inside the application lifespan, blocking, before
 uvicorn accepts HTTP. While `backend.healthcheck.start_period` runs, a failing probe does not
-count towards `retries`, so a migration that fits inside it is never reported unhealthy. The
-whole Celery tier declares `condition: service_healthy` on the backend, so a grace shorter than
-a real migration takes the worker tier down and nothing retries it.
+count towards `retries`. The whole Celery tier declares `condition: service_healthy` on the
+backend, so a backend that stays unhealthy past that grace blocks the **start** of the worker
+tier; it does not stop workers that are already running.
 
-`start_period` is therefore set well above the longest expected migration (`900s` in
-`docker-compose.yml`). **That value alone is not sufficient.** An orchestrator applies its own,
-independent wait and stops before the Compose grace is spent, so the two must be ordered:
+`start_period` is set well above the longest expected migration (`900s` in `docker-compose.yml`).
+**That value alone is not sufficient.** An orchestrator applies its own, independent wait:
 
 | Setting | Where | Value |
 |---------|-------|-------|
 | `backend.healthcheck.start_period` | `docker-compose.yml` | `900s` |
 | `deployWaitTimeout` | Arcane, project settings | `1200` |
 
-The orchestration wait must exceed `start_period`; otherwise the deploy aborts while Docker
-still reports the backend as starting, and the failure looks identical to the one the grace was
-raised to prevent. Measured on a QNAP TS-473A, revision `20260926_0058` (an index over a 216 MB
-table) needed **519 s** inside the lifespan:
+Two deadlines can end the wait, and **the health check is usually the earlier one**:
 
 ```
-deployWaitTimeout   1200 s
-start_period         900 s
-observed migration   519 s
-slack against wait   681 s
+start_period + interval * retries   900 + 30 * 3 = 990 s   (never a successful probe)
+deployWaitTimeout                                        1200 s
 ```
 
-The margin that matters is against the orchestration wait, since that is the limit reached
-first; the grace is 381 s above the observed migration. Before this change the wait was `600`
-against a `30 s` grace, so the deploy aborted after 93 s and could not recover.
+So `deployWaitTimeout` must cover the expected time to healthy — it does not have to be
+reached, and it is not automatically the first limit. Setting it below the health-check
+deadline would cap the grace for no reason, which is why the two are ordered this way.
 
-Docker Compose itself needs no such pairing — `start_period` is the only deadline it applies.
-The table matters when the stack is driven by an orchestrator such as Arcane, Portainer, or a
-CI deploy step; set the equivalent "time to healthy" limit there.
+Measured on a QNAP TS-473A, container start to first successful `/readyz`:
+
+```
+15:34:17   container created, uvicorn parent started 15:34:19
+15:34:43   migrations 20260925_0058 .. 20260926_0060, ~6 s total
+15:34:53   first /readyz 200          -> 36 s
+```
+
+Four probes failed before that, all inside the grace. The 36 s is not representative of a
+schema-changing revision: revision `20260926_0058` alone (an index over a 216 MB table) took
+**519 s** of migration time on this host, which is what `900s` is sized against. That figure
+is migration time from the Alembic log, not startup time — size the limits against the full
+interval from container start to the first successful `/readyz`.
+
+Before this change the grace was `30 s` and the wait `600`, so the deploy aborted after 93 s
+and could not recover.
+
+Docker Compose itself needs no such pairing **when `docker compose up` is run without
+`--wait`**. That option (`up --wait --wait-timeout N`) adds its own deadline for services to
+become running or healthy — configure it the same way when it is used. The table above matters
+whenever the stack is driven by an orchestrator such as Arcane, Portainer, or a CI deploy step;
+set the equivalent "time to healthy" limit there.
 
 If a migration is expected to outlive both limits, the durable fix is to run migrations as a
 dedicated step before the API starts, rather than extending the grace further.
