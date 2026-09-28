@@ -27,6 +27,7 @@ from ..database import SessionLocal
 from ..domain.markets.cn_symbols import cn_price_symbol_for_native_provider
 from ..models.stock import StockPrice
 from ..models.stock_universe import StockUniverse, UNIVERSE_STATUS_ACTIVE
+from ..tasks.workload_fence import LeaseLost
 from ..config import settings
 from ..utils.market_hours import (
     is_market_open, get_eastern_now, EASTERN, MARKET_CLOSE_TIME,
@@ -1526,6 +1527,9 @@ class PriceCacheService:
             else:
                 logger.debug(f"No new rows to persist for {symbol}")
 
+        except LeaseLost:
+            db.rollback()
+            raise
         except Exception as e:
             logger.error(f"Error storing {symbol} in database: {e}", exc_info=True)
             db.rollback()
@@ -1742,6 +1746,9 @@ class PriceCacheService:
             else:
                 logger.debug(f"No new rows to persist for batch of {len(batch_data)} symbols")
 
+        except LeaseLost:
+            db.rollback()
+            raise
         except Exception as e:
             logger.error(f"Error in batch database write: {e}", exc_info=True)
             db.rollback()

@@ -29,6 +29,7 @@ from .lease_renewal import (
 )
 from .market_queues import SUPPORTED_MARKETS, market_suffix, normalize_market
 from .transient_database import retry_transient_database_error
+from .workload_fence import workload_fence
 from .workload_coordination import (
     EXTERNAL_FETCH_GLOBAL_KEY,
     _coordination_retry,
@@ -553,7 +554,9 @@ def _serialized_data_fetch(task_name: str):
                         lambda: coordination.renew_external_fetch(task_id),
                     ),
                 ]
-                with keep_leases_alive(renewals):
+                with keep_leases_alive(renewals) as lease_lost, workload_fence(
+                    _market_workload_key(market_value), lease_lost
+                ):
                     result = func(*args, **kwargs)
 
                 duration = (datetime.now() - start_time).total_seconds()
@@ -569,8 +572,8 @@ def _serialized_data_fetch(task_name: str):
                 )
                 raise
             except LeaseNotHeld as e:
-                # A leftover same-id lease expired and was taken before the
-                # body started: wait for the new holder like any busy lease.
+                # Lost before the body started, or lost mid-run with a fenced
+                # commit rejected (LeaseLost): wait for the new holder.
                 message = f"lease_lost_before_start ({e})"
                 if task_instance is not None and hasattr(task_instance, "retry"):
                     _coordination_retry(task_instance, message)
