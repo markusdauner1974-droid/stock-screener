@@ -90,6 +90,46 @@ Enables assistant web research fallback.
 | `FRONTEND_IMAGE` | `ghcr.io/you/stockscreenclaude-frontend` | GHCR image (release overlay) |
 | `APP_IMAGE_TAG` | `v1.2.3` | Release tag to deploy |
 
+### Container orchestration
+
+The backend runs its Alembic migrations inside the application lifespan, blocking, before
+uvicorn accepts HTTP. While `backend.healthcheck.start_period` runs, a failing probe does not
+count towards `retries`, so a migration that fits inside it is never reported unhealthy. The
+whole Celery tier declares `condition: service_healthy` on the backend, so a grace shorter than
+a real migration takes the worker tier down and nothing retries it.
+
+`start_period` is therefore set well above the longest expected migration (`900s` in
+`docker-compose.yml`). **That value alone is not sufficient.** An orchestrator applies its own,
+independent wait and stops before the Compose grace is spent, so the two must be ordered:
+
+| Setting | Where | Value |
+|---------|-------|-------|
+| `backend.healthcheck.start_period` | `docker-compose.yml` | `900s` |
+| `deployWaitTimeout` | Arcane, project settings | `1200` |
+
+The orchestration wait must exceed `start_period`; otherwise the deploy aborts while Docker
+still reports the backend as starting, and the failure looks identical to the one the grace was
+raised to prevent. Measured on a QNAP TS-473A, revision `20260926_0058` (an index over a 216 MB
+table) needed **519 s** inside the lifespan:
+
+```
+deployWaitTimeout   1200 s
+start_period         900 s
+observed migration   519 s
+slack against wait   681 s
+```
+
+The margin that matters is against the orchestration wait, since that is the limit reached
+first; the grace is 381 s above the observed migration. Before this change the wait was `600`
+against a `30 s` grace, so the deploy aborted after 93 s and could not recover.
+
+Docker Compose itself needs no such pairing — `start_period` is the only deadline it applies.
+The table matters when the stack is driven by an orchestrator such as Arcane, Portainer, or a
+CI deploy step; set the equivalent "time to healthy" limit there.
+
+If a migration is expected to outlive both limits, the durable fix is to run migrations as a
+dedicated step before the API starts, rather than extending the grace further.
+
 ## Twitter/X Ingestion
 
 | Variable | Default | Description |

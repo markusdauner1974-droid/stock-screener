@@ -189,6 +189,12 @@ services:
       # `service_healthy`, so a short grace aborts the deploy with
       # "dependency failed to start: container <backend> is unhealthy" and leaves the
       # Celery containers down. Keep this above the longest expected migration.
+      #
+      # Raising this alone is not enough: the orchestrator runs a second, independent
+      # wait and stops before this grace is spent. On Arcane that is
+      # `deployWaitTimeout`, which must exceed the value here -- see docs/ENVIRONMENT.md,
+      # "Container orchestration". Docker Compose needs no such pairing: the grace is
+      # the only deadline it applies.
       start_period: 900s
     stop_grace_period: 30s
     restart: unless-stopped
