@@ -74,6 +74,10 @@ def quote_session_bar(
         }
     except (KeyError, TypeError, ValueError):
         return None
+    # Also rejects NaN (every comparison is False). Zero volume stays valid: indices report 0.
+    body_low, body_high = sorted((row["Open"], row["Close"]))
+    if not (0 < row["Low"] <= body_low and body_high <= row["High"]):
+        return None
     return pd.DataFrame([row], index=pd.DatetimeIndex([pd.Timestamp(expected_session)], name="Date"))
 
 
@@ -108,6 +112,9 @@ def repair_from_yahoo_quotes(
             if wait is not None:
                 wait()
             quotes = fetch_quotes(batch)
+            if not quotes:
+                # Every stale symbol has Yahoo history, so an empty batch is an outage.
+                raise ValueError("empty quote response")
         except Exception as exc:  # provider/network variability
             logger.warning("Yahoo quote repair request failed (%d symbols): %s", len(batch), exc)
             consecutive_failures += 1

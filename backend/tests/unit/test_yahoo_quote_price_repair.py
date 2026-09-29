@@ -30,9 +30,9 @@ def _quote(symbol, *, close, day=SESSION, state="PREPRE"):
     ts = datetime(day.year, day.month, day.day, 15, 30, tzinfo=TOKYO).timestamp()
     return {
         "symbol": symbol,
-        "regularMarketOpen": close - 10,
-        "regularMarketDayHigh": close + 5,
-        "regularMarketDayLow": close - 20,
+        "regularMarketOpen": close * 0.99,
+        "regularMarketDayHigh": close * 1.01,
+        "regularMarketDayLow": close * 0.98,
         "regularMarketPrice": close,
         "regularMarketVolume": 1000,
         "regularMarketTime": int(ts),
@@ -101,6 +101,8 @@ def test_fills_interior_hole_before_next_intraday_bar():
         _quote("7203.T", close=3010.0, day=date(2026, 9, 30), state="REGULAR"),
         # Calendar says closed but Yahoo still reports a live session.
         _quote("7203.T", close=3010.0, state="REGULAR"),
+        # Close above the high: never persist an impossible bar.
+        _quote("7203.T", close=3010.0) | {"regularMarketDayHigh": 0, "regularMarketDayLow": 0},
     ],
 )
 def test_skips_quotes_that_do_not_describe_the_completed_session(quote):
@@ -139,3 +141,20 @@ def test_request_breaker_skips_remaining_batches(monkeypatch):
 
     assert len(calls) == repair_module.YAHOO_QUOTE_MAX_CONSECUTIVE_FAILURES
     assert stats == {"stale": 6, "repaired": 0, "failed": 3, "skipped": 3}
+
+
+def test_empty_quote_responses_trip_the_request_breaker(monkeypatch):
+    monkeypatch.setattr(repair_module, "YAHOO_QUOTE_BATCH_SIZE", 1)
+    calls = []
+    stale = _yahoo([("2026-09-28", 1, 1, 1, 1, 1, 1, 0.0)])
+    results = {f"{code}.T": _ok(stale) for code in range(1000, 1006)}
+
+    stats = repair_from_yahoo_quotes(
+        results,
+        expected_session=SESSION,
+        market_tz=TOKYO,
+        fetch_quotes=lambda symbols: calls.append(symbols) or [],
+    )
+
+    assert len(calls) == repair_module.YAHOO_QUOTE_MAX_CONSECUTIVE_FAILURES
+    assert stats["skipped"] == 3
