@@ -12,6 +12,8 @@ from app.domain.markets.key_markets import key_market_price_symbols
 from app.domain.providers.price_symbol_support import split_supported_price_symbols
 from app.models.stock import StockPrice
 from app.models.stock_universe import StockUniverse
+from app.services.price_row_normalization import stock_price_row_from_ohlcv
+from app.services.stock_price_persistence import persist_stock_price_mappings
 from app.services.breadth_history_price_coverage import (
     BreadthHistoryPriceCoverageService,
     DEFAULT_BREADTH_HISTORY_PRICE_LOOKBACK_DAYS,
@@ -331,16 +333,21 @@ class StaticDailyPriceRefreshService:
         )
         refreshed = stale_refreshed + bootstrap_refreshed
         failed = stale_failed + bootstrap_failed
+        retry_readjusted_symbols: list[str] = []
         retry_stats = self._retry_rate_limited_failures(
             market=market,
             rate_limited_symbols_by_period={
                 STATIC_DAILY_PRICE_REFRESH_PERIOD: stale_rate_limited,
                 STATIC_DAILY_PRICE_BOOTSTRAP_PERIOD: bootstrap_rate_limited,
             },
-            readjusted_symbols=readjusted_symbols,
+            readjusted_symbols=retry_readjusted_symbols,
         )
         refreshed += retry_stats["recovered"]
         failed -= retry_stats["recovered"]
+        # Their throttled first attempt was counted as failed; the re-bootstrap
+        # below now owns their outcome.
+        failed -= len(retry_readjusted_symbols)
+        readjusted_symbols.extend(retry_readjusted_symbols)
         if readjusted_symbols:
             print(
                 f"[static-daily prices] Re-bootstrapping {len(readjusted_symbols):,} "
@@ -566,7 +573,11 @@ class StaticDailyPriceRefreshService:
                     refreshed_count -= 1
                     readjusted_symbols.append(symbol)
             if replace_existing_rows and batch_to_store:
-                self._delete_rows_in_frame_ranges(batch_to_store)
+                replaced = self._replace_stored_history(batch_to_store)
+                for symbol in sorted(set(batch_to_store) - replaced):
+                    del batch_to_store[symbol]
+                    refreshed_count -= 1
+                    failed_count += 1
             if batch_to_store:
                 self._price_cache.store_batch_in_cache(
                     batch_to_store,
@@ -609,16 +620,46 @@ class StaticDailyPriceRefreshService:
             > STATIC_ADJUSTMENT_DRIFT_TOLERANCE
         }
 
-    def _delete_rows_in_frame_ranges(self, frames: dict[str, Any]) -> None:
+    def _replace_stored_history(self, frames: dict[str, Any]) -> set[str]:
+        """Swap stored rows for each frame's date range in one transaction.
+
+        Returns the symbols replaced; on any failure nothing is changed and
+        the empty set is returned, so callers count those symbols as failed.
+        """
+        rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        for symbol, frame in frames.items():
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                continue
+            rows = [
+                stock_price_row_from_ohlcv(
+                    symbol=symbol, row_date=pd.Timestamp(stamp).date(), row=row
+                )
+                for stamp, row in frame.iterrows()
+            ]
+            rows_by_symbol[symbol] = [row for row in rows if row is not None]
+        rows_by_symbol = {symbol: rows for symbol, rows in rows_by_symbol.items() if rows}
+        if not rows_by_symbol:
+            return set()
         with self._session_factory() as db:
-            for symbol, frame in frames.items():
-                if not isinstance(frame, pd.DataFrame) or frame.empty:
-                    continue
-                db.query(StockPrice).filter(
-                    StockPrice.symbol == symbol,
-                    StockPrice.date >= pd.Timestamp(frame.index.min()).date(),
-                ).delete(synchronize_session=False)
-            db.commit()
+            try:
+                for symbol, rows in rows_by_symbol.items():
+                    dates = [row["date"] for row in rows]
+                    db.query(StockPrice).filter(
+                        StockPrice.symbol == symbol,
+                        StockPrice.date >= min(dates),
+                        StockPrice.date <= max(dates),
+                    ).delete(synchronize_session=False)
+                persist_stock_price_mappings(db, rows_by_symbol)
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                print(
+                    "[static-daily prices] Could not replace back-adjusted history "
+                    f"for {len(rows_by_symbol):,} symbols: {exc}",
+                    flush=True,
+                )
+                return set()
+        return set(rows_by_symbol)
 
     def _retry_rate_limited_failures(
         self,

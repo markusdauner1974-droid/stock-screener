@@ -1572,3 +1572,59 @@ def test_static_daily_price_refresh_rebootstraps_readjusted_symbols_recovered_by
     ]
     assert _adj_closes(session_factory, "SPLIT.NS") == {0.5}
     assert result["readjusted_symbols"] == 1
+    # The throttled first attempt is not left counted as a failure.
+    assert result["yahoo_failed_symbols"] == 0
+    assert result["yahoo_fetched_symbols"] == 1 + len(IN_KEY_MARKET_PRICE_SYMBOLS)
+
+
+def _run_readjusted_split(session_factory, split_history):
+    _seed_rrg_startup_history(session_factory, ["SPLIT.NS"])
+
+    class _FakeFetcher:
+        def fetch_prices_in_batches(self, symbols, period="2y", start_batch_size=None, market=None):
+            if period == STATIC_DAILY_PRICE_BOOTSTRAP_PERIOD and symbols == ["SPLIT.NS"]:
+                return {"SPLIT.NS": {"price_data": _price_frame(split_history, 0.5), "has_error": False}}
+            return {
+                symbol: {"price_data": _top_up_frame(0.5), "has_error": False}
+                for symbol in symbols
+            }
+
+    return _rrg_startup_service(session_factory, _FakeFetcher(), []).refresh(
+        as_of_date=date(2026, 6, 4),
+        market="IN",
+        ensure_static_history=True,
+    )
+
+
+def test_static_daily_price_refresh_keeps_old_history_when_replacement_write_fails(monkeypatch) -> None:
+    import app.services.static_daily_price_refresh_service as module
+
+    def _failing_persist(*_args, **_kwargs):
+        raise RuntimeError("database write failed")
+
+    monkeypatch.setattr(module, "persist_stock_price_mappings", _failing_persist)
+    session_factory = _sqlite_session_factory()
+
+    result = _run_readjusted_split(
+        session_factory, [*_RRG_STARTUP_SEEDED_DATES, date(2026, 6, 4)]
+    )
+
+    # The delete rolled back with the failed insert, and the symbol is a failure.
+    assert _adj_closes(session_factory, "SPLIT.NS") == {1.0}
+    assert result["yahoo_failed_symbols"] == 1
+
+
+def test_static_daily_price_refresh_replaces_only_the_fetched_date_range() -> None:
+    session_factory = _sqlite_session_factory()
+
+    # A truncated 2y response that stops before the stored 2026-06-03 row.
+    truncated = [d for d in _RRG_STARTUP_SEEDED_DATES if d < date(2026, 6, 3)]
+    _run_readjusted_split(session_factory, truncated)
+
+    with session_factory() as db:
+        newest = (
+            db.query(StockPrice.adj_close)
+            .filter(StockPrice.symbol == "SPLIT.NS", StockPrice.date == date(2026, 6, 3))
+            .scalar()
+        )
+    assert newest == 1.0
