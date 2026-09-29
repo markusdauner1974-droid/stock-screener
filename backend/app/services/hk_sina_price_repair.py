@@ -68,63 +68,90 @@ def fetch_sina_hk_bars(symbol: str) -> pd.DataFrame | None:
     return frame[["Open", "High", "Low", "Close", "Volume"]].sort_index()
 
 
+def _stale_anchor(
+    payload: Mapping[str, Any], expected_ts: pd.Timestamp
+) -> tuple[pd.DataFrame, pd.DatetimeIndex, pd.Series, pd.Timestamp] | None:
+    """Return ``(valid, valid_dates, anchor_row, anchor_ts)`` when the frame lacks ``expected_ts``.
+
+    Only frames Yahoo returned history for qualify: that history anchors the
+    adjusted-close ratio.
+    """
+    price_data = payload.get("price_data")
+    if payload.get("has_error") or price_data is None or price_data.empty:
+        return None
+    valid = drop_non_finite_close_rows(price_data)
+    if valid is None or valid.empty:
+        return None
+    valid_dates = valid.index.normalize()
+    if valid.index.tz is not None:
+        valid_dates = valid_dates.tz_localize(None)
+    if expected_ts in valid_dates:
+        return None
+    before_expected = valid_dates < expected_ts
+    if not before_expected.any():
+        return None
+    return valid, valid_dates, valid[before_expected].iloc[-1], valid_dates[before_expected].max()
+
+
+def stale_symbols(results: Mapping[str, dict[str, Any]], *, expected_session: date) -> list[str]:
+    """Symbols :func:`repair_missing_latest_sessions` would try to repair."""
+    expected_ts = pd.Timestamp(expected_session)
+    return [symbol for symbol, payload in results.items() if _stale_anchor(payload, expected_ts)]
+
+
 def repair_missing_latest_sessions(
     results: Mapping[str, dict[str, Any]],
     *,
     expected_session: date,
     fetch_recent: RecentBarsFetcher = fetch_sina_hk_bars,
+    source: str = "sina",
+    max_consecutive_failures: int | None = SINA_HK_MAX_CONSECUTIVE_FAILURES,
 ) -> dict[str, int]:
-    """Fill Sina bars into Yahoo frames that lack a valid ``expected_session`` bar.
+    """Fill ``fetch_recent`` bars into Yahoo frames lacking a valid ``expected_session`` bar.
 
     The hole can be at the end, or interior once Yahoo publishes the next
-    (intraday) bar while still missing the completed one. Sina bars after the
-    last valid Yahoo bar before ``expected_session``, up to that session, fill
-    any date Yahoo lacks.
+    (intraday) bar while still missing the completed one. Fetched bars after
+    the last valid Yahoo bar before ``expected_session``, up to that session,
+    fill any date Yahoo lacks.
 
     Mutates ``results`` in place. Only symbols Yahoo returned history for are
     repaired: their Yahoo history anchors the adjusted-close ratio. Filled bars
     get ``Adj Close = Close * (anchor Adj Close / Close)``; Yahoo's next full
     refetch replaces them with its own adjusted values.
+
+    ``max_consecutive_failures=None`` bypasses the process-wide breaker, for
+    fetchers that already hold their bars (a per-symbol miss is not an outage).
     """
     stats = {"stale": 0, "repaired": 0, "failed": 0, "skipped": 0}
+    expected_ts = pd.Timestamp(expected_session)
+    use_breaker = max_consecutive_failures is not None
     for symbol, payload in results.items():
-        price_data = payload.get("price_data")
-        if payload.get("has_error") or price_data is None or price_data.empty:
+        stale = _stale_anchor(payload, expected_ts)
+        if stale is None:
             continue
-        valid = drop_non_finite_close_rows(price_data)
-        if valid is None or valid.empty:
-            continue
-        valid_dates = valid.index.normalize()
-        if valid.index.tz is not None:
-            valid_dates = valid_dates.tz_localize(None)
-        expected_ts = pd.Timestamp(expected_session)
-        if expected_ts in valid_dates:
-            continue
-        before_expected = valid_dates < expected_ts
-        if not before_expected.any():
-            continue
-        anchor_row = valid[before_expected].iloc[-1]
-        anchor_ts = valid_dates[before_expected].max()
+        valid, valid_dates, anchor_row, anchor_ts = stale
 
         stats["stale"] += 1
-        if _breaker["consecutive_failures"] >= SINA_HK_MAX_CONSECUTIVE_FAILURES:
+        if use_breaker and _breaker["consecutive_failures"] >= max_consecutive_failures:
             stats["skipped"] += 1
             continue
         try:
-            sina = fetch_recent(symbol)
+            fetched = fetch_recent(symbol)
         except Exception as exc:  # pragma: no cover - provider/network variability
-            logger.warning("Sina HK repair failed for %s: %s", symbol, exc)
-            sina = None
-        if sina is not None and not sina.empty:
-            sina = drop_non_finite_close_rows(sina)
-        if sina is None or sina.empty:
-            _breaker["consecutive_failures"] += 1
+            logger.warning("%s price repair failed for %s: %s", source, symbol, exc)
+            fetched = None
+        if fetched is not None and not fetched.empty:
+            fetched = drop_non_finite_close_rows(fetched)
+        if fetched is None or fetched.empty:
+            if use_breaker:
+                _breaker["consecutive_failures"] += 1
             stats["failed"] += 1
             continue
-        _breaker["consecutive_failures"] = 0
+        if use_breaker:
+            _breaker["consecutive_failures"] = 0
 
-        session_dates = sina.index.normalize()
-        missing = sina[
+        session_dates = fetched.index.normalize()
+        missing = fetched[
             (session_dates > anchor_ts)
             & (session_dates <= expected_ts)
             & ~session_dates.isin(valid_dates)
@@ -143,7 +170,7 @@ def repair_missing_latest_sessions(
         missing = missing.reindex(columns=valid.columns).fillna(0.0)
 
         payload["price_data"] = pd.concat([valid, missing]).sort_index()
-        payload["repaired_by"] = "sina"
+        payload["repaired_by"] = source
         payload["repaired_sessions"] = [ts.date().isoformat() for ts in missing.index]
         stats["repaired"] += 1
     return stats
