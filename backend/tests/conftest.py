@@ -36,11 +36,80 @@ import app.models  # noqa: F401
 from app.database import SessionLocal, engine, Base
 
 
-@pytest.fixture(autouse=True)
-def shared_test_database():
-    """Reset the shared test database before each test."""
+# Rebuilding ~200 tables costs ~0.1s per test on SQLite and ~2.5s on
+# PostgreSQL, so the schema is rebuilt only when DDL may have changed it since
+# the last reset; otherwise rows (and PostgreSQL sequences) are wiped.
+_PG_DDL_EPOCH_SETUP = """
+CREATE SCHEMA IF NOT EXISTS pytest_meta;
+CREATE SEQUENCE IF NOT EXISTS pytest_meta.ddl_epoch;
+CREATE OR REPLACE FUNCTION pytest_meta.bump_ddl_epoch() RETURNS event_trigger
+LANGUAGE plpgsql AS $$
+BEGIN PERFORM nextval('pytest_meta.ddl_epoch');
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+DROP EVENT TRIGGER IF EXISTS pytest_ddl_epoch;
+CREATE EVENT TRIGGER pytest_ddl_epoch ON ddl_command_end
+EXECUTE FUNCTION pytest_meta.bump_ddl_epoch();
+"""
+_clean_schema_epoch = None
+
+
+def _schema_epoch(conn):
+    if conn.dialect.name == "sqlite":
+        return conn.exec_driver_sql("PRAGMA schema_version").scalar()
+    return conn.exec_driver_sql("SELECT last_value FROM pytest_meta.ddl_epoch").scalar()
+
+
+def _wipe_rows(conn):
+    tables = Base.metadata.sorted_tables
+    if conn.dialect.name == "sqlite":
+        for table in reversed(tables):
+            conn.execute(table.delete())
+        return
+    # TRUNCATE bypasses the append-only row triggers and is not DDL, so it
+    # leaves the epoch alone. Probe first: truncating all tables costs ~0.8s.
+    probe = " UNION ALL ".join(
+        f"SELECT '{t.name}' WHERE EXISTS (SELECT 1 FROM \"{t.name}\")" for t in tables
+    )
+    dirty = [row[0] for row in conn.exec_driver_sql(probe)]
+    if dirty:
+        names = ", ".join(f'"{name}"' for name in dirty)
+        conn.exec_driver_sql(f"TRUNCATE {names} RESTART IDENTITY CASCADE")
+    # Rolled-back inserts advance sequences without leaving rows behind.
+    conn.exec_driver_sql(
+        "SELECT setval((quote_ident(schemaname) || '.' || quote_ident(sequencename))::regclass, "
+        "start_value, false) "
+        "FROM pg_sequences WHERE schemaname = 'public' AND last_value IS NOT NULL"
+    )
+
+
+def _reset_test_database():
+    global _clean_schema_epoch
+    if _clean_schema_epoch is not None:
+        with engine.begin() as conn:
+            try:
+                unchanged = _schema_epoch(conn) == _clean_schema_epoch
+            except Exception:  # a test dropped the tracker itself
+                unchanged = False
+            if unchanged:
+                _wipe_rows(conn)
+                return
+    _clean_schema_epoch = None
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
+    try:
+        with engine.begin() as conn:
+            if conn.dialect.name == "postgresql":
+                conn.exec_driver_sql(_PG_DDL_EPOCH_SETUP)  # needs superuser
+            _clean_schema_epoch = _schema_epoch(conn)
+    except Exception:
+        _clean_schema_epoch = None  # untracked: rebuild before every test
+
+
+@pytest.fixture(autouse=True)
+def shared_test_database():
+    """Give each test an empty database with the current model schema."""
+    _reset_test_database()
     yield
 
 
