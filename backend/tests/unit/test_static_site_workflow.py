@@ -106,7 +106,7 @@ def test_static_site_workflow_publishes_and_combines_global_cot_artifact() -> No
 
     assert "static-cot-global" in workflow
     assert "python -m app.scripts.export_static_cot" in cot_job
-    assert "actions/upload-artifact@v4" in cot_job
+    assert "actions/upload-artifact@v7" in cot_job
     assert "static-cot-global" in cot_job
     assert "--skip-cot-refresh" in market_job
     assert "Upload current global COT artifact" not in market_job
@@ -276,7 +276,7 @@ def test_static_site_uploads_canonical_market_status_after_export() -> None:
     assert "json_reason" not in export_step
     assert "cat >" not in export_step
     assert "if: ${{ always() }}" in status_step
-    assert "uses: actions/upload-artifact@v4" in status_step
+    assert "uses: actions/upload-artifact@v7" in status_step
     assert "name: static-market-status-${{ matrix.market }}" in status_step
     assert (
         "path: /tmp/static-data/status/${{ env.MARKET_LOWER }}/status.json"
@@ -295,7 +295,7 @@ def test_static_site_uploads_market_diagnostics_after_export() -> None:
     )[0]
 
     assert "if: ${{ always() }}" in diagnostics_step
-    assert "uses: actions/upload-artifact@v4" in diagnostics_step
+    assert "uses: actions/upload-artifact@v7" in diagnostics_step
     assert "name: static-market-diagnostics-${{ matrix.market }}" in diagnostics_step
     assert (
         "path: /tmp/static-data/diagnostics/${{ env.MARKET_LOWER }}" in diagnostics_step

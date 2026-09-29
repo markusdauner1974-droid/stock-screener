@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from datetime import date
 from unittest.mock import MagicMock
 
@@ -29,6 +30,8 @@ def test_bulk_cn_price_fetch_preserves_explicit_suffix(monkeypatch):
     calls = []
 
     class FakeCnPriceService:
+        baostock_session = staticmethod(nullcontext)
+
         @staticmethod
         def daily_ohlcv_dataframe(symbol, *, period):
             calls.append({"symbol": symbol, "period": period})
@@ -48,6 +51,8 @@ def test_bulk_cn_price_fetch_preserves_bare_local_code(monkeypatch):
     calls = []
 
     class FakeCnPriceService:
+        baostock_session = staticmethod(nullcontext)
+
         @staticmethod
         def daily_ohlcv_dataframe(symbol, *, period):
             calls.append({"symbol": symbol, "period": period})
