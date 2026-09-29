@@ -13,19 +13,21 @@ def test_backend_ci_uses_runtime_requirements_without_optional_theme_ml_stack():
 
     for job_name in ("backend", "backend-unit"):
         steps = workflow["jobs"][job_name]["steps"]
-        setup_python_step = next(
-            step for step in steps if step.get("uses") == "actions/setup-python@v5"
+        setup_uv_step = next(
+            step
+            for step in steps
+            if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")
         )
-        cache_dependency_path = setup_python_step["with"]["cache-dependency-path"]
-        assert "backend/requirements-runtime.txt" in cache_dependency_path
-        assert "backend/requirements-test.txt" in cache_dependency_path
-        assert "backend/requirements.txt" not in cache_dependency_path
+        cache_dependency_glob = setup_uv_step["with"]["cache-dependency-glob"]
+        assert "backend/requirements-runtime.txt" in cache_dependency_glob
+        assert "backend/requirements-test.txt" in cache_dependency_glob
+        assert "backend/requirements.txt" not in cache_dependency_glob
 
         install_step = next(
             step for step in steps if step.get("name") == "Install dependencies"
         )
         assert install_step["run"] == (
-            "pip install -r backend/requirements-runtime.txt "
+            "uv pip install --system -r backend/requirements-runtime.txt "
             "-r backend/requirements-test.txt"
         )
 
