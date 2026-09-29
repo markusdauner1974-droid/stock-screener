@@ -1291,3 +1291,373 @@ def test_static_daily_price_refresh_skips_retry_when_no_rate_limited_failures() 
     assert result["rate_limited_retry"]["attempted"] == 0
     assert result["key_market_symbols"] == len(IN_KEY_MARKET_PRICE_SYMBOLS)
     assert result["yahoo_failed_symbols"] == 6
+
+
+_RRG_STARTUP_SEEDED_DATES = (
+    date(2026, 6, 3),
+    date(2026, 5, 28),
+    date(2026, 3, 2),
+    date(2026, 3, 1),
+    date(2026, 2, 23),
+    date(2026, 1, 30),
+    date(2025, 12, 1),
+    date(2025, 9, 1),
+    date(2025, 6, 2),
+    date(2025, 3, 3),
+)
+
+
+def _seed_rrg_startup_history(session_factory, symbols) -> None:
+    """Seed every _RRGStartupCalendar anchor except the as-of session itself."""
+    with session_factory() as db:
+        for rank, symbol in enumerate(symbols):
+            db.add(
+                StockUniverse(
+                    symbol=symbol, market="IN", is_active=True, market_cap=100.0 - rank
+                )
+            )
+            db.add_all(
+                StockPrice(
+                    symbol=symbol,
+                    date=seeded_date,
+                    open=1.0,
+                    high=1.0,
+                    low=1.0,
+                    close=1.0,
+                    adj_close=1.0,
+                    volume=1000,
+                )
+                for seeded_date in _RRG_STARTUP_SEEDED_DATES
+            )
+        db.commit()
+
+
+def _price_frame(dates, adj_close: float):
+    import pandas as pd
+
+    size = len(dates)
+    return pd.DataFrame(
+        {
+            "Open": [1.0] * size,
+            "High": [1.0] * size,
+            "Low": [1.0] * size,
+            "Close": [adj_close] * size,
+            "Adj Close": [adj_close] * size,
+            "Volume": [1000] * size,
+        },
+        index=pd.to_datetime(list(dates)),
+    )
+
+
+def _top_up_frame(adj_close: float):
+    return _price_frame([date(2026, 6, 3), date(2026, 6, 4)], adj_close)
+
+
+def _persisting_store(session_factory, stored: list[list[str]]):
+    """Store through the real StockPrice persistence (latest-row update) policy."""
+    from app.services.price_row_normalization import stock_price_row_from_ohlcv
+    from app.services.stock_price_persistence import persist_stock_price_mappings
+
+    def store(payload, also_store_db=True, market=None):
+        stored.append(sorted(payload))
+        with session_factory() as db:
+            persist_stock_price_mappings(
+                db,
+                {
+                    symbol: [
+                        stock_price_row_from_ohlcv(
+                            symbol=symbol, row_date=stamp.date(), row=row
+                        )
+                        for stamp, row in frame.iterrows()
+                    ]
+                    for symbol, frame in payload.items()
+                },
+            )
+            db.commit()
+
+    return store
+
+
+def _adj_closes(session_factory, symbol: str) -> set[float]:
+    with session_factory() as db:
+        return {
+            adj_close
+            for (adj_close,) in db.query(StockPrice.adj_close).filter(
+                StockPrice.symbol == symbol
+            )
+        }
+
+
+def _rrg_startup_service(session_factory, fetcher, stored: list[list[str]]):
+    return StaticDailyPriceRefreshService(
+        session_factory=session_factory,
+        price_cache=SimpleNamespace(
+            store_batch_in_cache=_persisting_store(session_factory, stored)
+        ),
+        fetcher=fetcher,
+        batch_size_for_market=lambda _market: 25,
+        calendar_service=_RRGStartupCalendar(),
+        breadth_history_price_coverage=_CompleteBreadthHistoryCoverage(),
+        sleep=lambda _seconds: None,
+    )
+
+
+def test_static_daily_price_refresh_tops_up_group_history_missing_only_the_current_session() -> None:
+    session_factory = _sqlite_session_factory()
+    _seed_rrg_startup_history(session_factory, ["OLD.NS"])
+    fetch_calls: list[tuple[tuple[str, ...], str]] = []
+
+    class _FakeFetcher:
+        def fetch_prices_in_batches(self, symbols, period="2y", start_batch_size=None, market=None):
+            fetch_calls.append((tuple(symbols), period))
+            return {
+                symbol: {"price_data": _top_up_frame(1.0), "has_error": False}
+                for symbol in symbols
+            }
+
+    result = _rrg_startup_service(session_factory, _FakeFetcher(), []).refresh(
+        as_of_date=date(2026, 6, 4),
+        market="IN",
+        ensure_static_history=True,
+    )
+
+    assert fetch_calls == [
+        (("OLD.NS",), STATIC_DAILY_PRICE_REFRESH_PERIOD),
+        (tuple(IN_KEY_MARKET_PRICE_SYMBOLS), STATIC_DAILY_PRICE_BOOTSTRAP_PERIOD),
+    ]
+    assert result["stale_symbols"] == 1
+    assert result["rrg_history_incomplete_symbols"] == 0
+
+
+def test_static_daily_price_refresh_rebootstraps_symbols_whose_history_was_readjusted() -> None:
+    session_factory = _sqlite_session_factory()
+    _seed_rrg_startup_history(session_factory, ["OLD.NS", "SPLIT.NS"])
+    fetch_calls: list[tuple[tuple[str, ...], str]] = []
+    stored: list[list[str]] = []
+
+    class _FakeFetcher:
+        def fetch_prices_in_batches(self, symbols, period="2y", start_batch_size=None, market=None):
+            fetch_calls.append((tuple(symbols), period))
+            if period == STATIC_DAILY_PRICE_BOOTSTRAP_PERIOD and symbols == ["SPLIT.NS"]:
+                full_history = [*_RRG_STARTUP_SEEDED_DATES, date(2026, 6, 4)]
+                return {"SPLIT.NS": {"price_data": _price_frame(full_history, 0.5), "has_error": False}}
+            return {
+                symbol: {
+                    # A 2:1 split halves Yahoo's back-adjusted closes, including
+                    # the 2026-06-03 bar the seed already stored at 1.0.
+                    "price_data": _top_up_frame(0.5 if symbol == "SPLIT.NS" else 1.0),
+                    "has_error": False,
+                }
+                for symbol in symbols
+            }
+
+    result = _rrg_startup_service(session_factory, _FakeFetcher(), stored).refresh(
+        as_of_date=date(2026, 6, 4),
+        market="IN",
+        ensure_static_history=True,
+    )
+
+    assert fetch_calls == [
+        (("OLD.NS", "SPLIT.NS"), STATIC_DAILY_PRICE_REFRESH_PERIOD),
+        (tuple(IN_KEY_MARKET_PRICE_SYMBOLS), STATIC_DAILY_PRICE_BOOTSTRAP_PERIOD),
+        (("SPLIT.NS",), STATIC_DAILY_PRICE_BOOTSTRAP_PERIOD),
+    ]
+    assert stored[0] == ["OLD.NS"]
+    # The old-scale history is replaced, not just the latest row.
+    assert _adj_closes(session_factory, "SPLIT.NS") == {0.5}
+    assert _adj_closes(session_factory, "OLD.NS") == {1.0}
+    assert result["readjusted_symbols"] == 1
+    assert result["yahoo_fetched_symbols"] == 2 + len(IN_KEY_MARKET_PRICE_SYMBOLS)
+
+
+def test_static_daily_price_refresh_tops_up_fresh_symbol_with_a_tail_anchor_gap() -> None:
+    session_factory = _sqlite_session_factory()
+    with session_factory() as db:
+        db.add(StockUniverse(symbol="GAP.NS", market="IN", is_active=True, market_cap=100.0))
+        # Current as of 2026-06-04, but missing the 2026-06-03 tail anchor.
+        db.add_all(
+            StockPrice(
+                symbol="GAP.NS",
+                date=row_date,
+                open=1.0,
+                high=1.0,
+                low=1.0,
+                close=1.0,
+                adj_close=1.0,
+                volume=1000,
+            )
+            for row_date in (
+                date(2026, 6, 4),
+                *(d for d in _RRG_STARTUP_SEEDED_DATES if d != date(2026, 6, 3)),
+            )
+        )
+        db.commit()
+    fetch_calls: list[tuple[tuple[str, ...], str]] = []
+
+    class _FakeFetcher:
+        def fetch_prices_in_batches(self, symbols, period="2y", start_batch_size=None, market=None):
+            fetch_calls.append((tuple(symbols), period))
+            return {
+                symbol: {"price_data": _top_up_frame(1.0), "has_error": False}
+                for symbol in symbols
+            }
+
+    result = _rrg_startup_service(session_factory, _FakeFetcher(), []).refresh(
+        as_of_date=date(2026, 6, 4),
+        market="IN",
+        ensure_static_history=True,
+    )
+
+    assert fetch_calls[0] == (("GAP.NS",), STATIC_DAILY_PRICE_REFRESH_PERIOD)
+    assert result["db_fresh_symbols"] == 1
+    assert result["rrg_history_tail_gap_symbols"] == 1
+
+
+def test_static_daily_price_refresh_rebootstraps_readjusted_symbols_recovered_by_rate_limit_retry() -> None:
+    session_factory = _sqlite_session_factory()
+    seeded_dates = (date(2026, 6, 2), date(2026, 6, 3))
+    with session_factory() as db:
+        db.add(StockUniverse(symbol="SPLIT.NS", market="IN", is_active=True, market_cap=100.0))
+        db.add_all(
+            StockPrice(
+                symbol="SPLIT.NS",
+                date=seeded_date,
+                open=1.0,
+                high=1.0,
+                low=1.0,
+                close=1.0,
+                adj_close=1.0,
+                volume=1000,
+            )
+            for seeded_date in seeded_dates
+        )
+        db.commit()
+    fetch_calls: list[tuple[tuple[str, ...], str]] = []
+    stored: list[list[str]] = []
+
+    class _FakeFetcher:
+        def fetch_prices_in_batches(self, symbols, period="2y", start_batch_size=None, market=None):
+            fetch_calls.append((tuple(symbols), period))
+            if len(fetch_calls) == 1:
+                return {
+                    "SPLIT.NS": {
+                        "price_data": None,
+                        "has_error": True,
+                        "error": "Too Many Requests (429)",
+                    }
+                }
+            if symbols == ["SPLIT.NS"] and period == STATIC_DAILY_PRICE_BOOTSTRAP_PERIOD:
+                full_history = [*seeded_dates, date(2026, 6, 4)]
+                return {"SPLIT.NS": {"price_data": _price_frame(full_history, 0.5), "has_error": False}}
+            return {
+                symbol: {"price_data": _top_up_frame(0.5), "has_error": False}
+                for symbol in symbols
+            }
+
+    service = StaticDailyPriceRefreshService(
+        session_factory=session_factory,
+        price_cache=SimpleNamespace(
+            store_batch_in_cache=_persisting_store(session_factory, stored)
+        ),
+        fetcher=_FakeFetcher(),
+        batch_size_for_market=lambda _market: 25,
+        sleep=lambda _seconds: None,
+    )
+
+    result = service.refresh(as_of_date=date(2026, 6, 4), market="IN")
+
+    assert fetch_calls[-2:] == [
+        (("SPLIT.NS",), STATIC_DAILY_PRICE_REFRESH_PERIOD),
+        (("SPLIT.NS",), STATIC_DAILY_PRICE_BOOTSTRAP_PERIOD),
+    ]
+    assert _adj_closes(session_factory, "SPLIT.NS") == {0.5}
+    assert result["readjusted_symbols"] == 1
+    # The throttled first attempt is not left counted as a failure.
+    assert result["yahoo_failed_symbols"] == 0
+    assert result["yahoo_fetched_symbols"] == 1 + len(IN_KEY_MARKET_PRICE_SYMBOLS)
+
+
+def _run_readjusted_split(session_factory, split_history):
+    _seed_rrg_startup_history(session_factory, ["SPLIT.NS"])
+
+    class _FakeFetcher:
+        def fetch_prices_in_batches(self, symbols, period="2y", start_batch_size=None, market=None):
+            if period == STATIC_DAILY_PRICE_BOOTSTRAP_PERIOD and symbols == ["SPLIT.NS"]:
+                return {"SPLIT.NS": {"price_data": _price_frame(split_history, 0.5), "has_error": False}}
+            return {
+                symbol: {"price_data": _top_up_frame(0.5), "has_error": False}
+                for symbol in symbols
+            }
+
+    return _rrg_startup_service(session_factory, _FakeFetcher(), []).refresh(
+        as_of_date=date(2026, 6, 4),
+        market="IN",
+        ensure_static_history=True,
+    )
+
+
+def test_static_daily_price_refresh_keeps_old_history_when_replacement_write_fails(monkeypatch) -> None:
+    import app.services.static_daily_price_refresh_service as module
+
+    def _failing_persist(*_args, **_kwargs):
+        raise RuntimeError("database write failed")
+
+    monkeypatch.setattr(module, "persist_stock_price_mappings", _failing_persist)
+    session_factory = _sqlite_session_factory()
+
+    result = _run_readjusted_split(
+        session_factory, [*_RRG_STARTUP_SEEDED_DATES, date(2026, 6, 4)]
+    )
+
+    # The delete rolled back with the failed insert, and the symbol is a failure.
+    assert _adj_closes(session_factory, "SPLIT.NS") == {1.0}
+    assert result["yahoo_failed_symbols"] == 1
+
+
+def test_static_daily_price_refresh_rejects_truncated_replacement_history() -> None:
+    session_factory = _sqlite_session_factory()
+
+    # A truncated 2y response that stops before the stored 2026-06-03 row.
+    truncated = [d for d in _RRG_STARTUP_SEEDED_DATES if d < date(2026, 6, 3)]
+    result = _run_readjusted_split(session_factory, truncated)
+
+    with session_factory() as db:
+        newest = (
+            db.query(StockPrice.adj_close)
+            .filter(StockPrice.symbol == "SPLIT.NS", StockPrice.date == date(2026, 6, 3))
+            .scalar()
+        )
+    # Rejected whole: the newer row survives and no mixed-scale series is left.
+    assert newest == 1.0
+    assert _adj_closes(session_factory, "SPLIT.NS") == {1.0}
+    assert result["yahoo_failed_symbols"] == 1
+
+
+def test_static_daily_price_refresh_rejects_sparse_replacement_history() -> None:
+    session_factory = _sqlite_session_factory()
+
+    # Yahoo's 2y response is missing a stored interior date (2025-12-01).
+    sparse = [
+        *(d for d in _RRG_STARTUP_SEEDED_DATES if d != date(2025, 12, 1)),
+        date(2026, 6, 4),
+    ]
+    result = _run_readjusted_split(session_factory, sparse)
+
+    # Replacing would leave a gap or an old-scale row, so nothing changes.
+    assert _adj_closes(session_factory, "SPLIT.NS") == {1.0}
+    with session_factory() as db:
+        assert db.query(StockPrice).filter(StockPrice.symbol == "SPLIT.NS").count() == len(
+            _RRG_STARTUP_SEEDED_DATES
+        )
+    assert result["yahoo_failed_symbols"] == 1
+
+
+def test_static_daily_price_refresh_rejects_replacement_missing_the_discarded_top_up_bar() -> None:
+    session_factory = _sqlite_session_factory()
+
+    # The drift-triggering 7d frame carried 2026-06-04; the 2y refetch stops at
+    # 2026-06-03, the previous stored latest date.
+    result = _run_readjusted_split(session_factory, list(_RRG_STARTUP_SEEDED_DATES))
+
+    assert _adj_closes(session_factory, "SPLIT.NS") == {1.0}
+    assert result["yahoo_failed_symbols"] == 1

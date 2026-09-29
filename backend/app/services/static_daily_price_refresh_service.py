@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Callable
+
+import pandas as pd
 
 from app.domain.markets.key_markets import key_market_price_symbols
 from app.domain.providers.price_symbol_support import split_supported_price_symbols
+from app.models.stock import StockPrice
 from app.models.stock_universe import StockUniverse
+from app.services.price_row_normalization import stock_price_row_from_ohlcv
+from app.services.stock_price_persistence import persist_stock_price_mappings
 from app.services.breadth_history_price_coverage import (
     BreadthHistoryPriceCoverageService,
     DEFAULT_BREADTH_HISTORY_PRICE_LOOKBACK_DAYS,
@@ -28,6 +33,14 @@ from app.services.price_refresh_planning import (
 STATIC_DAILY_PRICE_REFRESH_PERIOD = STALE_PRICE_TOP_UP_PERIOD
 STATIC_DAILY_PRICE_BOOTSTRAP_PERIOD = NO_HISTORY_PRICE_BOOTSTRAP_PERIOD
 STATIC_DAILY_PRICE_REFRESH_BATCH_SIZE = 250
+# Calendar days at the end of the window that the 7d top-up always refetches
+# (7d minus margin for delayed runs). Group-history anchors in this tail are
+# left to the top-up instead of forcing a full 2y bootstrap.
+STATIC_DAILY_PRICE_TOP_UP_TAIL_DAYS = 4
+# A top-up bar whose Adj Close differs from the stored bar for the same date by
+# more than this means Yahoo back-adjusted history (split or dividend); splicing
+# the top-up onto the old series would leave a false jump, so refetch 2y.
+STATIC_ADJUSTMENT_DRIFT_TOLERANCE = 1e-3
 
 # Markets where Yahoo's 429 backoff windows are long enough that a single
 # refresh pass routinely leaves a tail of rate-limited symbols. For these
@@ -83,6 +96,16 @@ def _is_rate_limit_failure(payload: dict[str, Any]) -> bool:
 
 def _key_market_price_symbols(market: str | None) -> list[str]:
     return list(key_market_price_symbols(market))
+
+
+def _frame_price_rows(symbol: str, frame: pd.DataFrame) -> list[dict[str, Any]]:
+    rows = (
+        stock_price_row_from_ohlcv(
+            symbol=symbol, row_date=pd.Timestamp(stamp).date(), row=row
+        )
+        for stamp, row in frame.iterrows()
+    )
+    return [row for row in rows if row is not None]
 
 
 def _dedupe_symbols(symbols: list[str]) -> list[str]:
@@ -189,6 +212,9 @@ class StaticDailyPriceRefreshService:
             )
 
         rrg_history_incomplete_symbols = list(rrg_history_coverage.incomplete_symbols)
+        rrg_history_tail_gap_symbols = list(
+            rrg_history_coverage.missing_through_date_symbols
+        )
         breadth_history_incomplete_symbols = list(
             breadth_history_coverage.incomplete_symbols
         )
@@ -212,6 +238,7 @@ class StaticDailyPriceRefreshService:
                 [
                     *coverage.stale,
                     *breadth_history_missing_through_date_symbols,
+                    *rrg_history_tail_gap_symbols,
                 ]
             )
             if symbol not in history_incomplete_symbol_set
@@ -300,11 +327,15 @@ class StaticDailyPriceRefreshService:
                 flush=True,
             )
 
+        # Symbol -> dates of its discarded, drift-triggering top-up frame; the
+        # replacement must cover them too (e.g. the new as-of bar).
+        readjusted_symbols: dict[str, set[date]] = {}
         stale_refreshed, stale_failed, stale_rate_limited = self._fetch_and_store(
             stale_symbols,
             period=STATIC_DAILY_PRICE_REFRESH_PERIOD,
             batch_size=batch_size,
             market=market,
+            readjusted_symbols=readjusted_symbols,
         )
         bootstrap_refreshed, bootstrap_failed, bootstrap_rate_limited = self._fetch_and_store(
             bootstrap_symbols,
@@ -314,15 +345,36 @@ class StaticDailyPriceRefreshService:
         )
         refreshed = stale_refreshed + bootstrap_refreshed
         failed = stale_failed + bootstrap_failed
+        retry_readjusted_symbols: dict[str, set[date]] = {}
         retry_stats = self._retry_rate_limited_failures(
             market=market,
             rate_limited_symbols_by_period={
                 STATIC_DAILY_PRICE_REFRESH_PERIOD: stale_rate_limited,
                 STATIC_DAILY_PRICE_BOOTSTRAP_PERIOD: bootstrap_rate_limited,
             },
+            readjusted_symbols=retry_readjusted_symbols,
         )
         refreshed += retry_stats["recovered"]
         failed -= retry_stats["recovered"]
+        # Their throttled first attempt was counted as failed; the re-bootstrap
+        # below now owns their outcome.
+        failed -= len(retry_readjusted_symbols)
+        readjusted_symbols.update(retry_readjusted_symbols)
+        if readjusted_symbols:
+            print(
+                f"[static-daily prices] Re-bootstrapping {len(readjusted_symbols):,} "
+                "symbols whose history was back-adjusted (split or dividend).",
+                flush=True,
+            )
+            readjusted_refreshed, readjusted_failed, _ = self._fetch_and_store(
+                list(readjusted_symbols),
+                period=STATIC_DAILY_PRICE_BOOTSTRAP_PERIOD,
+                batch_size=batch_size,
+                market=market,
+                replacement_required_dates=readjusted_symbols,
+            )
+            refreshed += readjusted_refreshed
+            failed += readjusted_failed
 
         return {
             "status": "completed",
@@ -355,6 +407,8 @@ class StaticDailyPriceRefreshService:
                 breadth_history_coverage.required_dates
             ),
             "skipped_unsupported_symbols": len(skipped_symbols),
+            "rrg_history_tail_gap_symbols": len(rrg_history_tail_gap_symbols),
+            "readjusted_symbols": len(readjusted_symbols),
             "yahoo_fetched_symbols": refreshed,
             "yahoo_failed_symbols": failed,
             "rate_limited_retry": retry_stats,
@@ -393,17 +447,35 @@ class StaticDailyPriceRefreshService:
                 str(exc),
             )
 
+        # Anchors include each target session itself (offset 0), so the newest
+        # ones are always missing from a seed and would send every symbol to
+        # the 2y bootstrap. Anchors after tail_start (the last 4 calendar days,
+        # through_date-3..through_date) go to the 7d top-up instead, including
+        # for already-fresh symbols with a hole there.
+        tail_start = through_date - timedelta(days=STATIC_DAILY_PRICE_TOP_UP_TAIL_DAYS)
+        history_anchor_dates = frozenset(
+            anchor for anchor in required_anchor_dates if anchor <= tail_start
+        )
+        tail_anchor_dates = frozenset(required_anchor_dates) - history_anchor_dates
         coverage = self._group_history_price_coverage.classify(
             db,
             market=market,
             through_date=through_date,
             symbols=symbols,
-            required_anchor_dates=required_anchor_dates,
+            required_anchor_dates=history_anchor_dates,
+        )
+        tail_coverage = self._group_history_price_coverage.classify(
+            db,
+            market=market,
+            through_date=through_date,
+            symbols=symbols,
+            required_anchor_dates=tail_anchor_dates,
         )
         return _StaticHistoryCoverageOutcome(
             tuple(coverage.incomplete_symbols),
             "verified",
-            required_dates=len(required_anchor_dates),
+            required_dates=len(history_anchor_dates),
+            missing_through_date_symbols=tuple(tail_coverage.incomplete_symbols),
         )
 
     def _breadth_history_coverage(
@@ -462,7 +534,19 @@ class StaticDailyPriceRefreshService:
         period: str,
         batch_size: int,
         market: str | None,
+        readjusted_symbols: dict[str, set[date]] | None = None,
+        replacement_required_dates: dict[str, set[date]] | None = None,
     ) -> tuple[int, int, list[str]]:
+        """Fetch and store ``symbols``.
+
+        With ``readjusted_symbols``, symbols whose history Yahoo back-adjusted
+        are neither stored nor counted; they are appended there for a full
+        refetch instead, with the discarded frame's dates. With
+        ``replacement_required_dates``, each symbol's stored history is swapped
+        for the fetched rows (see ``_replace_stored_history``): the store only
+        updates a symbol's latest existing row, so old-scale history would
+        otherwise survive.
+        """
         refreshed_count = 0
         failed_count = 0
         rate_limited: list[str] = []
@@ -497,6 +581,22 @@ class StaticDailyPriceRefreshService:
                     failed_count += 1
                     if _is_rate_limit_failure(payload):
                         rate_limited.append(symbol)
+            if readjusted_symbols is not None and batch_to_store:
+                for symbol in sorted(self._adjustment_drift_symbols(batch_to_store)):
+                    readjusted_symbols[symbol] = {
+                        row["date"]
+                        for row in _frame_price_rows(symbol, batch_to_store.pop(symbol))
+                    }
+                    refreshed_count -= 1
+            if replacement_required_dates is not None and batch_to_store:
+                replaced = self._replace_stored_history(
+                    batch_to_store,
+                    required_dates_by_symbol=replacement_required_dates,
+                )
+                for symbol in sorted(set(batch_to_store) - replaced):
+                    del batch_to_store[symbol]
+                    refreshed_count -= 1
+                    failed_count += 1
             if batch_to_store:
                 self._price_cache.store_batch_in_cache(
                     batch_to_store,
@@ -511,11 +611,103 @@ class StaticDailyPriceRefreshService:
             )
         return refreshed_count, failed_count, rate_limited
 
+    def _adjustment_drift_symbols(self, frames: dict[str, Any]) -> set[str]:
+        """Symbols whose fetched Adj Close disagrees with stored rows for the same dates."""
+        fetched = {
+            (symbol, pd.Timestamp(stamp).date()): float(value)
+            for symbol, frame in frames.items()
+            if isinstance(frame, pd.DataFrame) and "Adj Close" in frame
+            for stamp, value in frame["Adj Close"].dropna().items()
+        }
+        if not fetched:
+            return set()
+        with self._session_factory() as db:
+            stored_rows = (
+                db.query(StockPrice.symbol, StockPrice.date, StockPrice.adj_close)
+                .filter(
+                    StockPrice.symbol.in_({symbol for symbol, _ in fetched}),
+                    StockPrice.date >= min(row_date for _, row_date in fetched),
+                )
+                .all()
+            )
+        return {
+            symbol
+            for symbol, row_date, stored in stored_rows
+            if stored
+            and (symbol, row_date) in fetched
+            and abs(fetched[(symbol, row_date)] / stored - 1)
+            > STATIC_ADJUSTMENT_DRIFT_TOLERANCE
+        }
+
+    def _replace_stored_history(
+        self,
+        frames: dict[str, Any],
+        *,
+        required_dates_by_symbol: dict[str, set[date]],
+    ) -> set[str]:
+        """Swap each symbol's stored rows for its fetched rows in one transaction.
+
+        A symbol is replaced only if its fetched rows cover every stored date
+        from their first date onward plus its ``required_dates_by_symbol``
+        (the discarded drift-triggering top-up, e.g. the new as-of bar); a
+        sparse or truncated frame would leave a gap, a stale symbol, or an
+        old-scale row, so it is skipped. Returns the symbols replaced; on any
+        failure nothing is changed and the empty set is returned, so callers
+        count those symbols as failed.
+        """
+        rows_by_symbol = {
+            symbol: rows
+            for symbol, frame in frames.items()
+            if isinstance(frame, pd.DataFrame)
+            and (rows := _frame_price_rows(symbol, frame))
+        }
+        if not rows_by_symbol:
+            return set()
+        with self._session_factory() as db:
+            try:
+                for symbol, rows in list(rows_by_symbol.items()):
+                    dates = {row["date"] for row in rows}
+                    stored_dates = {
+                        stored_date
+                        for (stored_date,) in db.query(StockPrice.date).filter(
+                            StockPrice.symbol == symbol,
+                            StockPrice.date >= min(dates),
+                        )
+                    }
+                    uncovered = (
+                        stored_dates | required_dates_by_symbol.get(symbol, set())
+                    ) - dates
+                    if uncovered:
+                        print(
+                            "[static-daily prices] Not replacing back-adjusted history "
+                            f"for {symbol}: refetch lacks {len(uncovered)} required dates.",
+                            flush=True,
+                        )
+                        del rows_by_symbol[symbol]
+                        continue
+                    db.query(StockPrice).filter(
+                        StockPrice.symbol == symbol,
+                        StockPrice.date.in_(dates),
+                    ).delete(synchronize_session=False)
+                if rows_by_symbol:
+                    persist_stock_price_mappings(db, rows_by_symbol)
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                print(
+                    "[static-daily prices] Could not replace back-adjusted history "
+                    f"for {len(rows_by_symbol):,} symbols: {exc}",
+                    flush=True,
+                )
+                return set()
+        return set(rows_by_symbol)
+
     def _retry_rate_limited_failures(
         self,
         *,
         market: str | None,
         rate_limited_symbols_by_period: dict[str, list[str]],
+        readjusted_symbols: dict[str, set[date]] | None = None,
     ) -> dict[str, Any]:
         skipped_payload: dict[str, Any] = {
             "attempted": 0,
@@ -563,6 +755,17 @@ class StaticDailyPriceRefreshService:
                 if not payload.get("has_error") and price_data is not None and not price_data.empty:
                     recovered_payload[symbol] = price_data
                     recovered += 1
+            if (
+                readjusted_symbols is not None
+                and period == STATIC_DAILY_PRICE_REFRESH_PERIOD
+                and recovered_payload
+            ):
+                for symbol in sorted(self._adjustment_drift_symbols(recovered_payload)):
+                    readjusted_symbols[symbol] = {
+                        row["date"]
+                        for row in _frame_price_rows(symbol, recovered_payload.pop(symbol))
+                    }
+                    recovered -= 1
             if recovered_payload:
                 self._price_cache.store_batch_in_cache(
                     recovered_payload,
