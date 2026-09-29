@@ -50,6 +50,9 @@ END $$;
 DROP EVENT TRIGGER IF EXISTS pytest_ddl_epoch;
 CREATE EVENT TRIGGER pytest_ddl_epoch ON ddl_command_end
 EXECUTE FUNCTION pytest_meta.bump_ddl_epoch();
+-- A new sequence reports last_value = start both before and after its first
+-- nextval, which would hide the first DDL command; advance it once.
+SELECT nextval('pytest_meta.ddl_epoch');
 """
 _clean_schema_epoch = None
 
