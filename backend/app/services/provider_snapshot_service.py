@@ -618,8 +618,8 @@ class ProviderSnapshotService:
         ``_deserialize_universe_row`` re-canonicalizes each row via the exchange
         (intentionally — it rewrites bare/board-mismatched symbols). A bundle can
         therefore contain two rows that resolve to the *same* canonical symbol: e.g.
-        a phantom TW ``.TWO`` copy of a ``.TW`` security whose stored exchange is the
-        TWSE ``XTAI``, which collapses ``.TWO`` -> ``.TW``. Inserting both would hit
+        a mis-suffixed TW ``.TW`` copy of a TPEx security whose stored exchange is
+        the ``TPEX`` board, which collapses ``.TW`` -> ``.TWO``. Inserting both would hit
         the ``StockUniverse.symbol`` unique index, so we collapse by canonical symbol
         (last write wins) and log the collision rather than crash the whole import.
         """

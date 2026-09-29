@@ -2,8 +2,10 @@
 
 A row is a *phantom* when its stored symbol re-canonicalizes (via the security
 master resolver) to a *different* symbol that already exists as its own row — e.g.
-a TW ``1240.TWO`` row carrying the TWSE ``XTAI`` exchange, which canonicalizes to
-``1240.TW`` (the genuine sibling). Such duplicates are what crashed weekly-bundle
+a TW ``1240.TW`` row carrying the ``TPEX`` board, which canonicalizes to
+``1240.TWO`` (the genuine sibling). The shared TW MIC ``XTAI`` never rewrites a
+board suffix, so ``.TW``/``.TWO`` rows stored under ``XTAI`` are not phantoms.
+Such duplicates are what crashed weekly-bundle
 import on the ``StockUniverse.symbol`` unique index; the import path now collapses
 them automatically, so published bundles self-heal on the next weekly cycle. This
 script is for any *persistent* universe DB (local dev, a long-running deployment)

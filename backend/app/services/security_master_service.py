@@ -25,6 +25,11 @@ _MARKET_DEFAULTS: dict[str, tuple[str, str]] = {
     for profile in market_registry.profiles()
 }
 
+# ponytail: TW only. KR has the same shape (XKRX covers .KS and .KQ) but KOSDAQ
+# rows currently collapse to .KS and KR pricing keys on local codes; add "KR"
+# once that symbol churn is wanted.
+_SHARED_MIC_BOARD_SUFFIX_MARKETS = frozenset({"TW"})
+
 @dataclass(frozen=True)
 class SecurityIdentity:
     """Canonical security identity fields derived by SecurityMaster."""
@@ -130,7 +135,16 @@ class SecurityMasterResolver:
         if normalized_market != "US" and resolved_local_code:
             symbol_market = market_symbol_suffix_registry.market_for_symbol(normalized_symbol)
             # Preserve explicit non-US suffix when no exchange override is provided.
-            if (
+            # A bare MIC shared by several boards (TW: XTAI covers TWSE .TW and
+            # TPEx .TWO) cannot tell the boards apart, so it must not rewrite an
+            # explicit board suffix. Board aliases (TWSE/TPEX) still do.
+            keeps_board_suffix = (
+                normalized_market in _SHARED_MIC_BOARD_SUFFIX_MARKETS
+                and symbol_market == normalized_market
+                and normalized_exchange
+                == market_symbol_suffix_registry.mic_for_symbol(normalized_symbol)
+            )
+            if keeps_board_suffix or (
                 normalized_exchange is None
                 and symbol_market is not None
             ):
