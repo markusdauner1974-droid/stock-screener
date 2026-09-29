@@ -876,6 +876,88 @@ def test_cn_market_data_service_skips_akshare_after_repeated_ohlcv_transport_fai
     assert FakeBaoStock.queries == 3
 
 
+class _FakeBaoOhlcvQuery:
+    fields = ["date", "open", "high", "low", "close", "volume", "amount"]
+
+    def __init__(self, error_code: str = "0") -> None:
+        self.error_code = error_code
+        self._remaining = (
+            [["2026-04-29", "10", "11", "9", "10.5", "1000", "10500"]]
+            if error_code == "0"
+            else []
+        )
+
+    def next(self) -> bool:
+        return bool(self._remaining)
+
+    def get_row_data(self) -> list[str]:
+        return self._remaining.pop(0)
+
+
+class _FakeBaoStockOhlcv:
+    """Counts logins; ``drop_after`` queries fail once, like a dropped socket."""
+
+    def __init__(self, *, drop_after: int | None = None) -> None:
+        self.logins = 0
+        self.logouts = 0
+        self.queries = 0
+        self._drop_after = drop_after
+
+    def login(self) -> _FakeBaoLogin:
+        self.logins += 1
+        return _FakeBaoLogin()
+
+    def logout(self) -> None:
+        self.logouts += 1
+
+    def query_history_k_data_plus(self, *args, **kwargs) -> _FakeBaoOhlcvQuery:
+        self.queries += 1
+        if self._drop_after is not None and self.queries == self._drop_after + 1:
+            return _FakeBaoOhlcvQuery(error_code="10002007")
+        return _FakeBaoOhlcvQuery()
+
+
+def _baostock_only_service(baostock: _FakeBaoStockOhlcv) -> CnMarketDataService:
+    service = CnMarketDataService(akshare_module=object(), baostock_module=baostock)
+    service._akshare_ohlcv_disabled_until = float("inf")
+    return service
+
+
+def test_cn_baostock_ohlcv_logs_in_per_call_outside_a_session():
+    baostock = _FakeBaoStockOhlcv()
+    service = _baostock_only_service(baostock)
+
+    for _ in range(2):
+        assert service.daily_ohlcv("600000", start="20260401", end="20260430")[0].close == 10.5
+
+    assert (baostock.logins, baostock.logouts) == (2, 2)
+
+
+def test_cn_baostock_session_reuses_one_login_across_calls():
+    baostock = _FakeBaoStockOhlcv()
+    service = _baostock_only_service(baostock)
+
+    with service.baostock_session():
+        for code in ("600000", "000001", "600519"):
+            assert service.daily_ohlcv(code, start="20260401", end="20260430")[0].close == 10.5
+        assert baostock.logouts == 0
+
+    assert (baostock.logins, baostock.logouts, baostock.queries) == (1, 1, 3)
+
+
+def test_cn_baostock_session_relogs_in_once_after_a_dropped_query():
+    baostock = _FakeBaoStockOhlcv(drop_after=1)
+    service = _baostock_only_service(baostock)
+
+    with service.baostock_session():
+        first = service.daily_ohlcv("600000", start="20260401", end="20260430")
+        second = service.daily_ohlcv("000001", start="20260401", end="20260430")
+
+    assert first[0].close == 10.5
+    assert second[0].close == 10.5
+    assert (baostock.logins, baostock.queries) == (2, 3)
+
+
 def test_cn_market_data_service_raises_dependency_error_when_akshare_missing(monkeypatch):
     import app.services.cn_market_data_service as module
 

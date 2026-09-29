@@ -715,41 +715,42 @@ class BulkDataFetcher:
         from .security_master_service import security_master_resolver
 
         service = self._get_cn_price_service()
-        results: Dict[str, Dict] = {}
-        for symbol in symbols:
-            try:
-                identity = security_master_resolver.resolve_identity(symbol=symbol, market="CN")
-                provider_symbol = cn_price_symbol_for_native_provider(
-                    symbol,
-                    local_code=identity.local_code,
-                    canonical_symbol=identity.canonical_symbol,
-                )
-                if provider_symbol is None:
-                    results[symbol] = self._build_error_result(symbol, "Invalid CN local code")
-                    continue
-                price_data = service.daily_ohlcv_dataframe(
-                    provider_symbol,
-                    period=period,
-                )
-                if price_data is None or price_data.empty:
-                    results[symbol] = self._build_error_result(symbol, "CN providers returned empty price data")
-                    continue
-                results[symbol] = {
-                    "symbol": symbol,
-                    "price_data": price_data,
-                    "info": None,
-                    "fundamentals": None,
-                    "has_error": False,
-                    "error": None,
-                    "provider": "akshare",
-                }
-            except Exception as exc:  # pragma: no cover - provider/network variability
-                logger.warning("CN price fetch failed for %s: %s", symbol, exc)
-                results[symbol] = self._build_error_result(
-                    symbol,
-                    f"CN price fetch error: {exc}",
-                )
-        return results
+        with service.baostock_session():
+            results: Dict[str, Dict] = {}
+            for symbol in symbols:
+                try:
+                    identity = security_master_resolver.resolve_identity(symbol=symbol, market="CN")
+                    provider_symbol = cn_price_symbol_for_native_provider(
+                        symbol,
+                        local_code=identity.local_code,
+                        canonical_symbol=identity.canonical_symbol,
+                    )
+                    if provider_symbol is None:
+                        results[symbol] = self._build_error_result(symbol, "Invalid CN local code")
+                        continue
+                    price_data = service.daily_ohlcv_dataframe(
+                        provider_symbol,
+                        period=period,
+                    )
+                    if price_data is None or price_data.empty:
+                        results[symbol] = self._build_error_result(symbol, "CN providers returned empty price data")
+                        continue
+                    results[symbol] = {
+                        "symbol": symbol,
+                        "price_data": price_data,
+                        "info": None,
+                        "fundamentals": None,
+                        "has_error": False,
+                        "error": None,
+                        "provider": "akshare",
+                    }
+                except Exception as exc:  # pragma: no cover - provider/network variability
+                    logger.warning("CN price fetch failed for %s: %s", symbol, exc)
+                    results[symbol] = self._build_error_result(
+                        symbol,
+                        f"CN price fetch error: {exc}",
+                    )
+            return results
 
     def _fetch_yfinance_prices_in_batches(
         self,

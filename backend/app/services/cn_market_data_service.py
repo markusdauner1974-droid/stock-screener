@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, timedelta
 import importlib
@@ -232,6 +233,8 @@ class CnMarketDataService:
         self._listing_rows_cache: list[dict[str, Any]] | None = None
         self._akshare_ohlcv_consecutive_failures = 0
         self._akshare_ohlcv_disabled_until = 0.0
+        self._baostock_session_open = False
+        self._baostock_logged_in = False
 
     @property
     def _akshare(self):
@@ -670,44 +673,83 @@ class CnMarketDataService:
         start: str,
         end: str,
     ) -> list[CnDailyPriceRow]:
-        bs = self._baostock
         exchange = infer_cn_a_share_exchange_from_local_code(local_code)
         if exchange is None or exchange == "BJSE":
             return []
         bs_prefix = "sh" if exchange == "SSE" else "sz"
         bs_code = f"{bs_prefix}.{local_code}"
-        login_result = bs.login()
-        if getattr(login_result, "error_code", "0") != "0":
-            return []
+        with self.baostock_session():
+            rows = self._query_baostock_ohlcv(bs_code, start=start, end=end)
+            if rows is None:
+                # The shared login may have expired, dropped, or been logged out
+                # by another BaoStock caller: log in again once and retry.
+                self._baostock_logged_in = False
+                rows = self._query_baostock_ohlcv(bs_code, start=start, end=end)
+            return rows or []
+
+    @contextmanager
+    def baostock_session(self):
+        """Share one BaoStock login across the OHLCV fetches inside the block.
+
+        Login is ~90% of a single-symbol BaoStock fetch, and CN falls back to
+        BaoStock for every symbol when AKShare is unreachable (as it is from
+        GitHub runners). Re-entrant: a standalone fetch opens and closes its
+        own session; fetches inside an open block reuse it.
+        """
+        if self._baostock_session_open:
+            yield
+            return
+        self._baostock_session_open = True
         try:
-            query = bs.query_history_k_data_plus(
-                bs_code,
-                "date,open,high,low,close,volume,amount",
-                start_date=f"{start[:4]}-{start[4:6]}-{start[6:8]}",
-                end_date=f"{end[:4]}-{end[4:6]}-{end[6:8]}",
-                frequency="d",
-                adjustflag="3",
-            )
-            rows: list[CnDailyPriceRow] = []
-            while getattr(query, "error_code", "0") == "0" and query.next():
-                item = query.get_row_data()
-                rows.append(
-                    CnDailyPriceRow(
-                        date=item[0],
-                        open=_normalize_float(item[1]),
-                        high=_normalize_float(item[2]),
-                        low=_normalize_float(item[3]),
-                        close=_normalize_float(item[4]),
-                        volume=_normalize_float(item[5]),
-                        value=_normalize_float(item[6]),
-                    )
-                )
-            return rows
+            yield
         finally:
-            try:
-                bs.logout()
-            except Exception:  # pragma: no cover - defensive cleanup
-                pass
+            self._baostock_session_open = False
+            if self._baostock_logged_in:
+                self._baostock_logged_in = False
+                try:
+                    self._baostock.logout()
+                except Exception:  # pragma: no cover - defensive cleanup
+                    pass
+
+    def _query_baostock_ohlcv(
+        self,
+        bs_code: str,
+        *,
+        start: str,
+        end: str,
+    ) -> list[CnDailyPriceRow] | None:
+        """Return rows, ``[]`` when login fails, or ``None`` when the query errors."""
+        bs = self._baostock
+        if not self._baostock_logged_in:
+            login_result = bs.login()
+            if getattr(login_result, "error_code", "0") != "0":
+                return []
+            self._baostock_logged_in = True
+        query = bs.query_history_k_data_plus(
+            bs_code,
+            "date,open,high,low,close,volume,amount",
+            start_date=f"{start[:4]}-{start[4:6]}-{start[6:8]}",
+            end_date=f"{end[:4]}-{end[4:6]}-{end[6:8]}",
+            frequency="d",
+            adjustflag="3",
+        )
+        if getattr(query, "error_code", "0") != "0":
+            return None
+        rows: list[CnDailyPriceRow] = []
+        while query.next():
+            item = query.get_row_data()
+            rows.append(
+                CnDailyPriceRow(
+                    date=item[0],
+                    open=_normalize_float(item[1]),
+                    high=_normalize_float(item[2]),
+                    low=_normalize_float(item[3]),
+                    close=_normalize_float(item[4]),
+                    volume=_normalize_float(item[5]),
+                    value=_normalize_float(item[6]),
+                )
+            )
+        return rows
 
     def daily_ohlcv_dataframe(
         self,
