@@ -81,6 +81,20 @@ def test_resolve_identity_preserves_explicit_two_suffix_without_exchange_overrid
     assert identity.canonical_symbol == "3008.TWO"
 
 
+def test_resolve_identity_keeps_tw_board_suffix_for_shared_xtai_mic():
+    # Universe rows store the MIC XTAI for both TWSE and TPEx listings, so the
+    # MIC must not collapse a TPEx .TWO symbol onto the TWSE .TW suffix.
+    resolver = SecurityMasterResolver()
+
+    tpex = resolver.resolve_identity(symbol="1240.TWO", market="TW", exchange="XTAI")
+    twse = resolver.resolve_identity(symbol="2330.TW", market="TW", exchange="XTAI")
+    bare = resolver.resolve_identity(symbol="2330", market="TW", exchange="XTAI")
+
+    assert tpex.canonical_symbol == "1240.TWO"
+    assert twse.canonical_symbol == "2330.TW"
+    assert bare.canonical_symbol == "2330.TW"
+
+
 def test_normalize_symbol_strips_dollar_prefix():
     resolver = SecurityMasterResolver()
 

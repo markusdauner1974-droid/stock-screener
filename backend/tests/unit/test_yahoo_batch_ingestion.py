@@ -15,11 +15,13 @@ from app.domain.providers.data_plan import (
     PLAN_VERSION,
     PROVIDER_AKSHARE,
     PROVIDER_BAOSTOCK,
+    PROVIDER_SINA,
     PROVIDER_YFINANCE,
     ProviderDataPlan,
     ProviderPlanStep,
 )
 from app.config import settings
+from app.services.provider_adapters.price_plan_executor import PriceProviderPlanExecutor
 from app.database import Base
 from app.models.stock import StockPrice
 from app.models.stock_universe import (
@@ -700,15 +702,22 @@ def test_fetch_prices_in_batches_attaches_price_plan_provenance(monkeypatch):
         return {symbol: _success_result(symbol) for symbol in symbols}
 
     monkeypatch.setattr(fetcher, "_fetch_yfinance_prices_in_batches", fake_yahoo)
+    repaired_markets = []
+    monkeypatch.setattr(
+        PriceProviderPlanExecutor,
+        "_repair_latest_sessions_from_sina",
+        staticmethod(lambda results, *, market: repaired_markets.append(market)),
+    )
 
     results = fetcher.fetch_prices_in_batches(["0700.HK"], period="7d", market="HK")
 
+    assert repaired_markets == ["HK"]
     assert results["0700.HK"]["provider_data_plan"] == {
         "version": PLAN_VERSION,
         "dataset": DATASET_PRICES,
         "market": "HK",
         "mic": None,
-        "providers": [PROVIDER_YFINANCE],
+        "providers": [PROVIDER_YFINANCE, PROVIDER_SINA],
     }
 
 

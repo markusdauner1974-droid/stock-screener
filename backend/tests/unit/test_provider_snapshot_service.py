@@ -2731,18 +2731,16 @@ def test_publish_market_snapshot_run_dedups_colliding_canonical_symbols():
 
 
 def test_replace_market_universe_rows_collapses_phantom_canonical_collisions():
-    # Observed in a published TW bundle: phantom .TWO copies of .TW securities,
-    # both carrying the TWSE 'XTAI' exchange (same name/sector as the .TW row).
-    # On import, _deserialize_universe_row re-canonicalizes .TWO + XTAI -> .TW
-    # (exchange wins, by design — see the TPEX test above), colliding with the
-    # genuine .TW row and crashing the import on ix_stock_universe_symbol.
+    # A mis-suffixed 1240.TW row tagged with the TPEX board re-canonicalizes to
+    # 1240.TWO (board alias wins, by design — see the TPEX test above), colliding
+    # with the genuine .TWO row and crashing the import on ix_stock_universe_symbol.
     # The import must collapse rows that canonicalize to the same symbol.
     TestingSessionLocal = _make_session()
     db = TestingSessionLocal()
 
     def _row(symbol):
         return {
-            "symbol": symbol, "exchange": "XTAI", "market": "TW", "name": "MORNSUN",
+            "symbol": symbol, "exchange": "TPEX", "market": "TW", "name": "MORNSUN",
             "currency": "TWD", "timezone": "Asia/Taipei", "local_code": "1240",
             "sector": "Agricultural Technology", "industry": "Agricultural Technology",
         }
@@ -2755,12 +2753,35 @@ def test_replace_market_universe_rows_collapses_phantom_canonical_collisions():
     persisted = db.query(StockUniverse).filter(StockUniverse.market == "TW").all()
     assert count == 1
     assert len(persisted) == 1
-    assert persisted[0].symbol == "1240.TW"  # both phantoms canonicalize here
+    assert persisted[0].symbol == "1240.TWO"  # both rows canonicalize here
+    db.close()
+
+
+def test_replace_market_universe_rows_keeps_tpex_two_rows_stored_under_xtai():
+    # Universe rows store the MIC XTAI for both TW boards. XTAI must not demote
+    # a TPEx .TWO row to .TW: that collapse silently renamed ~900 TPEx listings
+    # to Yahoo-unknown .TW symbols and quarantined every TW static export.
+    TestingSessionLocal = _make_session()
+    db = TestingSessionLocal()
+
+    count = ProviderSnapshotService._replace_market_universe_rows(
+        db,
+        market="TW",
+        rows=[
+            {"symbol": "1240.TWO", "exchange": "XTAI", "market": "TW", "local_code": "1240"},
+            {"symbol": "2330.TW", "exchange": "XTAI", "market": "TW", "local_code": "2330"},
+        ],
+    )
+    db.commit()
+
+    symbols = sorted(r.symbol for r in db.query(StockUniverse).all())
+    assert count == 2
+    assert symbols == ["1240.TWO", "2330.TW"]
     db.close()
 
 
 def test_import_weekly_reference_bundle_collapses_phantom_collisions_end_to_end(tmp_path):
-    # Full import: the phantom .TWO/.TW collapse hits BOTH the universe insert
+    # Full import: the phantom .TW/.TWO collapse hits BOTH the universe insert
     # (ix_stock_universe_symbol) AND the snapshot-row insert
     # (uq_provider_snapshot_row_run_symbol). Deduping universe rows alone just
     # moves the crash downstream, so the whole bundle import must survive.
@@ -2771,16 +2792,16 @@ def test_import_weekly_reference_bundle_collapses_phantom_collisions_end_to_end(
 
     def _uni(symbol):
         return {
-            "symbol": symbol, "exchange": "XTAI", "market": "TW", "name": "MORNSUN",
+            "symbol": symbol, "exchange": "TPEX", "market": "TW", "name": "MORNSUN",
             "currency": "TWD", "timezone": "Asia/Taipei", "local_code": "1240",
             "is_active": True, "status": UNIVERSE_STATUS_ACTIVE,
         }
 
     def _snap(symbol):
         return {
-            "symbol": symbol, "exchange": "XTAI", "market": "TW",
+            "symbol": symbol, "exchange": "TPEX", "market": "TW",
             "row_hash": f"hash-{symbol}",
-            "normalized_payload": {"symbol": symbol, "exchange": "XTAI", "market": "TW"},
+            "normalized_payload": {"symbol": symbol, "exchange": "TPEX", "market": "TW"},
         }
 
     payload = {
@@ -2807,8 +2828,8 @@ def test_import_weekly_reference_bundle_collapses_phantom_collisions_end_to_end(
 
     universe = db.query(StockUniverse).filter(StockUniverse.market == "TW").all()
     snap_rows = db.query(ProviderSnapshotRow).all()
-    assert [r.symbol for r in universe] == ["1240.TW"]
-    assert [r.symbol for r in snap_rows] == ["1240.TW"]
+    assert [r.symbol for r in universe] == ["1240.TWO"]
+    assert [r.symbol for r in snap_rows] == ["1240.TWO"]
     # run metadata clamped to the actual persisted row count, not the pre-dedup 2.
     run = db.query(ProviderSnapshotRun).filter(ProviderSnapshotRun.snapshot_key == snapshot_key).one()
     assert run.symbols_total == 1

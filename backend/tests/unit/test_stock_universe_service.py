@@ -1840,6 +1840,48 @@ def test_ingest_tw_snapshot_rows_truncates_verbose_row_payloads():
     db.close()
 
 
+def test_ingest_tw_snapshot_rows_deactivates_other_board_twins():
+    # A stale 1240.TW row (TPEx stock carried under the TWSE suffix) and a stale
+    # 2330.TWO row must be retired once the official snapshot lists the stock on
+    # its real board; Asia reconciliation alone never deactivates them.
+    TestingSessionLocal = _make_session()
+    db = TestingSessionLocal()
+    for symbol in ("1240.TW", "2330.TWO"):
+        db.add(
+            StockUniverse(
+                symbol=symbol,
+                market="TW",
+                exchange="XTAI",
+                is_active=True,
+                status=UNIVERSE_STATUS_ACTIVE,
+            )
+        )
+    db.commit()
+
+    stats = stock_universe_service.ingest_tw_snapshot_rows(
+        db,
+        rows=[
+            {"symbol": "1240", "exchange": "TPEX", "name": "MORNSUN"},
+            {"symbol": "2330", "exchange": "TWSE", "name": "TSMC"},
+        ],
+        source_name="twse_official",
+        snapshot_id="tw-20260929",
+    )
+    db.commit()
+
+    status_by_symbol = {
+        row.symbol: row.status for row in db.query(StockUniverse).all()
+    }
+    assert status_by_symbol == {
+        "1240.TW": UNIVERSE_STATUS_INACTIVE_MISSING_SOURCE,
+        "1240.TWO": UNIVERSE_STATUS_ACTIVE,
+        "2330.TW": UNIVERSE_STATUS_ACTIVE,
+        "2330.TWO": UNIVERSE_STATUS_INACTIVE_MISSING_SOURCE,
+    }
+    assert stats["board_twins_deactivated"] == 2
+    db.close()
+
+
 def test_ingest_hk_snapshot_rows_persists_reconciliation_diff_against_prior_snapshot():
     TestingSessionLocal = _make_session()
     db = TestingSessionLocal()

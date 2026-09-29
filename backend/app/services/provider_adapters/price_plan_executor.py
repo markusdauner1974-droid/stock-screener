@@ -11,6 +11,7 @@ from app.domain.providers.data_plan import (
     PROVIDER_AKSHARE,
     PROVIDER_BAOSTOCK,
     PROVIDER_KRX,
+    PROVIDER_SINA,
     PROVIDER_YFINANCE,
     ProviderDataPlan,
     ProviderPlanStep,
@@ -163,7 +164,34 @@ class PriceProviderPlanExecutor:
             market=market,
             progress_callback=progress_callback,
         )
+        if plan.allows(PROVIDER_SINA):
+            self._repair_latest_sessions_from_sina(results, market=market)
         return self._with_plan_metadata(results, plan)
+
+    @staticmethod
+    def _repair_latest_sessions_from_sina(
+        results: dict[str, dict[str, Any]],
+        *,
+        market: str | None,
+    ) -> None:
+        from app.services.hk_sina_price_repair import repair_missing_latest_sessions
+        from app.services.market_calendar_service import MarketCalendarService
+
+        try:
+            expected_session = MarketCalendarService().last_completed_trading_day(
+                market or "HK"
+            )
+        except Exception as exc:  # calendar gap: keep Yahoo results as-is
+            logger.warning("Skipping Sina price repair for %s: %s", market, exc)
+            return
+        stats = repair_missing_latest_sessions(results, expected_session=expected_session)
+        if stats["stale"]:
+            logger.info(
+                "Sina price repair for %s through %s: %s",
+                market,
+                expected_session,
+                stats,
+            )
 
     def _fetch_cn_native(
         self,
