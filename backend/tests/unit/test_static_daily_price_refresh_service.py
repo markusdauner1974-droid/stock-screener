@@ -1650,3 +1650,14 @@ def test_static_daily_price_refresh_rejects_sparse_replacement_history() -> None
             _RRG_STARTUP_SEEDED_DATES
         )
     assert result["yahoo_failed_symbols"] == 1
+
+
+def test_static_daily_price_refresh_rejects_replacement_missing_the_discarded_top_up_bar() -> None:
+    session_factory = _sqlite_session_factory()
+
+    # The drift-triggering 7d frame carried 2026-06-04; the 2y refetch stops at
+    # 2026-06-03, the previous stored latest date.
+    result = _run_readjusted_split(session_factory, list(_RRG_STARTUP_SEEDED_DATES))
+
+    assert _adj_closes(session_factory, "SPLIT.NS") == {1.0}
+    assert result["yahoo_failed_symbols"] == 1

@@ -98,6 +98,16 @@ def _key_market_price_symbols(market: str | None) -> list[str]:
     return list(key_market_price_symbols(market))
 
 
+def _frame_price_rows(symbol: str, frame: pd.DataFrame) -> list[dict[str, Any]]:
+    rows = (
+        stock_price_row_from_ohlcv(
+            symbol=symbol, row_date=pd.Timestamp(stamp).date(), row=row
+        )
+        for stamp, row in frame.iterrows()
+    )
+    return [row for row in rows if row is not None]
+
+
 def _dedupe_symbols(symbols: list[str]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
@@ -317,7 +327,9 @@ class StaticDailyPriceRefreshService:
                 flush=True,
             )
 
-        readjusted_symbols: list[str] = []
+        # Symbol -> dates of its discarded, drift-triggering top-up frame; the
+        # replacement must cover them too (e.g. the new as-of bar).
+        readjusted_symbols: dict[str, set[date]] = {}
         stale_refreshed, stale_failed, stale_rate_limited = self._fetch_and_store(
             stale_symbols,
             period=STATIC_DAILY_PRICE_REFRESH_PERIOD,
@@ -333,7 +345,7 @@ class StaticDailyPriceRefreshService:
         )
         refreshed = stale_refreshed + bootstrap_refreshed
         failed = stale_failed + bootstrap_failed
-        retry_readjusted_symbols: list[str] = []
+        retry_readjusted_symbols: dict[str, set[date]] = {}
         retry_stats = self._retry_rate_limited_failures(
             market=market,
             rate_limited_symbols_by_period={
@@ -347,7 +359,7 @@ class StaticDailyPriceRefreshService:
         # Their throttled first attempt was counted as failed; the re-bootstrap
         # below now owns their outcome.
         failed -= len(retry_readjusted_symbols)
-        readjusted_symbols.extend(retry_readjusted_symbols)
+        readjusted_symbols.update(retry_readjusted_symbols)
         if readjusted_symbols:
             print(
                 f"[static-daily prices] Re-bootstrapping {len(readjusted_symbols):,} "
@@ -355,11 +367,11 @@ class StaticDailyPriceRefreshService:
                 flush=True,
             )
             readjusted_refreshed, readjusted_failed, _ = self._fetch_and_store(
-                readjusted_symbols,
+                list(readjusted_symbols),
                 period=STATIC_DAILY_PRICE_BOOTSTRAP_PERIOD,
                 batch_size=batch_size,
                 market=market,
-                replace_existing_rows=True,
+                replacement_required_dates=readjusted_symbols,
             )
             refreshed += readjusted_refreshed
             failed += readjusted_failed
@@ -522,16 +534,18 @@ class StaticDailyPriceRefreshService:
         period: str,
         batch_size: int,
         market: str | None,
-        readjusted_symbols: list[str] | None = None,
-        replace_existing_rows: bool = False,
+        readjusted_symbols: dict[str, set[date]] | None = None,
+        replacement_required_dates: dict[str, set[date]] | None = None,
     ) -> tuple[int, int, list[str]]:
         """Fetch and store ``symbols``.
 
         With ``readjusted_symbols``, symbols whose history Yahoo back-adjusted
         are neither stored nor counted; they are appended there for a full
-        refetch instead. ``replace_existing_rows`` deletes stored rows in each
-        fetched frame's date range first: the store only updates a symbol's
-        latest existing row, so old-scale history would otherwise survive.
+        refetch instead, with the discarded frame's dates. With
+        ``replacement_required_dates``, each symbol's stored history is swapped
+        for the fetched rows (see ``_replace_stored_history``): the store only
+        updates a symbol's latest existing row, so old-scale history would
+        otherwise survive.
         """
         refreshed_count = 0
         failed_count = 0
@@ -569,11 +583,16 @@ class StaticDailyPriceRefreshService:
                         rate_limited.append(symbol)
             if readjusted_symbols is not None and batch_to_store:
                 for symbol in sorted(self._adjustment_drift_symbols(batch_to_store)):
-                    del batch_to_store[symbol]
+                    readjusted_symbols[symbol] = {
+                        row["date"]
+                        for row in _frame_price_rows(symbol, batch_to_store.pop(symbol))
+                    }
                     refreshed_count -= 1
-                    readjusted_symbols.append(symbol)
-            if replace_existing_rows and batch_to_store:
-                replaced = self._replace_stored_history(batch_to_store)
+            if replacement_required_dates is not None and batch_to_store:
+                replaced = self._replace_stored_history(
+                    batch_to_store,
+                    required_dates_by_symbol=replacement_required_dates,
+                )
                 for symbol in sorted(set(batch_to_store) - replaced):
                     del batch_to_store[symbol]
                     refreshed_count -= 1
@@ -620,27 +639,28 @@ class StaticDailyPriceRefreshService:
             > STATIC_ADJUSTMENT_DRIFT_TOLERANCE
         }
 
-    def _replace_stored_history(self, frames: dict[str, Any]) -> set[str]:
+    def _replace_stored_history(
+        self,
+        frames: dict[str, Any],
+        *,
+        required_dates_by_symbol: dict[str, set[date]],
+    ) -> set[str]:
         """Swap each symbol's stored rows for its fetched rows in one transaction.
 
         A symbol is replaced only if its fetched rows cover every stored date
-        from their first date onward; a sparse or truncated frame would leave a
-        gap or an old-scale row, so it is skipped. Returns the symbols replaced; on any failure nothing
-        is changed and the empty set is returned, so callers count those
-        symbols as failed.
+        from their first date onward plus its ``required_dates_by_symbol``
+        (the discarded drift-triggering top-up, e.g. the new as-of bar); a
+        sparse or truncated frame would leave a gap, a stale symbol, or an
+        old-scale row, so it is skipped. Returns the symbols replaced; on any
+        failure nothing is changed and the empty set is returned, so callers
+        count those symbols as failed.
         """
-        rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
-        for symbol, frame in frames.items():
-            if not isinstance(frame, pd.DataFrame) or frame.empty:
-                continue
-            rows = [
-                stock_price_row_from_ohlcv(
-                    symbol=symbol, row_date=pd.Timestamp(stamp).date(), row=row
-                )
-                for stamp, row in frame.iterrows()
-            ]
-            rows_by_symbol[symbol] = [row for row in rows if row is not None]
-        rows_by_symbol = {symbol: rows for symbol, rows in rows_by_symbol.items() if rows}
+        rows_by_symbol = {
+            symbol: rows
+            for symbol, frame in frames.items()
+            if isinstance(frame, pd.DataFrame)
+            and (rows := _frame_price_rows(symbol, frame))
+        }
         if not rows_by_symbol:
             return set()
         with self._session_factory() as db:
@@ -654,11 +674,13 @@ class StaticDailyPriceRefreshService:
                             StockPrice.date >= min(dates),
                         )
                     }
-                    uncovered = stored_dates - dates
+                    uncovered = (
+                        stored_dates | required_dates_by_symbol.get(symbol, set())
+                    ) - dates
                     if uncovered:
                         print(
                             "[static-daily prices] Not replacing back-adjusted history "
-                            f"for {symbol}: refetch lacks {len(uncovered)} stored dates.",
+                            f"for {symbol}: refetch lacks {len(uncovered)} required dates.",
                             flush=True,
                         )
                         del rows_by_symbol[symbol]
@@ -685,7 +707,7 @@ class StaticDailyPriceRefreshService:
         *,
         market: str | None,
         rate_limited_symbols_by_period: dict[str, list[str]],
-        readjusted_symbols: list[str] | None = None,
+        readjusted_symbols: dict[str, set[date]] | None = None,
     ) -> dict[str, Any]:
         skipped_payload: dict[str, Any] = {
             "attempted": 0,
@@ -739,9 +761,11 @@ class StaticDailyPriceRefreshService:
                 and recovered_payload
             ):
                 for symbol in sorted(self._adjustment_drift_symbols(recovered_payload)):
-                    del recovered_payload[symbol]
+                    readjusted_symbols[symbol] = {
+                        row["date"]
+                        for row in _frame_price_rows(symbol, recovered_payload.pop(symbol))
+                    }
                     recovered -= 1
-                    readjusted_symbols.append(symbol)
             if recovered_payload:
                 self._price_cache.store_batch_in_cache(
                     recovered_payload,
