@@ -427,6 +427,23 @@ def test_static_site_preserves_and_publishes_us_options_history() -> None:
     )
 
 
+def test_static_site_restores_breadth_history_before_export_and_publishes_after() -> None:
+    build_job = _build_market_job()
+
+    def step(name: str) -> str:
+        return build_job.split(f"      - name: {name}\n", 1)[1].split("      - name:", 1)[0]
+
+    restore, publish = step("Restore breadth history"), step("Publish breadth history")
+    assert build_job.index("- name: Restore breadth history") < build_job.index(
+        "- name: Export market static data bundle"
+    )
+    assert "static_breadth_history_cache import" in restore
+    assert "continue-on-error: true" in restore
+    assert "static_breadth_history_cache export" in publish
+    assert "continue-on-error: true" in publish
+    assert "steps.export-market.outputs.has_artifact == 'true'" in publish
+
+
 def test_static_site_validation_uses_python_module_not_inline_control_plane() -> None:
     combine_job = _combine_and_build_job()
     validation_step = combine_job.split("      - name: Validate market artifacts\n", 1)[
