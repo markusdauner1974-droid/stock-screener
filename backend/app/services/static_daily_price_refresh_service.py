@@ -621,10 +621,13 @@ class StaticDailyPriceRefreshService:
         }
 
     def _replace_stored_history(self, frames: dict[str, Any]) -> set[str]:
-        """Swap stored rows for each frame's date range in one transaction.
+        """Swap each symbol's stored rows for its fetched rows in one transaction.
 
-        Returns the symbols replaced; on any failure nothing is changed and
-        the empty set is returned, so callers count those symbols as failed.
+        A symbol is replaced only if its fetched rows cover every stored date
+        from their first date onward; a sparse or truncated frame would leave a
+        gap or an old-scale row, so it is skipped. Returns the symbols replaced; on any failure nothing
+        is changed and the empty set is returned, so callers count those
+        symbols as failed.
         """
         rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
         for symbol, frame in frames.items():
@@ -642,14 +645,30 @@ class StaticDailyPriceRefreshService:
             return set()
         with self._session_factory() as db:
             try:
-                for symbol, rows in rows_by_symbol.items():
-                    dates = [row["date"] for row in rows]
+                for symbol, rows in list(rows_by_symbol.items()):
+                    dates = {row["date"] for row in rows}
+                    stored_dates = {
+                        stored_date
+                        for (stored_date,) in db.query(StockPrice.date).filter(
+                            StockPrice.symbol == symbol,
+                            StockPrice.date >= min(dates),
+                        )
+                    }
+                    uncovered = stored_dates - dates
+                    if uncovered:
+                        print(
+                            "[static-daily prices] Not replacing back-adjusted history "
+                            f"for {symbol}: refetch lacks {len(uncovered)} stored dates.",
+                            flush=True,
+                        )
+                        del rows_by_symbol[symbol]
+                        continue
                     db.query(StockPrice).filter(
                         StockPrice.symbol == symbol,
-                        StockPrice.date >= min(dates),
-                        StockPrice.date <= max(dates),
+                        StockPrice.date.in_(dates),
                     ).delete(synchronize_session=False)
-                persist_stock_price_mappings(db, rows_by_symbol)
+                if rows_by_symbol:
+                    persist_stock_price_mappings(db, rows_by_symbol)
                 db.commit()
             except Exception as exc:
                 db.rollback()

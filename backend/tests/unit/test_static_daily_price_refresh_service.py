@@ -1614,12 +1614,12 @@ def test_static_daily_price_refresh_keeps_old_history_when_replacement_write_fai
     assert result["yahoo_failed_symbols"] == 1
 
 
-def test_static_daily_price_refresh_replaces_only_the_fetched_date_range() -> None:
+def test_static_daily_price_refresh_rejects_truncated_replacement_history() -> None:
     session_factory = _sqlite_session_factory()
 
     # A truncated 2y response that stops before the stored 2026-06-03 row.
     truncated = [d for d in _RRG_STARTUP_SEEDED_DATES if d < date(2026, 6, 3)]
-    _run_readjusted_split(session_factory, truncated)
+    result = _run_readjusted_split(session_factory, truncated)
 
     with session_factory() as db:
         newest = (
@@ -1627,4 +1627,26 @@ def test_static_daily_price_refresh_replaces_only_the_fetched_date_range() -> No
             .filter(StockPrice.symbol == "SPLIT.NS", StockPrice.date == date(2026, 6, 3))
             .scalar()
         )
+    # Rejected whole: the newer row survives and no mixed-scale series is left.
     assert newest == 1.0
+    assert _adj_closes(session_factory, "SPLIT.NS") == {1.0}
+    assert result["yahoo_failed_symbols"] == 1
+
+
+def test_static_daily_price_refresh_rejects_sparse_replacement_history() -> None:
+    session_factory = _sqlite_session_factory()
+
+    # Yahoo's 2y response is missing a stored interior date (2025-12-01).
+    sparse = [
+        *(d for d in _RRG_STARTUP_SEEDED_DATES if d != date(2025, 12, 1)),
+        date(2026, 6, 4),
+    ]
+    result = _run_readjusted_split(session_factory, sparse)
+
+    # Replacing would leave a gap or an old-scale row, so nothing changes.
+    assert _adj_closes(session_factory, "SPLIT.NS") == {1.0}
+    with session_factory() as db:
+        assert db.query(StockPrice).filter(StockPrice.symbol == "SPLIT.NS").count() == len(
+            _RRG_STARTUP_SEEDED_DATES
+        )
+    assert result["yahoo_failed_symbols"] == 1
