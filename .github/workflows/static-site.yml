@@ -416,6 +416,29 @@ jobs:
             echo "Unable to restore breadth contributor metadata for ${{ matrix.market }}; the market artifact will not be published." >&2
           fi
 
+      # Restores last run's market_breadth rows so the exporter recomputes only
+      # the newest sessions instead of the whole ~150-session window. Any
+      # failure just means a full recompute, as before this step existed.
+      - name: Restore breadth history
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ASSET_NAME="breadth-history-${MARKET_LOWER}.json.gz"
+          mkdir -p /tmp/breadth-history
+          rm -f "/tmp/breadth-history/$ASSET_NAME"
+          if ! gh release download daily-price-data \
+            --repo "${{ github.repository }}" \
+            --pattern "$ASSET_NAME" \
+            --dir /tmp/breadth-history; then
+            echo "No breadth history asset for ${{ matrix.market }}; breadth will be recomputed in full."
+            exit 0
+          fi
+          cd backend
+          python -m app.scripts.static_breadth_history_cache import \
+            --market "${{ matrix.market }}" \
+            --path "/tmp/breadth-history/$ASSET_NAME"
+
       - name: Export market static data bundle
         id: export-market
         env:
@@ -567,6 +590,19 @@ jobs:
 
           gh release upload daily-price-data "$BUNDLE_PATH" --clobber
           gh release upload daily-price-data "$MANIFEST_PATH" --clobber
+
+      - name: Publish breadth history
+        if: ${{ steps.export-market.outputs.has_artifact == 'true' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ASSET_PATH="/tmp/breadth-history/breadth-history-${MARKET_LOWER}.json.gz"
+          cd backend
+          python -m app.scripts.static_breadth_history_cache export \
+            --market "${{ matrix.market }}" \
+            --path "$ASSET_PATH"
+          gh release upload daily-price-data "$ASSET_PATH" --clobber
 
       - name: Publish breadth contributor metadata
         id: publish-breadth-contributor-metadata
