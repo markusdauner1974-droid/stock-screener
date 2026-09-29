@@ -679,13 +679,20 @@ class CnMarketDataService:
         bs_prefix = "sh" if exchange == "SSE" else "sz"
         bs_code = f"{bs_prefix}.{local_code}"
         with self.baostock_session():
-            rows = self._query_baostock_ohlcv(bs_code, start=start, end=end)
-            if rows is None:
+            for attempt in (1, 2):
+                try:
+                    rows = self._query_baostock_ohlcv(bs_code, start=start, end=end)
+                except Exception:
+                    rows = None
+                    if attempt == 2:
+                        self._baostock_logged_in = False
+                        raise
+                if rows is not None:
+                    return rows
                 # The shared login may have expired, dropped, or been logged out
                 # by another BaoStock caller: log in again once and retry.
                 self._baostock_logged_in = False
-                rows = self._query_baostock_ohlcv(bs_code, start=start, end=end)
-            return rows or []
+            return []
 
     @contextmanager
     def baostock_session(self):

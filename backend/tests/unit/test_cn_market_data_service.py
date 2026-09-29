@@ -897,11 +897,14 @@ class _FakeBaoOhlcvQuery:
 class _FakeBaoStockOhlcv:
     """Counts logins; ``drop_after`` queries fail once, like a dropped socket."""
 
-    def __init__(self, *, drop_after: int | None = None) -> None:
+    def __init__(
+        self, *, drop_after: int | None = None, raise_on_drop: bool = False
+    ) -> None:
         self.logins = 0
         self.logouts = 0
         self.queries = 0
         self._drop_after = drop_after
+        self._raise_on_drop = raise_on_drop
 
     def login(self) -> _FakeBaoLogin:
         self.logins += 1
@@ -913,6 +916,8 @@ class _FakeBaoStockOhlcv:
     def query_history_k_data_plus(self, *args, **kwargs) -> _FakeBaoOhlcvQuery:
         self.queries += 1
         if self._drop_after is not None and self.queries == self._drop_after + 1:
+            if self._raise_on_drop:
+                raise BrokenPipeError(32, "Broken pipe")
             return _FakeBaoOhlcvQuery(error_code="10002007")
         return _FakeBaoOhlcvQuery()
 
@@ -956,6 +961,20 @@ def test_cn_baostock_session_relogs_in_once_after_a_dropped_query():
     assert first[0].close == 10.5
     assert second[0].close == 10.5
     assert (baostock.logins, baostock.queries) == (2, 3)
+
+
+def test_cn_baostock_session_relogs_in_once_after_a_raised_query():
+    baostock = _FakeBaoStockOhlcv(drop_after=1, raise_on_drop=True)
+    service = _baostock_only_service(baostock)
+
+    with service.baostock_session():
+        service.daily_ohlcv("600000", start="20260401", end="20260430")
+        second = service.daily_ohlcv("000001", start="20260401", end="20260430")
+        third = service.daily_ohlcv("600519", start="20260401", end="20260430")
+
+    assert second[0].close == 10.5
+    assert third[0].close == 10.5
+    assert (baostock.logins, baostock.queries) == (2, 4)
 
 
 def test_cn_market_data_service_raises_dependency_error_when_akshare_missing(monkeypatch):

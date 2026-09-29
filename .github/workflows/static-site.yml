@@ -31,6 +31,9 @@ concurrency:
   # Queue instead of cancel: GitHub often delays the Asia cron by 4-8h, so it
   # can still be running when the US cron fires. Cancelling it would discard
   # every Asian market's build and skip that group's publish entirely.
+  # queue: max keeps every pending run; the default (single) lets a newer run
+  # evict a pending one, e.g. a manual dispatch dropping the queued US run.
+  queue: max
   cancel-in-progress: false
 
 permissions:
