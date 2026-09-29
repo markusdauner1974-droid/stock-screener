@@ -7,6 +7,15 @@ on:
   pull_request:
     branches: [main, develop]
 
+# Read-only by default; jobs that publish declare what they need.
+permissions:
+  contents: read
+
+# Dependency caches (uv, npm) are kept. Only workflows running on main can
+# write main-scope caches, and none here run untrusted code there
+# (no pull_request_target, issue_comment or workflow_run triggers). PR runs
+# write PR-scoped caches that main never restores.
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -19,6 +28,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - name: Verify private Social dependency is absent from public paths
         run: python3 scripts/verify_social_private_boundary.py
 
@@ -45,6 +56,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -102,6 +115,11 @@ jobs:
           - name: "Gate 3: Integration coverage"
             db: ci
             run: make gate-3
+          - name: Integration and parity sweep
+            db: integration_ci
+            run: |
+              PGPASSWORD=ci createdb -h localhost -U ci integration_ci
+              make gate-integration
           - name: Required company exposure S1 PostgreSQL gate
             db: company_exposure_ci
             run: |
@@ -126,6 +144,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -162,6 +182,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -212,6 +234,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -235,6 +259,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -260,6 +286,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Assistant profile compose smoke
         run: bash scripts/run_docker_assistant_compose_smoke.sh
@@ -275,6 +303,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Normalize GHCR owner
         id: registry
