@@ -591,11 +591,11 @@ class BulkDataFetcher:
                     )
                 return results
 
-            # Single symbol: yf.download returns flat columns (Open, High, etc.)
-            # Multi-symbol: returns MultiIndex columns (AAPL/Open, AAPL/High, etc.)
+            # Returns MultiIndex columns (AAPL/Open, AAPL/High, etc.), even for
+            # a single symbol in current yfinance; older versions returned flat columns.
             if len(fetch_symbols) == 1:
                 symbol = fetch_symbols[0]
-                df = raw.copy()
+                df = raw[symbol].copy() if raw.columns.nlevels > 1 else raw.copy()
                 if df is not None and not df.empty:
                     results[symbol] = {
                         'symbol': symbol, 'price_data': df, 'info': None,

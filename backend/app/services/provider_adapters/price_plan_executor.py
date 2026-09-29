@@ -12,6 +12,7 @@ from app.domain.providers.data_plan import (
     PROVIDER_BAOSTOCK,
     PROVIDER_KRX,
     PROVIDER_SINA,
+    PROVIDER_YAHOO_QUOTE,
     PROVIDER_YFINANCE,
     ProviderDataPlan,
     ProviderPlanStep,
@@ -166,7 +167,44 @@ class PriceProviderPlanExecutor:
         )
         if plan.allows(PROVIDER_SINA):
             self._repair_latest_sessions_from_sina(results, market=market)
+        if plan.allows(PROVIDER_YAHOO_QUOTE):
+            self._repair_latest_sessions_from_yahoo_quote(results, market=market)
         return self._with_plan_metadata(results, plan)
+
+    def _repair_latest_sessions_from_yahoo_quote(
+        self,
+        results: dict[str, dict[str, Any]],
+        *,
+        market: str | None,
+    ) -> None:
+        from app.services.market_calendar_service import MarketCalendarService
+        from app.services.yahoo_quote_price_repair import repair_from_yahoo_quotes
+
+        calendar = MarketCalendarService()
+        try:
+            expected_session = calendar.last_completed_trading_day(market or "JP")
+            market_tz = calendar.market_timezone(market or "JP")
+        except Exception as exc:  # calendar gap: keep Yahoo results as-is
+            logger.warning("Skipping Yahoo quote price repair for %s: %s", market, exc)
+            return
+        rate_limiter = getattr(self._fetcher, "_rate_limiter", None)
+        stats = repair_from_yahoo_quotes(
+            results,
+            expected_session=expected_session,
+            market_tz=market_tz,
+            wait=(
+                (lambda: rate_limiter.wait_for_market("yfinance:batch", market))
+                if rate_limiter is not None
+                else None
+            ),
+        )
+        if stats["stale"]:
+            logger.info(
+                "Yahoo quote price repair for %s through %s: %s",
+                market,
+                expected_session,
+                stats,
+            )
 
     @staticmethod
     def _repair_latest_sessions_from_sina(

@@ -14,7 +14,7 @@ from app.domain.markets.market import SUPPORTED_MARKET_CODES
 
 DATASET_FUNDAMENTALS = "fundamentals"
 DATASET_PRICES = "prices"
-PLAN_VERSION = "2026.09.29.1"
+PLAN_VERSION = "2026.09.29.2"
 
 PROVIDER_AKSHARE = "akshare"
 PROVIDER_ALPHAVANTAGE = "alphavantage"
@@ -23,6 +23,7 @@ PROVIDER_FINVIZ = "finviz"
 PROVIDER_KRX = "krx"
 PROVIDER_OPENDART = "opendart"
 PROVIDER_SINA = "sina"
+PROVIDER_YAHOO_QUOTE = "yahoo_quote"
 PROVIDER_YFINANCE = "yfinance"
 
 _DEFAULT_MARKET = "US"
@@ -222,7 +223,12 @@ provider_data_plan_registry = ProviderDataPlanRegistry(
             ProviderPlanStep(PROVIDER_SINA, batch_size=1),
         ),
         ("IN", DATASET_PRICES): (_yf(batch_size=50),),
-        ("JP", DATASET_PRICES): (_yf(batch_size=50),),
+        # Yahoo quotes only repair the latest session Yahoo history is missing;
+        # see services/yahoo_quote_price_repair.py.
+        ("JP", DATASET_PRICES): (
+            _yf(batch_size=50),
+            ProviderPlanStep(PROVIDER_YAHOO_QUOTE, batch_size=100),
+        ),
         ("KR", DATASET_PRICES): (
             ProviderPlanStep(PROVIDER_KRX, batch_size=200, fallback=False),
             _yf(batch_size=50),

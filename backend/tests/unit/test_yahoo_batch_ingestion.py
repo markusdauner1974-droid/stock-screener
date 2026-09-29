@@ -306,6 +306,23 @@ def test_fetch_batch_prices_preserves_invalid_jp_result_in_mixed_multi_symbol_ba
     assert results["6758.T"]["has_error"] is False
 
 
+def test_fetch_batch_prices_flattens_single_symbol_multiindex_columns(monkeypatch):
+    # yfinance 0.2.66 returns (ticker, field) columns even for one ticker, e.g.
+    # a trailing ^N225 batch; left as-is, every OHLC consumer saw no rows.
+    import app.services.bulk_data_fetcher as module
+
+    monkeypatch.setattr(module.yf.shared, "_ERRORS", {}, raising=False)
+    monkeypatch.setattr(
+        module.yf,
+        "download",
+        lambda **kwargs: pd.concat({"^N225": _price_df(date(2026, 9, 29), 65481.0)}, axis=1),
+    )
+
+    results = BulkDataFetcher().fetch_batch_prices(["^N225"], period="5d")
+
+    assert results["^N225"]["price_data"]["Close"].tolist() == [65481.0]
+
+
 def test_fetch_price_batch_with_retries_does_not_retry_zero_prefixed_jp_empty_batch(monkeypatch):
     import app.services.bulk_data_fetcher as module
 
