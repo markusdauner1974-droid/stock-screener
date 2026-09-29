@@ -65,18 +65,20 @@ def keep_leases_alive(
     renewals: Sequence[tuple[str, Callable[[], bool]]],
     *,
     interval_seconds: float | None = None,
-) -> Iterator[None]:
+) -> Iterator[threading.Event]:
     """Run each ``(name, renew)`` every interval until the block exits.
 
     ``renew`` returns whether the lease is still held. Every lease is renewed
     once before the block runs; if one is already gone then, or its renewal
-    raises, ``LeaseNotHeld`` is raised and the block never starts. Once running, a lease that is lost
-    is dropped and logged; the task is not interrupted, since aborting
-    mid-write would be worse than finishing unserialized. Redis errors are
-    logged and retried on the next beat.
+    raises, ``LeaseNotHeld`` is raised and the block never starts. Once
+    running, a lost lease is dropped and logged, and the yielded event is set
+    to signal the loss to the task. The task is not interrupted here; commits
+    are rejected by ``workload_fence`` instead, which also covers a write
+    already in flight. Redis errors are logged and retried on the next beat.
     """
+    lost_event = threading.Event()
     if not renewals:
-        yield
+        yield lost_event
         return
 
     interval = (
@@ -107,7 +109,8 @@ def keep_leases_alive(
 
     def beat() -> None:
         while active and not stop.wait(interval):
-            renew_all()
+            if renew_all():
+                lost_event.set()
 
     # Renew once before the body starts: a lease reused by a retried task
     # (same id) may have less than one interval left and would otherwise
@@ -120,7 +123,7 @@ def keep_leases_alive(
     thread = threading.Thread(target=beat, name="lease-renewal", daemon=True)
     thread.start()
     try:
-        yield
+        yield lost_event
     finally:
         stop.set()
         thread.join(timeout=5)

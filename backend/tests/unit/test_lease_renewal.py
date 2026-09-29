@@ -63,10 +63,20 @@ def test_a_lease_lost_while_running_stops_renewing_while_others_continue():
 
     with keep_leases_alive(
         [("lost", lost), ("held", held)], interval_seconds=0.01
-    ):
+    ) as lease_lost:
         assert _wait_for(lambda: held.call_count >= 4)
+        # The loss is signaled to the owning task.
+        assert lease_lost.is_set()
 
     assert lost.call_count == 2
+
+
+def test_lease_lost_event_stays_clear_while_every_lease_is_held():
+    with keep_leases_alive(
+        [("held", MagicMock(return_value=True))], interval_seconds=0.01
+    ) as lease_lost:
+        time.sleep(0.05)
+        assert not lease_lost.is_set()
 
 
 def test_a_lease_already_lost_on_entry_prevents_the_body_from_starting():

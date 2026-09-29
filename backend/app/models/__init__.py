@@ -36,6 +36,7 @@ from .theme import (
     ThemeRelationship,
 )
 from .task_execution import TaskExecutionHistory
+from .workload_fence import WorkloadFence
 from .chatbot import Conversation, Message
 from .market_scan import ScanWatchlist
 from .user_theme import UserTheme, UserThemeSubgroup, UserThemeStock
@@ -289,6 +290,7 @@ __all__ = [
     "ThemeRelationship",
     # Task execution
     "TaskExecutionHistory",
+    "WorkloadFence",
     # Assistant transcripts
     "Conversation",
     "Message",
