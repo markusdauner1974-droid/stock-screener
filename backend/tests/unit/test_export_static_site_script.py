@@ -136,6 +136,12 @@ def _disable_options_analytics(monkeypatch):
     monkeypatch.setattr(export_script.settings, "options_analytics_enabled", False)
 
 
+@pytest.fixture(autouse=True)
+def _stub_static_cot_refresh(monkeypatch):
+    """COT refresh has its own coverage; unstubbed it waits on the yfinance limiter."""
+    monkeypatch.setattr(export_script, "_run_static_cot_refresh", lambda: {"status": "skipped"})
+
+
 def test_static_breadth_history_stub_preserves_default_market():
     result = export_script._ensure_breadth_history(as_of_date=date(2026, 7, 31))
 
