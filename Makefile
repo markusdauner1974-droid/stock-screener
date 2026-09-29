@@ -54,6 +54,7 @@ GATE_2 = \
 # Round-trip persistence, feature flags, query pipeline, path parity.
 
 GATE_3 = \
+  tests/unit/test_shared_test_database_reset.py \
   tests/unit/test_setup_engine_persistence.py \
   tests/unit/test_setup_engine_feature_flag.py \
   tests/unit/test_feature_store_index_drift.py \

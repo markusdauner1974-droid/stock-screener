@@ -99,7 +99,8 @@ def test_cn_market_data_service_preserves_zero_listing_numeric_fields():
     assert row["dividend_yield"] == 0
 
 
-def test_cn_market_data_service_falls_back_to_code_name_list_when_spot_fails():
+def test_cn_market_data_service_falls_back_to_code_name_list_when_spot_fails(monkeypatch):
+    monkeypatch.setattr(cn_market_data_module.time, "sleep", lambda _delay: None)
     class FallbackAkshare:
         @staticmethod
         def stock_zh_a_spot_em():
@@ -464,7 +465,8 @@ def test_cn_market_data_service_raises_when_all_listing_sources_return_empty():
         service.listing_rows(as_of=date(2026, 5, 9))
 
 
-def test_cn_market_data_service_baostock_listing_skips_suspended_and_beijing_codes():
+def test_cn_market_data_service_baostock_listing_skips_suspended_and_beijing_codes(monkeypatch):
+    monkeypatch.setattr(cn_market_data_module.time, "sleep", lambda _delay: None)
     class FailingAkshare:
         @staticmethod
         def stock_zh_a_spot_em():

@@ -479,3 +479,51 @@ def test_static_daily_refresh_quarantines_breadth_history_exceptions(monkeypatch
         "Static export market HK breadth history failed for 2026-07-31: "
         "cache read failed"
     ) in warnings
+
+
+def _stub_cot_use_case(monkeypatch, execute):
+    monkeypatch.setattr(export_static_site, "SessionLocal", _FakeSession)
+    monkeypatch.setattr(
+        "app.wiring.bootstrap.get_refresh_cot_use_case",
+        lambda _db: SimpleNamespace(execute=execute),
+    )
+
+
+def test_run_static_cot_refresh_maps_use_case_result(monkeypatch):
+    commands = []
+
+    def execute(command):
+        commands.append(command)
+        return SimpleNamespace(
+            status="published",
+            run_id=7,
+            report_date=date(2026, 9, 22),
+            instrument_count=12,
+            price_unavailable_count=1,
+            reason_codes=("price_unavailable",),
+        )
+
+    _stub_cot_use_case(monkeypatch, execute)
+
+    assert export_static_site._run_static_cot_refresh() == {
+        "status": "published",
+        "run_id": 7,
+        "report_date": "2026-09-22",
+        "instrument_count": 12,
+        "price_unavailable_count": 1,
+        "reason_codes": ["price_unavailable"],
+    }
+    assert (commands[0].origin, commands[0].force) == ("static_build", False)
+
+
+def test_run_static_cot_refresh_reports_use_case_failure(monkeypatch):
+    def execute(_command):
+        raise RuntimeError("cftc unavailable")
+
+    _stub_cot_use_case(monkeypatch, execute)
+
+    assert export_static_site._run_static_cot_refresh() == {
+        "status": "failed",
+        "reason_codes": ["cot_refresh_failed"],
+        "error": "cftc unavailable",
+    }

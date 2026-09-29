@@ -49,13 +49,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: |
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
             backend/requirements-runtime.txt
             backend/requirements-test.txt
+            backend/requirements-exposure-documents.txt
 
       - name: Install dependencies
-        run: pip install -r backend/requirements-runtime.txt -r backend/requirements-test.txt
+        run: uv pip install --system -r backend/requirements-runtime.txt -r backend/requirements-test.txt
 
       - name: Check generated scan-field contracts
         run: python scripts/generate_scan_filter_contract.py --check
@@ -126,13 +130,17 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: |
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
             backend/requirements-runtime.txt
             backend/requirements-test.txt
+            backend/requirements-exposure-documents.txt
 
       - name: Install dependencies
-        run: pip install -r backend/requirements-runtime.txt -r backend/requirements-test.txt
+        run: uv pip install --system -r backend/requirements-runtime.txt -r backend/requirements-test.txt
 
       - name: ${{ matrix.name }}
         run: ${{ matrix.run }}
@@ -158,19 +166,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
-          cache-dependency-path: |
+
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
             backend/requirements-runtime.txt
             backend/requirements-test.txt
+            backend/requirements-exposure-documents.txt
 
       - name: Install dependencies
-        run: pip install -r backend/requirements-runtime.txt -r backend/requirements-test.txt
+        run: uv pip install --system -r backend/requirements-runtime.txt -r backend/requirements-test.txt
 
       - name: Comprehensive backend unit suite (shard ${{ matrix.shard }}/4)
         shell: bash
         run: |
           gate_unit_file="${RUNNER_TEMP}/backend-gate-unit-files.txt"
           make gate-unit-files > "${gate_unit_file}"
+          # The company exposure S1 job already runs these on PostgreSQL, the only supported dialect.
+          python -c 'import json; print("\n".join(p for p in json.load(open("backend/tests/required_company_exposure_cases.json"))["slices"]["S1"]["paths"] if p.startswith("tests/unit/")))' >> "${gate_unit_file}"
 
           cd backend
           ignore_args=()
@@ -189,8 +203,12 @@ jobs:
             -vv
 
   frontend:
-    name: Frontend
+    name: Frontend (${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
 
     steps:
       - uses: actions/checkout@v4
@@ -205,10 +223,27 @@ jobs:
         run: cd frontend && npm ci
 
       - name: Lint
+        if: matrix.shard == 1
         run: cd frontend && npm run lint
 
-      - name: Test
-        run: cd frontend && npm run test:run
+      - name: Test (shard ${{ matrix.shard }}/2)
+        run: cd frontend && npm run test:run -- --shard=${{ matrix.shard }}/2
+
+  frontend-e2e:
+    name: Frontend E2E
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: cd frontend && npm ci
 
       - name: Install Playwright browser
         run: cd frontend && npx playwright install --with-deps chromium
@@ -231,7 +266,7 @@ jobs:
 
   publish-images:
     name: Publish Docker Images
-    needs: [backend, backend-postgres, backend-unit, frontend, assistant-compose-smoke]
+    needs: [backend, backend-postgres, backend-unit, frontend, frontend-e2e, assistant-compose-smoke]
     if: github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     permissions:
