@@ -24,6 +24,7 @@ from .price_cache_service import PriceCacheService
 from .institutional_ownership_service import InstitutionalOwnershipService
 from . import provider_routing_policy as routing_policy
 from app.domain.markets.symbol_suffixes import market_symbol_suffix_registry
+from app.tasks.workload_fence import LeaseLost
 from app.domain.providers.data_plan import (
     DATASET_FUNDAMENTALS,
     ProviderDataPlan,
@@ -741,6 +742,9 @@ class HybridFundamentalsService:
                     stats['failed'] += 1
                     stats['failed_persistence_symbols'] += 1
 
+            except LeaseLost:
+                # A successor holds the lease: stop instead of writing more.
+                raise
             except Exception as e:
                 logger.warning(f"Error storing {symbol}: {e}")
                 stats['failed'] += 1

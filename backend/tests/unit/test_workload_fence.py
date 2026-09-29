@@ -153,3 +153,23 @@ def test_decorated_task_waits_and_retries_after_losing_its_lease(mock_get_coordi
 
     assert "waiting_for_market_workload:US" in str(retries[0])
     assert _count(MarketBreadth) == 0
+
+
+def test_fundamentals_refresh_stops_at_first_rejected_commit():
+    from app.services.fundamentals_cache_service import FundamentalsCacheService
+    from app.services.hybrid_fundamentals_service import HybridFundamentalsService
+
+    cache = FundamentalsCacheService(
+        redis_client=MagicMock(), session_factory=SessionLocal, fx_service=MagicMock()
+    )
+    store = MagicMock(wraps=cache.store)
+    cache.store = store
+    results = {"AAPL": {"sector": "Tech"}, "MSFT": {"sector": "Tech"}}
+    with pytest.raises(LeaseLost):
+        with workload_fence(KEY, threading.Event()):
+            _successor_takes_over()
+            HybridFundamentalsService().store_all_caches(
+                results, cache, session_factory=SessionLocal
+            )
+    # The superseded holder stops instead of overwriting MSFT's cache entry too.
+    assert store.call_count == 1

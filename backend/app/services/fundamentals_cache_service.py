@@ -25,6 +25,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised in desktop packaging
 
 from ..database import SessionLocal
 from ..models.stock import StockFundamental
+from ..tasks.workload_fence import LeaseLost
 from .universe_classification import backfill_universe_classification
 from ..config import settings
 from .errors import CacheRefreshError
@@ -746,6 +747,8 @@ class FundamentalsCacheService:
 
             return fundamentals
 
+        except LeaseLost:
+            raise
         except Exception as exc:
             error = CacheRefreshError(
                 f"Fundamentals refresh failed for {symbol}: {exc}",
@@ -1149,11 +1152,16 @@ class FundamentalsCacheService:
                     data_source=data_source
                 )
                 db.commit()
+            except LeaseLost:
+                raise
             except Exception as e:
                 logger.warning(f"Error updating ownership history for {symbol}: {e}")
                 db.rollback()
 
             return True
+        except LeaseLost:
+            db.rollback()
+            raise
         except Exception as e:
             logger.error(f"Error storing {symbol} in database: {e}", exc_info=True)
             db.rollback()
