@@ -10,7 +10,7 @@ def test_single_ddl_command_after_tracker_install_forces_schema_rebuild():
     if engine.dialect.name == "postgresql":
         # Reinstall the tracker so the epoch sequence is brand new, as on a fresh database.
         with engine.begin() as conn:
-            conn.exec_driver_sql("DROP SCHEMA pytest_meta CASCADE")
+            conn.exec_driver_sql("DROP SCHEMA IF EXISTS pytest_meta CASCADE")
         _reset_test_database()
 
     table = Base.metadata.sorted_tables[-1]  # nothing references the last table
