@@ -14,7 +14,7 @@ from app.domain.markets.market import SUPPORTED_MARKET_CODES
 
 DATASET_FUNDAMENTALS = "fundamentals"
 DATASET_PRICES = "prices"
-PLAN_VERSION = "2026.05.30.1"
+PLAN_VERSION = "2026.09.29.1"
 
 PROVIDER_AKSHARE = "akshare"
 PROVIDER_ALPHAVANTAGE = "alphavantage"
@@ -22,6 +22,7 @@ PROVIDER_BAOSTOCK = "baostock"
 PROVIDER_FINVIZ = "finviz"
 PROVIDER_KRX = "krx"
 PROVIDER_OPENDART = "opendart"
+PROVIDER_SINA = "sina"
 PROVIDER_YFINANCE = "yfinance"
 
 _DEFAULT_MARKET = "US"
@@ -214,7 +215,12 @@ provider_data_plan_registry = ProviderDataPlanRegistry(
         ("MY", DATASET_FUNDAMENTALS): (_yf(),),
         ("AU", DATASET_FUNDAMENTALS): (_yf(),),
         ("US", DATASET_PRICES): (_yf(batch_size=150),),
-        ("HK", DATASET_PRICES): (_yf(batch_size=50),),
+        # Sina only repairs the latest session Yahoo is missing; see
+        # services/hk_sina_price_repair.py.
+        ("HK", DATASET_PRICES): (
+            _yf(batch_size=50),
+            ProviderPlanStep(PROVIDER_SINA, batch_size=1),
+        ),
         ("IN", DATASET_PRICES): (_yf(batch_size=50),),
         ("JP", DATASET_PRICES): (_yf(batch_size=50),),
         ("KR", DATASET_PRICES): (
