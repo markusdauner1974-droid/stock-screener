@@ -102,6 +102,11 @@ jobs:
           - name: "Gate 3: Integration coverage"
             db: ci
             run: make gate-3
+          - name: Integration and parity sweep
+            db: integration_ci
+            run: |
+              PGPASSWORD=ci createdb -h localhost -U ci integration_ci
+              make gate-integration
           - name: Required company exposure S1 PostgreSQL gate
             db: company_exposure_ci
             run: |

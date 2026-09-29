@@ -12,7 +12,7 @@
 .PHONY: help gate-identity gate-1 gate-2 gate-3 gate-4 gate-5 gate-6-load gate-7-chaos \
         gate-market-parity gates gate-check frontend-lint frontend-test frontend \
         phase2-type-gate phase2-reliability golden-update load-baseline-update \
-        gate-unit-files all
+        gate-unit-files gate-integration all
 
 # ── Tooling ─────────────────────────────────────────────────────────
 
@@ -102,6 +102,15 @@ ALL_GATE_FILES = $(GATE_1) $(GATE_2) $(GATE_3) $(GATE_4) $(GATE_5) $(GATE_MARKET
 
 GATE_UNIT_FILES = $(filter tests/unit/%,$(GATE_IDENTITY) $(ALL_GATE_FILES))
 
+# ── Integration Sweep ───────────────────────────────────────────────
+# Every integration/parity test that no other PostgreSQL CI job runs, so a
+# new file is covered without being listed anywhere. Excluded: Gate 3 files,
+# the company exposure S1 paths, and the economic taxonomy gate's test IDs.
+
+INTEGRATION_SWEEP_EXCLUDES = \
+  $(addprefix --ignore=,$(filter-out tests/unit/%,$(GATE_3)) tests/integration/company_exposure) \
+  $(addprefix --deselect=,$(shell grep -v '^\#' backend/tests/required_economic_taxonomy_postgres.txt))
+
 
 # ═══════════════════════════════════════════════════════════════════
 # Targets
@@ -144,6 +153,10 @@ gate-7-chaos: ## Per-market fault-isolation chaos tests (E9.4) — requires Redi
 
 load-baseline-update: ## Regenerate the committed load baseline (use sparingly, intentionally)
 	LOAD_TEST_UPDATE_BASELINE=1 $(PYTEST) tests/load/test_per_market_load.py -v --tb=short -m load
+
+gate-integration: ## Integration + parity tests no other gate runs (PostgreSQL in CI)
+	$(PYTEST) tests/integration tests/parity $(INTEGRATION_SWEEP_EXCLUDES) \
+	  -m "not live_service and not load" -v --tb=short
 
 gate-market-parity: ## E6 US parity and non-US correctness (T6.5)
 	$(PYTEST) $(GATE_MARKET_PARITY) -v --tb=short
