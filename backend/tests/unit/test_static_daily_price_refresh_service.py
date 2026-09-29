@@ -1291,3 +1291,135 @@ def test_static_daily_price_refresh_skips_retry_when_no_rate_limited_failures() 
     assert result["rate_limited_retry"]["attempted"] == 0
     assert result["key_market_symbols"] == len(IN_KEY_MARKET_PRICE_SYMBOLS)
     assert result["yahoo_failed_symbols"] == 6
+
+
+_RRG_STARTUP_SEEDED_DATES = (
+    date(2026, 6, 3),
+    date(2026, 5, 28),
+    date(2026, 3, 2),
+    date(2026, 3, 1),
+    date(2026, 2, 23),
+    date(2026, 1, 30),
+    date(2025, 12, 1),
+    date(2025, 9, 1),
+    date(2025, 6, 2),
+    date(2025, 3, 3),
+)
+
+
+def _seed_rrg_startup_history(session_factory, symbols) -> None:
+    """Seed every _RRGStartupCalendar anchor except the as-of session itself."""
+    with session_factory() as db:
+        for rank, symbol in enumerate(symbols):
+            db.add(
+                StockUniverse(
+                    symbol=symbol, market="IN", is_active=True, market_cap=100.0 - rank
+                )
+            )
+            db.add_all(
+                StockPrice(
+                    symbol=symbol,
+                    date=seeded_date,
+                    open=1.0,
+                    high=1.0,
+                    low=1.0,
+                    close=1.0,
+                    adj_close=1.0,
+                    volume=1000,
+                )
+                for seeded_date in _RRG_STARTUP_SEEDED_DATES
+            )
+        db.commit()
+
+
+def _top_up_frame(adj_close: float):
+    import pandas as pd
+
+    return pd.DataFrame(
+        {
+            "Open": [1.0, 1.0],
+            "High": [1.0, 1.0],
+            "Low": [1.0, 1.0],
+            "Close": [adj_close, adj_close],
+            "Adj Close": [adj_close, adj_close],
+            "Volume": [1000, 1000],
+        },
+        index=pd.to_datetime([date(2026, 6, 3), date(2026, 6, 4)]),
+    )
+
+
+def _rrg_startup_service(session_factory, fetcher, stored: list[list[str]]):
+    return StaticDailyPriceRefreshService(
+        session_factory=session_factory,
+        price_cache=SimpleNamespace(
+            store_batch_in_cache=lambda payload, also_store_db=True, market=None: stored.append(
+                sorted(payload)
+            )
+        ),
+        fetcher=fetcher,
+        batch_size_for_market=lambda _market: 25,
+        calendar_service=_RRGStartupCalendar(),
+        breadth_history_price_coverage=_CompleteBreadthHistoryCoverage(),
+        sleep=lambda _seconds: None,
+    )
+
+
+def test_static_daily_price_refresh_tops_up_group_history_missing_only_the_current_session() -> None:
+    session_factory = _sqlite_session_factory()
+    _seed_rrg_startup_history(session_factory, ["OLD.NS"])
+    fetch_calls: list[tuple[tuple[str, ...], str]] = []
+
+    class _FakeFetcher:
+        def fetch_prices_in_batches(self, symbols, period="2y", start_batch_size=None, market=None):
+            fetch_calls.append((tuple(symbols), period))
+            return {
+                symbol: {"price_data": _top_up_frame(1.0), "has_error": False}
+                for symbol in symbols
+            }
+
+    result = _rrg_startup_service(session_factory, _FakeFetcher(), []).refresh(
+        as_of_date=date(2026, 6, 4),
+        market="IN",
+        ensure_static_history=True,
+    )
+
+    assert fetch_calls == [
+        (("OLD.NS",), STATIC_DAILY_PRICE_REFRESH_PERIOD),
+        (tuple(IN_KEY_MARKET_PRICE_SYMBOLS), STATIC_DAILY_PRICE_BOOTSTRAP_PERIOD),
+    ]
+    assert result["stale_symbols"] == 1
+    assert result["rrg_history_incomplete_symbols"] == 0
+
+
+def test_static_daily_price_refresh_rebootstraps_symbols_whose_history_was_readjusted() -> None:
+    session_factory = _sqlite_session_factory()
+    _seed_rrg_startup_history(session_factory, ["OLD.NS", "SPLIT.NS"])
+    fetch_calls: list[tuple[tuple[str, ...], str]] = []
+    stored: list[list[str]] = []
+
+    class _FakeFetcher:
+        def fetch_prices_in_batches(self, symbols, period="2y", start_batch_size=None, market=None):
+            fetch_calls.append((tuple(symbols), period))
+            return {
+                symbol: {
+                    # A 2:1 split halves Yahoo's back-adjusted closes, including
+                    # the 2026-06-03 bar the seed already stored at 1.0.
+                    "price_data": _top_up_frame(0.5 if symbol == "SPLIT.NS" else 1.0),
+                    "has_error": False,
+                }
+                for symbol in symbols
+            }
+
+    result = _rrg_startup_service(session_factory, _FakeFetcher(), stored).refresh(
+        as_of_date=date(2026, 6, 4),
+        market="IN",
+        ensure_static_history=True,
+    )
+
+    assert fetch_calls == [
+        (("OLD.NS", "SPLIT.NS"), STATIC_DAILY_PRICE_REFRESH_PERIOD),
+        (("SPLIT.NS", *IN_KEY_MARKET_PRICE_SYMBOLS), STATIC_DAILY_PRICE_BOOTSTRAP_PERIOD),
+    ]
+    assert stored[0] == ["OLD.NS"]
+    assert result["readjusted_symbols"] == 1
+    assert result["yahoo_fetched_symbols"] == 2 + len(IN_KEY_MARKET_PRICE_SYMBOLS)

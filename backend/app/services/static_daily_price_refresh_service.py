@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Any, Callable
+
+import pandas as pd
 
 from app.domain.markets.key_markets import key_market_price_symbols
 from app.domain.providers.price_symbol_support import split_supported_price_symbols
+from app.models.stock import StockPrice
 from app.models.stock_universe import StockUniverse
 from app.services.breadth_history_price_coverage import (
     BreadthHistoryPriceCoverageService,
@@ -28,6 +31,14 @@ from app.services.price_refresh_planning import (
 STATIC_DAILY_PRICE_REFRESH_PERIOD = STALE_PRICE_TOP_UP_PERIOD
 STATIC_DAILY_PRICE_BOOTSTRAP_PERIOD = NO_HISTORY_PRICE_BOOTSTRAP_PERIOD
 STATIC_DAILY_PRICE_REFRESH_BATCH_SIZE = 250
+# Calendar days at the end of the window that the 7d top-up always refetches
+# (7d minus margin for delayed runs). Group-history anchors in this tail are
+# left to the top-up instead of forcing a full 2y bootstrap.
+STATIC_DAILY_PRICE_TOP_UP_TAIL_DAYS = 4
+# A top-up bar whose Adj Close differs from the stored bar for the same date by
+# more than this means Yahoo back-adjusted history (split or dividend); splicing
+# the top-up onto the old series would leave a false jump, so refetch 2y.
+STATIC_ADJUSTMENT_DRIFT_TOLERANCE = 1e-3
 
 # Markets where Yahoo's 429 backoff windows are long enough that a single
 # refresh pass routinely leaves a tail of rate-limited symbols. For these
@@ -300,12 +311,21 @@ class StaticDailyPriceRefreshService:
                 flush=True,
             )
 
+        readjusted_symbols: list[str] = []
         stale_refreshed, stale_failed, stale_rate_limited = self._fetch_and_store(
             stale_symbols,
             period=STATIC_DAILY_PRICE_REFRESH_PERIOD,
             batch_size=batch_size,
             market=market,
+            readjusted_symbols=readjusted_symbols,
         )
+        if readjusted_symbols:
+            print(
+                f"[static-daily prices] Re-bootstrapping {len(readjusted_symbols):,} "
+                "symbols whose history was back-adjusted (split or dividend).",
+                flush=True,
+            )
+            bootstrap_symbols = _dedupe_symbols([*readjusted_symbols, *bootstrap_symbols])
         bootstrap_refreshed, bootstrap_failed, bootstrap_rate_limited = self._fetch_and_store(
             bootstrap_symbols,
             period=STATIC_DAILY_PRICE_BOOTSTRAP_PERIOD,
@@ -355,6 +375,7 @@ class StaticDailyPriceRefreshService:
                 breadth_history_coverage.required_dates
             ),
             "skipped_unsupported_symbols": len(skipped_symbols),
+            "readjusted_symbols": len(readjusted_symbols),
             "yahoo_fetched_symbols": refreshed,
             "yahoo_failed_symbols": failed,
             "rate_limited_retry": retry_stats,
@@ -393,6 +414,13 @@ class StaticDailyPriceRefreshService:
                 str(exc),
             )
 
+        # Anchors include each target session itself (offset 0), so the newest
+        # ones are always missing from a seed and would send every symbol to
+        # the 2y bootstrap. The 7d stale top-up refetches that tail anyway.
+        tail_start = through_date - timedelta(days=STATIC_DAILY_PRICE_TOP_UP_TAIL_DAYS)
+        required_anchor_dates = frozenset(
+            anchor for anchor in required_anchor_dates if anchor <= tail_start
+        )
         coverage = self._group_history_price_coverage.classify(
             db,
             market=market,
@@ -462,7 +490,14 @@ class StaticDailyPriceRefreshService:
         period: str,
         batch_size: int,
         market: str | None,
+        readjusted_symbols: list[str] | None = None,
     ) -> tuple[int, int, list[str]]:
+        """Fetch and store ``symbols``.
+
+        With ``readjusted_symbols``, symbols whose history Yahoo back-adjusted
+        are neither stored nor counted; they are appended there for a full
+        refetch instead.
+        """
         refreshed_count = 0
         failed_count = 0
         rate_limited: list[str] = []
@@ -497,6 +532,11 @@ class StaticDailyPriceRefreshService:
                     failed_count += 1
                     if _is_rate_limit_failure(payload):
                         rate_limited.append(symbol)
+            if readjusted_symbols is not None and batch_to_store:
+                for symbol in sorted(self._adjustment_drift_symbols(batch_to_store)):
+                    del batch_to_store[symbol]
+                    refreshed_count -= 1
+                    readjusted_symbols.append(symbol)
             if batch_to_store:
                 self._price_cache.store_batch_in_cache(
                     batch_to_store,
@@ -510,6 +550,34 @@ class StaticDailyPriceRefreshService:
                 flush=True,
             )
         return refreshed_count, failed_count, rate_limited
+
+    def _adjustment_drift_symbols(self, frames: dict[str, Any]) -> set[str]:
+        """Symbols whose fetched Adj Close disagrees with stored rows for the same dates."""
+        fetched = {
+            (symbol, pd.Timestamp(stamp).date()): float(value)
+            for symbol, frame in frames.items()
+            if isinstance(frame, pd.DataFrame) and "Adj Close" in frame
+            for stamp, value in frame["Adj Close"].dropna().items()
+        }
+        if not fetched:
+            return set()
+        with self._session_factory() as db:
+            stored_rows = (
+                db.query(StockPrice.symbol, StockPrice.date, StockPrice.adj_close)
+                .filter(
+                    StockPrice.symbol.in_({symbol for symbol, _ in fetched}),
+                    StockPrice.date >= min(row_date for _, row_date in fetched),
+                )
+                .all()
+            )
+        return {
+            symbol
+            for symbol, row_date, stored in stored_rows
+            if stored
+            and (symbol, row_date) in fetched
+            and abs(fetched[(symbol, row_date)] / stored - 1)
+            > STATIC_ADJUSTMENT_DRIFT_TOLERANCE
+        }
 
     def _retry_rate_limited_failures(
         self,
