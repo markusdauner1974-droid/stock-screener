@@ -26,14 +26,15 @@ from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.orm import Session
 
 from ..models.workload_fence import WorkloadFence
-from .lease_renewal import LeaseNotHeld
 
 
-class LeaseLost(LeaseNotHeld):
+class LeaseLost(BaseException):
     """The workload lease was lost or superseded; this commit is rejected.
 
-    Subclasses ``LeaseNotHeld`` so the lease decorators wait and retry, as
-    they do for a lease lost before the task body started.
+    A ``BaseException``, like ``asyncio.CancelledError``: task code is full of
+    ``except Exception`` handlers that log and carry on, and a superseded
+    holder must stop rather than keep writing (e.g. to Redis) until the next
+    commit. Only the lease decorators catch it, to wait and retry.
     """
 
 

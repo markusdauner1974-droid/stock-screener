@@ -27,7 +27,7 @@ from .lease_renewal import (
 )
 from .market_queues import SUPPORTED_MARKETS, market_suffix, normalize_market
 from .transient_database import retry_transient_database_error
-from .workload_fence import workload_fence
+from .workload_fence import LeaseLost, workload_fence
 
 EXTERNAL_FETCH_GLOBAL_KEY = "external_fetch_global"
 MARKET_WORKLOAD_PREFIX = "market_workload"
@@ -236,7 +236,7 @@ def serialized_market_workload(task_name: str):
                     return func(*args, **kwargs)
             except Retry:
                 raise
-            except LeaseNotHeld:
+            except (LeaseNotHeld, LeaseLost):
                 # The lease was gone before the body started (a leftover
                 # same-id lease that expired and was taken), or was lost
                 # mid-run and a fenced commit was rejected (LeaseLost): wait

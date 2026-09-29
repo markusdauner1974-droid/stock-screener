@@ -29,7 +29,7 @@ from .lease_renewal import (
 )
 from .market_queues import SUPPORTED_MARKETS, market_suffix, normalize_market
 from .transient_database import retry_transient_database_error
-from .workload_fence import workload_fence
+from .workload_fence import LeaseLost, workload_fence
 from .workload_coordination import (
     EXTERNAL_FETCH_GLOBAL_KEY,
     _coordination_retry,
@@ -571,7 +571,7 @@ def _serialized_data_fetch(task_name: str):
                     task_name, market_label, e,
                 )
                 raise
-            except LeaseNotHeld as e:
+            except (LeaseNotHeld, LeaseLost) as e:
                 # Lost before the body started, or lost mid-run with a fenced
                 # commit rejected (LeaseLost): wait for the new holder.
                 message = f"lease_lost_before_start ({e})"

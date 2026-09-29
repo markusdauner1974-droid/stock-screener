@@ -103,8 +103,26 @@ def test_swallowed_rejection_still_fails_the_fenced_block():
                 db.add(DESTINATION_ROWS["breadth"]())
                 try:
                     db.commit()
+                except LeaseLost:
+                    db.rollback()  # code that explicitly swallows it
+
+
+def test_broad_exception_handlers_do_not_swallow_lease_loss():
+    # Batch loops that log and continue on any Exception must still stop.
+    batches_written = 0
+    with pytest.raises(LeaseLost):
+        with workload_fence(KEY, threading.Event()):
+            _successor_takes_over()
+            for _ in range(3):
+                try:
+                    with SessionLocal() as db:
+                        db.add(DESTINATION_ROWS["breadth"]())
+                        batches_written += 1
+                        db.commit()
                 except Exception:
-                    db.rollback()  # a writer that logs and moves on
+                    continue
+    assert batches_written == 1
+    assert _count(MarketBreadth) == 0
 
 
 def test_nested_block_for_same_key_keeps_outer_generation():
