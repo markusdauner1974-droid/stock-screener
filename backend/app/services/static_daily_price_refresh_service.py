@@ -200,6 +200,9 @@ class StaticDailyPriceRefreshService:
             )
 
         rrg_history_incomplete_symbols = list(rrg_history_coverage.incomplete_symbols)
+        rrg_history_tail_gap_symbols = list(
+            rrg_history_coverage.missing_through_date_symbols
+        )
         breadth_history_incomplete_symbols = list(
             breadth_history_coverage.incomplete_symbols
         )
@@ -223,6 +226,7 @@ class StaticDailyPriceRefreshService:
                 [
                     *coverage.stale,
                     *breadth_history_missing_through_date_symbols,
+                    *rrg_history_tail_gap_symbols,
                 ]
             )
             if symbol not in history_incomplete_symbol_set
@@ -375,6 +379,7 @@ class StaticDailyPriceRefreshService:
                 breadth_history_coverage.required_dates
             ),
             "skipped_unsupported_symbols": len(skipped_symbols),
+            "rrg_history_tail_gap_symbols": len(rrg_history_tail_gap_symbols),
             "readjusted_symbols": len(readjusted_symbols),
             "yahoo_fetched_symbols": refreshed,
             "yahoo_failed_symbols": failed,
@@ -416,22 +421,33 @@ class StaticDailyPriceRefreshService:
 
         # Anchors include each target session itself (offset 0), so the newest
         # ones are always missing from a seed and would send every symbol to
-        # the 2y bootstrap. The 7d stale top-up refetches that tail anyway.
+        # the 2y bootstrap. Anchors after tail_start (the last 4 calendar days,
+        # through_date-3..through_date) go to the 7d top-up instead, including
+        # for already-fresh symbols with a hole there.
         tail_start = through_date - timedelta(days=STATIC_DAILY_PRICE_TOP_UP_TAIL_DAYS)
-        required_anchor_dates = frozenset(
+        history_anchor_dates = frozenset(
             anchor for anchor in required_anchor_dates if anchor <= tail_start
         )
+        tail_anchor_dates = frozenset(required_anchor_dates) - history_anchor_dates
         coverage = self._group_history_price_coverage.classify(
             db,
             market=market,
             through_date=through_date,
             symbols=symbols,
-            required_anchor_dates=required_anchor_dates,
+            required_anchor_dates=history_anchor_dates,
+        )
+        tail_coverage = self._group_history_price_coverage.classify(
+            db,
+            market=market,
+            through_date=through_date,
+            symbols=symbols,
+            required_anchor_dates=tail_anchor_dates,
         )
         return _StaticHistoryCoverageOutcome(
             tuple(coverage.incomplete_symbols),
             "verified",
-            required_dates=len(required_anchor_dates),
+            required_dates=len(history_anchor_dates),
+            missing_through_date_symbols=tuple(tail_coverage.incomplete_symbols),
         )
 
     def _breadth_history_coverage(

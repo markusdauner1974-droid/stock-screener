@@ -1423,3 +1423,46 @@ def test_static_daily_price_refresh_rebootstraps_symbols_whose_history_was_readj
     assert stored[0] == ["OLD.NS"]
     assert result["readjusted_symbols"] == 1
     assert result["yahoo_fetched_symbols"] == 2 + len(IN_KEY_MARKET_PRICE_SYMBOLS)
+
+
+def test_static_daily_price_refresh_tops_up_fresh_symbol_with_a_tail_anchor_gap() -> None:
+    session_factory = _sqlite_session_factory()
+    with session_factory() as db:
+        db.add(StockUniverse(symbol="GAP.NS", market="IN", is_active=True, market_cap=100.0))
+        # Current as of 2026-06-04, but missing the 2026-06-03 tail anchor.
+        db.add_all(
+            StockPrice(
+                symbol="GAP.NS",
+                date=row_date,
+                open=1.0,
+                high=1.0,
+                low=1.0,
+                close=1.0,
+                adj_close=1.0,
+                volume=1000,
+            )
+            for row_date in (
+                date(2026, 6, 4),
+                *(d for d in _RRG_STARTUP_SEEDED_DATES if d != date(2026, 6, 3)),
+            )
+        )
+        db.commit()
+    fetch_calls: list[tuple[tuple[str, ...], str]] = []
+
+    class _FakeFetcher:
+        def fetch_prices_in_batches(self, symbols, period="2y", start_batch_size=None, market=None):
+            fetch_calls.append((tuple(symbols), period))
+            return {
+                symbol: {"price_data": _top_up_frame(1.0), "has_error": False}
+                for symbol in symbols
+            }
+
+    result = _rrg_startup_service(session_factory, _FakeFetcher(), []).refresh(
+        as_of_date=date(2026, 6, 4),
+        market="IN",
+        ensure_static_history=True,
+    )
+
+    assert fetch_calls[0] == (("GAP.NS",), STATIC_DAILY_PRICE_REFRESH_PERIOD)
+    assert result["db_fresh_symbols"] == 1
+    assert result["rrg_history_tail_gap_symbols"] == 1
