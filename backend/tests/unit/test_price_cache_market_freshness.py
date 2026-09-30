@@ -1,0 +1,474 @@
+"""Price-cache freshness follows each symbol's own market calendar (issue #413).
+
+Real ``MarketCalendarService`` calendars with a frozen clock. 2026-07-03 is a
+US holiday (Independence Day observed) and an HK trading day; HK trades
+09:30-16:00 HKT (01:30-08:00 UTC), US 09:30-16:00 ET (13:30-20:00 UTC).
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import date, datetime, timezone
+
+import pandas as pd
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app.database import Base
+from app.models.stock import StockPrice
+from app.models.stock_universe import UNIVERSE_STATUS_ACTIVE, StockUniverse
+from app.services.market_calendar_service import (
+    CalendarCoverageExpired,
+    MarketCalendarService,
+)
+from app.services.price_cache_service import PriceCacheService
+
+
+def _utc(*args: int) -> datetime:
+    return datetime(*args, tzinfo=timezone.utc)
+
+
+class _FrozenCalendar:
+    """Real calendars, frozen 'now' for the methods that default to the clock."""
+
+    def __init__(self, now: datetime) -> None:
+        self._calendar = MarketCalendarService()
+        self.now = now
+
+    def __getattr__(self, name):
+        return getattr(self._calendar, name)
+
+    def last_completed_trading_day(self, market, now=None, **kwargs):
+        return self._calendar.last_completed_trading_day(market, now or self.now, **kwargs)
+
+
+class _BrokenCalendar:
+    def __getattr__(self, name):
+        def _raise(*args, **kwargs):
+            raise CalendarCoverageExpired("coverage expired")
+
+        return _raise
+
+
+class _DictRedis:
+    def __init__(self, values: dict[str, str] | None = None) -> None:
+        self.values = dict(values or {})
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def setex(self, key, ttl, value):
+        self.values[key] = value
+
+    def scan(self, cursor, match=None, count=None):
+        prefix, _, suffix = match.partition("*")
+        suffix = suffix.split("*")[-1]
+        keys = [
+            key for key in self.values
+            if key.startswith(prefix) and key.endswith(suffix)
+            and key.count(":") == match.count(":")
+        ]
+        return 0, keys
+
+    def pipeline(self):
+        redis = self
+
+        class _Pipeline:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, key):
+                self.calls.append(("get", key, None))
+                return self
+
+            def setex(self, key, ttl, value):
+                self.calls.append(("set", key, value))
+                return self
+
+            def execute(self):
+                results = []
+                for op, key, value in self.calls:
+                    if op == "set":
+                        redis.values[key] = value
+                        results.append(True)
+                    else:
+                        results.append(redis.values.get(key))
+                return results
+
+        return _Pipeline()
+
+
+def _meta(fetched_at: datetime, *, legacy_flag: bool) -> str:
+    """Metadata as the old US-clock writer stored it."""
+    eastern = fetched_at.astimezone(pd.Timestamp.now(tz="America/New_York").tz)
+    return json.dumps({
+        "fetch_timestamp": eastern.isoformat(),
+        "market_was_open": legacy_flag,
+        "data_type": "intraday" if legacy_flag else "closing",
+        "needs_refresh_after_close": legacy_flag,
+    })
+
+
+@pytest.fixture
+def session_factory():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    db = factory()
+    for symbol, market in (("0700.HK", "HK"), ("9988.HK", "HK"), ("AAPL", "US"), ("MSFT", "US")):
+        db.add(StockUniverse(
+            symbol=symbol,
+            market=market,
+            exchange="XHKG" if market == "HK" else "XNAS",
+            is_active=True,
+            status=UNIVERSE_STATUS_ACTIVE,
+            status_reason="active",
+        ))
+    db.commit()
+    db.close()
+    return factory
+
+
+def _service(session_factory, calendar, redis=None) -> PriceCacheService:
+    return PriceCacheService(
+        redis_client=redis,
+        session_factory=session_factory,
+        market_calendar=calendar,
+    )
+
+
+# ── Expected session per market ────────────────────────────────────────
+
+
+def test_expected_session_follows_each_market_calendar(session_factory):
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)))
+
+    assert service._get_expected_data_date("HK") == date(2026, 7, 3)
+    assert service._get_expected_data_date("US") == date(2026, 7, 2)  # US holiday
+
+
+def test_calendar_failure_makes_non_us_data_stale(session_factory):
+    service = _service(session_factory, _BrokenCalendar())
+
+    assert service._is_data_fresh(date(2026, 7, 3), market="HK") is False
+
+
+def test_calendar_falls_back_to_standalone_service_outside_runtime(monkeypatch):
+    import app.wiring.bootstrap as bootstrap
+
+    def _uninitialized():
+        raise RuntimeError("RuntimeServices are not initialized for this context.")
+
+    monkeypatch.setattr(bootstrap, "get_market_calendar_service", _uninitialized)
+    service = PriceCacheService(redis_client=None, session_factory=lambda: None)
+
+    assert isinstance(service._calendar(), MarketCalendarService)
+
+
+# ── Intraday staleness judged from fetch_timestamp ─────────────────────
+
+
+def test_hk_bar_fetched_mid_session_goes_stale_after_hk_close(session_factory):
+    # Stamped "closing" by the old US-clock writer (US was shut at 11:00 HKT).
+    meta = json.loads(_meta(_utc(2026, 7, 2, 3, 0), legacy_flag=False))
+    during = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 2, 7, 0)))   # 15:00 HKT
+    after = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 2, 9, 0)))    # 17:00 HKT
+
+    assert during._is_fetch_metadata_stale(meta, market="HK") is False
+    assert after._is_fetch_metadata_stale(meta, market="HK") is True
+
+
+def test_hk_bar_fetched_after_hk_close_is_final_even_if_us_was_open(session_factory):
+    # Old writer flagged it intraday because the US session was open (10:00 ET).
+    meta = json.loads(_meta(_utc(2026, 7, 2, 14, 0), legacy_flag=True))
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 2, 21, 0)))
+
+    assert service._is_fetch_metadata_stale(meta, market="HK") is False
+
+
+def test_us_intraday_fetch_goes_stale_after_us_close(session_factory):
+    meta = json.loads(_meta(_utc(2026, 7, 1, 18, 0), legacy_flag=True))  # 14:00 ET
+    before = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 1, 19, 0)))  # 15:00 ET
+    after = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 1, 21, 0)))   # 17:00 ET
+
+    assert before._is_fetch_metadata_stale(meta, market="US") is False
+    assert after._is_fetch_metadata_stale(meta, market="US") is True
+
+
+def test_us_early_close_day_expects_same_day_after_half_day_close(session_factory):
+    # 2026-11-27: NYSE closes at 13:00 ET; 14:00 ET is past the 30-minute buffer.
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 11, 27, 19, 0)))
+
+    assert service._get_expected_data_date("US") == date(2026, 11, 27)
+
+
+def test_us_fetch_inside_settlement_buffer_is_partial(session_factory):
+    meta = json.loads(_meta(_utc(2026, 7, 1, 20, 15), legacy_flag=False))  # 16:15 ET
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 1, 21, 0)))  # 17:00 ET
+
+    assert service._is_fetch_metadata_stale(meta, market="US") is True
+
+
+def test_calendar_failure_makes_non_us_metadata_stale(session_factory):
+    meta = json.loads(_meta(_utc(2026, 7, 2, 9, 0), legacy_flag=False))
+    service = _service(session_factory, _BrokenCalendar())
+
+    assert service._is_fetch_metadata_stale(meta, market="HK") is True
+
+
+class _CountingCalendar(_FrozenCalendar):
+    def __init__(self, now):
+        super().__init__(now)
+        self.calls = 0
+
+    def session_close(self, *args, **kwargs):
+        self.calls += 1
+        return self._calendar.session_close(*args, **kwargs)
+
+    def last_completed_trading_day(self, *args, **kwargs):
+        self.calls += 1
+        return super().last_completed_trading_day(*args, **kwargs)
+
+
+def test_bulk_freshness_checks_reuse_calendar_answers(session_factory):
+    """Per-symbol checks must not repeat calendar work (~2 ms/call) for every symbol."""
+    calendar = _CountingCalendar(_utc(2026, 7, 2, 9, 0))
+    service = _service(session_factory, calendar)
+    metas = [json.loads(_meta(_utc(2026, 7, 2, 3, minute % 60), legacy_flag=False)) for minute in range(500)]
+
+    for meta in metas:
+        assert service._is_fetch_metadata_stale(meta, market="HK") is True
+    for _ in range(500):
+        service._get_expected_data_date("HK")
+
+    assert calendar.calls <= 4
+
+
+# ── Cache-only reads use the symbol's market ───────────────────────────
+
+
+def _store_hk_prices(session_factory, symbol: str, last_day: date) -> None:
+    days = pd.bdate_range(end=pd.Timestamp(last_day), periods=60)
+    db = session_factory()
+    for index, day in enumerate(days):
+        close = 300.0 + index
+        db.add(StockPrice(
+            symbol=symbol, date=day.date(), open=close, high=close + 1,
+            low=close - 1, close=close, adj_close=close, volume=1_000_000,
+        ))
+    db.commit()
+    db.close()
+
+
+def test_cached_only_fresh_uses_hk_session_on_us_holiday(session_factory):
+    _store_hk_prices(session_factory, "0700.HK", date(2026, 7, 3))
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)))
+
+    frame = service.get_cached_only_fresh("0700.HK", period="2y")
+
+    assert frame is not None
+    assert frame.index[-1].date() == date(2026, 7, 3)
+
+
+def test_many_cached_only_fresh_rejects_hk_bar_fetched_mid_session(session_factory):
+    _store_hk_prices(session_factory, "0700.HK", date(2026, 7, 3))
+    _store_hk_prices(session_factory, "9988.HK", date(2026, 7, 3))
+    redis = _DictRedis({
+        # Metadata written by callers that omitted market lives under the US key.
+        "price:US:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 3, 0), legacy_flag=False),
+        "price:US:9988.HK:fetch_meta": _meta(_utc(2026, 7, 3, 9, 0), legacy_flag=False),
+    })
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+
+    result = service.get_many_cached_only_fresh(["0700.HK", "9988.HK"], period="2y")
+
+    assert result["0700.HK"] is None          # partial bar from 11:00 HKT
+    assert result["9988.HK"] is not None      # fetched at 17:00 HKT, final
+
+
+def test_many_cached_only_fresh_reads_market_scoped_metadata(session_factory):
+    # Bulk-fallback fetches store metadata under the symbol's own market key.
+    _store_hk_prices(session_factory, "0700.HK", date(2026, 7, 3))
+    redis = _DictRedis({
+        "price:HK:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 3, 0), legacy_flag=False),
+    })
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+
+    assert service.get_many_cached_only_fresh(["0700.HK"], period="2y")["0700.HK"] is None
+
+
+def test_latest_fetch_metadata_wins_across_key_namespaces(session_factory):
+    # Partial HK-key fetch at 11:00 HKT, then a final US-key refresh at 17:00 HKT.
+    _store_hk_prices(session_factory, "0700.HK", date(2026, 7, 3))
+    redis = _DictRedis({
+        "price:HK:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 3, 0), legacy_flag=False),
+        "price:US:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 9, 0), legacy_flag=False),
+    })
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+
+    assert service.get_many_cached_only_fresh(["0700.HK"], period="2y")["0700.HK"] is not None
+    assert service.get_stale_intraday_symbols() == []
+
+
+def test_unscoped_bulk_get_consults_symbol_market_metadata(session_factory, monkeypatch):
+    """An unscoped get_many must not accept today's DB row fetched mid-session under the HK key."""
+    import app.services.bulk_data_fetcher as bulk_module
+    import app.services.price_cache_service as module
+
+    _store_hk_prices(session_factory, "0700.HK", date(2026, 7, 3))
+    redis = _DictRedis({
+        "price:HK:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 3, 0), legacy_flag=False),
+    })
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+    monkeypatch.setattr(module, "get_bulk_redis_client", lambda: None)
+    monkeypatch.setattr(service, "_store_batch_in_cache_for_market", lambda *args, **kwargs: 0)
+    fetched: list[str] = []
+
+    class _FakeFetcher:
+        def fetch_prices_in_batches(self, symbols, **kwargs):
+            fetched.extend(symbols)
+            return {symbol: {"has_error": True, "error": "stub"} for symbol in symbols}
+
+    monkeypatch.setattr(bulk_module, "BulkDataFetcher", _FakeFetcher)
+
+    service.get_many(["0700.HK"], period="2y")
+
+    assert fetched == ["0700.HK"]
+
+
+def test_scoped_bulk_get_consults_unscoped_metadata(session_factory, monkeypatch):
+    """The daily refresh writes US-key metadata; a scoped HK read must still see it."""
+    import app.services.bulk_data_fetcher as bulk_module
+    import app.services.price_cache_service as module
+
+    _store_hk_prices(session_factory, "0700.HK", date(2026, 7, 3))
+    redis = _DictRedis({
+        "price:US:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 3, 0), legacy_flag=False),  # 11:00 HKT
+    })
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+    monkeypatch.setattr(module, "get_bulk_redis_client", lambda: None)
+    monkeypatch.setattr(service, "_store_batch_in_cache_for_market", lambda *args, **kwargs: 0)
+    fetched: list[str] = []
+
+    class _FakeFetcher:
+        def fetch_prices_in_batches(self, symbols, **kwargs):
+            fetched.extend(symbols)
+            return {symbol: {"has_error": True, "error": "stub"} for symbol in symbols}
+
+    monkeypatch.setattr(bulk_module, "BulkDataFetcher", _FakeFetcher)
+
+    service.get_many(["0700.HK"], period="2y", market_by_symbol={"0700.HK": "HK"})
+
+    assert fetched == ["0700.HK"]
+    assert service.get_cached_only_fresh("0700.HK", period="2y", market="HK") is None
+
+
+def test_redis_payload_is_judged_by_its_own_namespace_metadata(session_factory, monkeypatch):
+    """A partial US-key frame must not borrow freshness from newer HK-key metadata."""
+    import pickle
+
+    import app.services.price_cache_service as module
+
+    _store_hk_prices(session_factory, "0700.HK", date(2026, 7, 3))  # final DB rows, last close 359
+    days = pd.bdate_range(end=pd.Timestamp("2026-07-03"), periods=250)
+    partial = pd.DataFrame(
+        {"Open": 999.0, "High": 999.0, "Low": 999.0, "Close": 999.0, "Adj Close": 999.0, "Volume": 1},
+        index=days,
+    )
+    redis = _DictRedis({
+        "price:US:0700.HK:recent": pickle.dumps(partial),
+        "price:US:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 3, 0), legacy_flag=False),  # 11:00 HKT
+        "price:HK:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 9, 0), legacy_flag=False),  # 17:00 HKT
+    })
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+    monkeypatch.setattr(module, "get_bulk_redis_client", lambda: None)
+
+    frame = service.get_many(["0700.HK"], period="2y")["0700.HK"]
+
+    assert float(frame["Close"].iloc[-1]) == 359.0
+
+
+def test_registered_non_universe_instrument_uses_its_own_market(session_factory):
+    # ^HSI is fetched via the key-market registry, not stock_universe.
+    redis = _DictRedis({
+        "price:US:^HSI:fetch_meta": _meta(_utc(2026, 7, 2, 3, 0), legacy_flag=False),  # 11:00 HKT
+    })
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 2, 9, 0)), redis)  # 17:00 HKT
+
+    assert service._calendar_markets(["^HSI", "BTC-USD"]) == {"^HSI": "HK", "BTC-USD": "US"}
+    assert service._is_intraday_data_stale("^HSI") is True
+
+
+def test_warming_redis_from_database_does_not_stamp_fetch_metadata(session_factory, monkeypatch):
+    """A copy of DB rows is not a provider fetch; stamping it would vouch for the DB row later."""
+    import app.services.price_cache_service as module
+
+    _store_hk_prices(session_factory, "0700.HK", date(2026, 7, 3))
+    redis = _DictRedis()
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+    monkeypatch.setattr(module, "get_bulk_redis_client", lambda: None)
+
+    frame = service.get_many(["0700.HK"], period="2y")["0700.HK"]
+    service.get_historical_data("0700.HK", period="2y")
+
+    assert frame is not None
+    assert any(key.endswith(":recent") for key in redis.values)  # the warm still happens
+    assert not [key for key in redis.values if key.endswith(":fetch_meta")]
+
+
+def test_refreshed_batch_overwrites_both_key_namespaces(session_factory, monkeypatch):
+    import app.services.price_cache_service as module
+
+    monkeypatch.setattr(module, "get_eastern_now", lambda: _utc(2026, 7, 3, 9, 0).astimezone(module.EASTERN))
+    redis = _DictRedis()
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 9, 0)), redis)
+    db_writes = []
+    monkeypatch.setattr(service, "_store_batch_in_database", lambda batch: db_writes.append(set(batch)))
+    days = pd.bdate_range(end=pd.Timestamp("2026-07-03"), periods=5)
+    frame = pd.DataFrame(
+        {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Adj Close": 1.0, "Volume": 1},
+        index=days,
+    )
+
+    service.store_refreshed_batch({"0700.HK": frame, "AAPL": frame})
+
+    assert {"price:US:0700.HK:recent", "price:HK:0700.HK:recent", "price:US:AAPL:recent"} <= set(redis.values)
+    assert "price:HK:AAPL:recent" not in redis.values
+    assert db_writes == [{"0700.HK", "AAPL"}]
+
+
+# ── After-close stale scan covers every market ─────────────────────────
+
+
+def test_stale_intraday_scan_finds_mid_session_bars_in_any_market(session_factory):
+    redis = _DictRedis({
+        "price:HK:0700.HK:fetch_meta": _meta(_utc(2026, 7, 2, 3, 0), legacy_flag=False),
+        # 12:00 HKT: lunch break, market "closed" but the day's bar is still partial.
+        "price:US:9988.HK:fetch_meta": _meta(_utc(2026, 7, 2, 4, 0), legacy_flag=False),
+        "price:US:AAPL:fetch_meta": _meta(_utc(2026, 7, 2, 18, 0), legacy_flag=True),
+        "price:US:MSFT:fetch_meta": _meta(_utc(2026, 7, 2, 21, 0), legacy_flag=False),
+    })
+    # 06:00 ET on the US holiday: the old scan returned nothing before 16:30 ET.
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+
+    assert sorted(service.get_stale_intraday_symbols()) == ["0700.HK", "9988.HK", "AAPL"]
+
+
+# ── Writers record the market-aware session state ──────────────────────
+
+
+def test_fetch_metadata_marks_hk_fetch_during_hk_session_as_intraday(session_factory, monkeypatch):
+    import app.services.price_cache_service as module
+
+    fetched_at = _utc(2026, 7, 2, 3, 0)  # 11:00 HKT, US closed
+    monkeypatch.setattr(module, "get_eastern_now", lambda: fetched_at.astimezone(module.EASTERN))
+    redis = _DictRedis()
+    service = _service(session_factory, _FrozenCalendar(fetched_at), redis)
+
+    service._store_fetch_metadata("0700.HK", market="HK")
+
+    meta = json.loads(redis.values["price:HK:0700.HK:fetch_meta"])
+    assert meta["market"] == "HK"
+    assert meta["needs_refresh_after_close"] is True
+    assert meta["market_was_open"] is True

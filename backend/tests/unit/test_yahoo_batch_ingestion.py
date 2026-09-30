@@ -845,7 +845,8 @@ def test_price_cache_bulk_fallback_passes_market_to_batch_fetcher(monkeypatch):
     result = service._resolve_bulk_fallback(
         ["005930.KS"],
         period="7d",
-        expected_date=date(2026, 4, 29),
+        calendar_markets={"005930.KS": "KR"},
+        expected_by_market={"KR": date(2026, 4, 29)},
         now_et=datetime(2026, 4, 29, 16, 0),
     )
 
@@ -901,7 +902,8 @@ def test_price_cache_bulk_fallback_does_not_retry_without_market_on_type_error(m
         service._resolve_bulk_fallback(
             ["005930.KS"],
             period="7d",
-            expected_date=date(2026, 4, 29),
+            calendar_markets={"005930.KS": "KR"},
+        expected_by_market={"KR": date(2026, 4, 29)},
             now_et=datetime(2026, 4, 29, 16, 0),
         )
 
@@ -1044,7 +1046,7 @@ def test_get_many_reloads_after_close_if_redis_meta_marks_intraday_stale(monkeyp
     monkeypatch.setattr(module, "get_bulk_redis_client", lambda: None)
     monkeypatch.setattr(module, "get_eastern_now", lambda: datetime(2026, 3, 18, 17, 0, 0))
     monkeypatch.setattr(module, "is_market_open", lambda now=None: False)
-    monkeypatch.setattr(service, "_get_expected_data_date", lambda: date(2026, 3, 18))
+    monkeypatch.setattr(service, "_get_expected_data_date", lambda market=None: date(2026, 3, 18))
     monkeypatch.setattr(service, "_get_many_from_database", lambda symbols, period: {"AAPL": (None, None)})
     monkeypatch.setattr(service, "store_batch_in_cache", lambda batch_data, also_store_db=True: None)
 
@@ -1123,7 +1125,7 @@ def test_get_many_without_redis_uses_bulk_database_fallback(monkeypatch):
     bulk_db_lookup = MagicMock(return_value={"AAPL": (expected_df, date(2026, 3, 18))})
     monkeypatch.setattr(service, "_get_many_from_database", bulk_db_lookup)
     monkeypatch.setattr(service, "get_historical_data", MagicMock(side_effect=AssertionError("per-symbol fallback should not run")))
-    monkeypatch.setattr(service, "_get_expected_data_date", lambda: date(2026, 3, 18))
+    monkeypatch.setattr(service, "_get_expected_data_date", lambda market=None: date(2026, 3, 18))
     monkeypatch.setattr("app.services.price_cache_service.get_eastern_now", lambda: datetime(2026, 3, 18, 17, 0, 0))
 
     result = service.get_many(["AAPL"], period="2y")
@@ -1147,12 +1149,12 @@ def test_get_many_reads_market_scoped_redis_keys(monkeypatch):
         },
         index=pd.date_range(end="2026-03-18", periods=200),
     )
-    fake_redis = _FakeRedis([pickle.dumps(data), json.dumps({"needs_refresh_after_close": False})])
+    fake_redis = _FakeRedis([pickle.dumps(data), json.dumps({"needs_refresh_after_close": False}), None])
     service = PriceCacheService(redis_client=fake_redis, session_factory=lambda: MagicMock())
 
     monkeypatch.setattr(module, "get_bulk_redis_client", lambda: None)
     monkeypatch.setattr(module, "get_eastern_now", lambda: datetime(2026, 3, 18, 17, 0, 0))
-    monkeypatch.setattr(service, "_get_expected_data_date", lambda: date(2026, 3, 18))
+    monkeypatch.setattr(service, "_get_expected_data_date", lambda market=None: date(2026, 3, 18))
 
     result = service.get_many(["0700.HK"], period="2y", market_by_symbol={"0700.HK": "HK"})
 
@@ -1160,6 +1162,8 @@ def test_get_many_reads_market_scoped_redis_keys(monkeypatch):
     assert fake_redis.pipeline_instance.keys == [
         "price:HK:0700.HK:recent",
         "price:HK:0700.HK:fetch_meta",
+        # Unscoped writers (e.g. the daily refresh) stamp the US key.
+        "price:US:0700.HK:fetch_meta",
     ]
 
 
@@ -1210,7 +1214,8 @@ def test_bulk_fallback_writes_fetched_prices_to_symbol_market_scope(monkeypatch)
     result = service._resolve_bulk_fallback(
         ["0700.HK"],
         period="2y",
-        expected_date=date(2026, 3, 18),
+        calendar_markets={"0700.HK": "HK"},
+        expected_by_market={"HK": date(2026, 3, 18)},
         now_et=datetime(2026, 3, 18, 17, 0, 0),
         market_by_symbol={"0700.HK": "HK"},
     )
@@ -1246,13 +1251,14 @@ def test_bulk_fallback_warms_fresh_db_hits_to_inferred_symbol_market(monkeypatch
     monkeypatch.setattr(
         service,
         "_store_recent_in_redis",
-        lambda symbol, data, market=None: stored.append((symbol, market)),
+        lambda symbol, data, market=None, **_: stored.append((symbol, market)),
     )
 
     result = service._resolve_bulk_fallback(
         ["0700.HK"],
         period="2y",
-        expected_date=date(2026, 3, 18),
+        calendar_markets={"0700.HK": "HK"},
+        expected_by_market={"HK": date(2026, 3, 18)},
         now_et=datetime(2026, 3, 18, 17, 0, 0),
     )
 
@@ -1271,11 +1277,11 @@ def test_get_cached_only_fresh_requires_requested_session(monkeypatch):
         "_get_from_database",
         lambda symbol, period: (frame, date(2026, 3, 20)),
     )
-    monkeypatch.setattr(service, "_is_data_fresh", lambda _last: True)
+    monkeypatch.setattr(service, "_is_data_fresh", lambda _last, **_: True)
     monkeypatch.setattr(
         service,
         "_is_intraday_data_stale",
-        lambda _symbol: False,
+        lambda _symbol, **_: False,
     )
 
     assert service.get_cached_only_fresh(
@@ -1299,11 +1305,11 @@ def test_get_cached_only_fresh_required_session_bypasses_global_freshness(monkey
         "_get_from_database",
         lambda symbol, period: (frame, date(2026, 3, 20)),
     )
-    monkeypatch.setattr(service, "_is_data_fresh", lambda _last: False)
+    monkeypatch.setattr(service, "_is_data_fresh", lambda _last, **_: False)
     monkeypatch.setattr(
         service,
         "_is_intraday_data_stale",
-        lambda _symbol: False,
+        lambda _symbol, **_: False,
     )
 
     assert service.get_cached_only_fresh(
@@ -1332,11 +1338,11 @@ def test_get_many_cached_only_fresh_requires_requested_session(monkeypatch):
             "MSFT": (missing_target, date(2026, 3, 20)),
         },
     )
-    monkeypatch.setattr(service, "_is_data_fresh", lambda _last: True)
+    monkeypatch.setattr(service, "_is_data_fresh", lambda _last, **_: True)
     monkeypatch.setattr(
         service,
         "_is_intraday_data_stale",
-        lambda _symbol: False,
+        lambda _symbol, **_: False,
     )
 
     result = service.get_many_cached_only_fresh(
@@ -1363,11 +1369,11 @@ def test_get_many_cached_only_fresh_required_session_bypasses_global_freshness(m
             "6758.T": (missing_target, date(2026, 3, 19)),
         },
     )
-    monkeypatch.setattr(service, "_is_data_fresh", lambda _last: False)
+    monkeypatch.setattr(service, "_is_data_fresh", lambda _last, **_: False)
     monkeypatch.setattr(
         service,
         "_is_intraday_data_stale",
-        lambda _symbol: False,
+        lambda _symbol, **_: False,
     )
 
     result = service.get_many_cached_only_fresh(
@@ -1393,7 +1399,7 @@ def test_get_many_cached_only_fresh_filters_stale_database_rows(monkeypatch):
             "NVDA": (None, None),
         },
     )
-    monkeypatch.setattr(service, "_is_data_fresh", lambda last_date: last_date == date(2026, 3, 18))
+    monkeypatch.setattr(service, "_is_data_fresh", lambda last_date, **_: last_date == date(2026, 3, 18))
 
     result = service.get_many_cached_only_fresh(["AAPL", "MSFT", "NVDA"], period="2y")
 
@@ -1581,6 +1587,75 @@ def test_track_symbol_failures_passes_updated_deactivation_threshold(monkeypatch
     assert captured == {"symbol": "AAPL", "deactivate_threshold": 5}
 
 
+def test_force_refresh_stale_intraday_fetches_each_market_with_its_provider_plan(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    TestingSessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+    import app.tasks.cache_tasks as module
+
+    _patch_cache_tasks_session_factory(monkeypatch, module, TestingSessionLocal)
+
+    db = TestingSessionLocal()
+    db.add_all(
+        [
+            StockUniverse(
+                symbol=symbol,
+                market=market,
+                exchange=exchange,
+                is_active=True,
+                status=UNIVERSE_STATUS_ACTIVE,
+                status_reason="active",
+            )
+            for symbol, market, exchange in (
+                ("AAPL", "US", "XNAS"),
+                ("0700.HK", "HK", "XHKG"),
+                ("005930.KS", "KR", "XKRX"),
+            )
+        ]
+    )
+    db.commit()
+    db.close()
+
+    class _StubPriceCache:
+        @staticmethod
+        def get_stale_intraday_symbols():
+            return ["AAPL", "0700.HK", "005930.KS"]
+
+        @staticmethod
+        def store_refreshed_batch(batch_data):
+            return None
+
+    fetched = []
+
+    def fake_fetch(
+        self,
+        symbols,
+        period="2y",
+        start_batch_size=None,
+        market=None,
+        progress_callback=None,
+    ):
+        del self, period, start_batch_size, progress_callback
+        fetched.append((tuple(symbols), market))
+        return {symbol: _success_result(symbol) for symbol in symbols}
+
+    monkeypatch.setattr("app.wiring.bootstrap.get_price_cache", lambda: _StubPriceCache())
+    monkeypatch.setattr(
+        "app.services.bulk_data_fetcher.BulkDataFetcher.fetch_prices_in_batches",
+        fake_fetch,
+    )
+
+    result = _force_refresh_stale_intraday_impl(task=None, symbols=None)
+
+    assert sorted(fetched) == [
+        (("005930.KS",), "KR"),
+        (("0700.HK",), "HK"),
+        (("AAPL",), "US"),
+    ]
+    assert result["refreshed"] == 3
+
+
 def test_force_refresh_stale_intraday_skips_inactive_symbols(monkeypatch):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
@@ -1612,14 +1687,16 @@ def test_force_refresh_stale_intraday_skips_inactive_symbols(monkeypatch):
     db.commit()
     db.close()
 
+    refreshed_batches = []
+
     class _StubPriceCache:
         @staticmethod
         def get_stale_intraday_symbols():
             return ["AAPL", "DEAD"]
 
         @staticmethod
-        def store_batch_in_cache(batch_data, also_store_db=True):
-            return None
+        def store_refreshed_batch(batch_data):
+            refreshed_batches.append(set(batch_data))
 
     fetched_batches = []
 
@@ -1647,5 +1724,6 @@ def test_force_refresh_stale_intraday_skips_inactive_symbols(monkeypatch):
     result = _force_refresh_stale_intraday_impl(task=None, symbols=None)
 
     assert fetched_batches == [["AAPL"]]
+    assert refreshed_batches == [{"AAPL"}]
     assert result["total"] == 1
     assert result["refreshed"] == 1

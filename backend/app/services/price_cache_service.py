@@ -13,8 +13,9 @@ docs/learning_loop/adr_ll2_e1_canonical_price_contract_v1.md
 import json
 import logging
 import pickle
-from typing import Any, Optional, Dict, List, Callable
-from datetime import datetime, timedelta, date, time
+from functools import lru_cache
+from typing import TYPE_CHECKING, Any, Optional, Dict, List, Callable, Mapping
+from datetime import datetime, timedelta, date
 import pandas as pd
 from sqlalchemy.orm import Session
 
@@ -33,7 +34,7 @@ from ..utils.market_hours import (
     is_trading_day, get_last_trading_day
 )
 from .cache.price_cache_failure_telemetry import PriceCacheFailureTelemetry
-from .cache.price_cache_freshness import PriceCacheFreshnessPolicy
+from .cache.price_cache_freshness import PriceCacheFreshnessPolicy, latest_fetch_metadata
 from .cache.market_cache_policy import MarketAwareCachePolicy, market_cache_policy
 from .cache.price_cache_warmup import PriceCacheWarmupStore
 from .errors import CacheRefreshError
@@ -45,7 +46,22 @@ from .price_row_normalization import (
 from .stock_price_persistence import persist_stock_price_mappings
 from .redis_pool import get_redis_client, get_bulk_redis_client, is_redis_enabled
 
+if TYPE_CHECKING:
+    from .market_calendar_service import MarketCalendarService
+
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _registered_instrument_markets() -> Dict[str, str]:
+    """Trading market of key-market instruments fetched outside ``stock_universe`` (e.g. ^HSI)."""
+    from ..domain.markets.key_markets import KEY_MARKET_INSTRUMENTS_BY_MARKET
+
+    return {
+        instrument.data_symbol.upper(): instrument.market
+        for instruments in KEY_MARKET_INSTRUMENTS_BY_MARKET.values()
+        for instrument in instruments
+    }
 
 # Redis keys for warmup metadata
 WARMUP_METADATA_KEY = "cache:warmup:metadata"
@@ -78,10 +94,12 @@ class PriceCacheService:
         redis_client: Optional[redis.Redis] = None,
         session_factory: Optional[Callable[[], Session]] = None,
         cache_policy: MarketAwareCachePolicy = market_cache_policy,
+        market_calendar: Optional["MarketCalendarService"] = None,
     ):
         """Initialize price cache service."""
         self._session_factory = session_factory or SessionLocal
         self._cache_policy = cache_policy
+        self._market_calendar = market_calendar
         if redis_client:
             self._redis_client = redis_client
         else:
@@ -98,8 +116,11 @@ class PriceCacheService:
             logger=logger,
             redis_client=self._redis_client,
             fetch_meta_key_template=("price:*:*:fetch_meta", "price:*:fetch_meta"),
-            get_expected_data_date=self._get_expected_data_date,
-            get_fetch_metadata=self._get_fetch_metadata,
+            get_expected_data_date=lambda market: self._get_expected_data_date(market),
+            get_market_calendar=self._calendar,
+            resolve_calendar_markets=lambda key_markets: self._calendar_markets(
+                list(key_markets), fallback_by_symbol=key_markets
+            ),
         )
         self._warmup_store = PriceCacheWarmupStore(
             logger=logger,
@@ -149,12 +170,17 @@ class PriceCacheService:
 
         if cached_data is not None and not cached_data.empty:
             # Check if data is fresh
-            intraday_stale = self._is_intraday_data_stale(symbol, market=market)
-            if self._is_data_fresh(last_date) and not intraday_stale:
+            calendar_market = self._calendar_markets([symbol], market=market)[symbol]
+            intraday_stale = self._is_intraday_data_stale(
+                symbol, market=market, calendar_market=calendar_market
+            )
+            if self._is_data_fresh(last_date, market=calendar_market) and not intraday_stale:
                 logger.info(f"Cache HIT for {symbol} (Database, last: {last_date})")
 
                 # Also store in Redis for faster next access
-                self._store_recent_in_redis(symbol, cached_data, market=market)
+                self._store_recent_in_redis(
+                    symbol, cached_data, market=market, stamp_fetch_metadata=False
+                )
 
                 return cached_data
             else:
@@ -235,12 +261,14 @@ class PriceCacheService:
         period: str = "2y",
         *,
         required_as_of_date: date | None = None,
+        market: str | None = None,
     ) -> Optional[pd.DataFrame]:
         """
         Get cache-only price data when the cached row is still fresh enough.
 
         Returns None for stale same-day/intraday rows so callers can treat the
-        symbol as a cache miss without triggering Yahoo fetches.
+        symbol as a cache miss without triggering Yahoo fetches. Freshness uses
+        the symbol's own market calendar.
         """
         cached_data, last_date = self._get_from_database(symbol, period)
         if cached_data is None or cached_data.empty:
@@ -258,11 +286,12 @@ class PriceCacheService:
             )
             return None
 
-        if required_as_of_date is None and not self._is_data_fresh(last_date):
+        calendar_market = self._calendar_markets([symbol], market=market)[symbol]
+        if required_as_of_date is None and not self._is_data_fresh(last_date, market=calendar_market):
             logger.debug(f"Fresh cache-only STALE for {symbol} (last: {last_date})")
             return None
 
-        if self._is_intraday_data_stale(symbol):
+        if self._is_intraday_data_stale(symbol, market=market, calendar_market=calendar_market):
             logger.debug(f"Fresh cache-only INTRADAY_STALE for {symbol}")
             return None
 
@@ -314,16 +343,18 @@ class PriceCacheService:
                 minimum_rows=minimum_rows,
             )
         fresh_results: Dict[str, Optional[pd.DataFrame]] = {}
+        calendar_markets = self._calendar_markets(list(results))
 
         for symbol, (data, last_date) in results.items():
+            calendar_market = calendar_markets[symbol]
             if (
                 data is not None
                 and not data.empty
                 and (
                     required_as_of_date is not None
-                    or self._is_data_fresh(last_date)
+                    or self._is_data_fresh(last_date, market=calendar_market)
                 )
-                and not self._is_intraday_data_stale(symbol)
+                and not self._is_intraday_data_stale(symbol, calendar_market=calendar_market)
                 and self._contains_required_as_of_date(
                     data,
                     required_as_of_date,
@@ -761,6 +792,8 @@ class PriceCacheService:
         symbol: str,
         data: pd.DataFrame,
         market: str | None = None,
+        *,
+        stamp_fetch_metadata: bool = True,
     ) -> None:
         """
         Store historical data (up to 5 years) in Redis for fast access.
@@ -768,7 +801,9 @@ class PriceCacheService:
         Stores full 5-year data to support volume breakthrough analysis
         and Minervini 200-day MA calculations without requiring database fallback.
 
-        Also stores fetch metadata for intraday staleness detection.
+        Also stores fetch metadata for intraday staleness detection, unless the
+        frame is a warm copy of DB rows (``stamp_fetch_metadata=False``): that is
+        not a provider fetch, so it must not vouch for the DB row later.
         """
         if not self._redis_client:
             return
@@ -810,12 +845,33 @@ class PriceCacheService:
             )
 
             # Store fetch metadata for intraday staleness detection
-            self._store_fetch_metadata(symbol, market=market)
+            if stamp_fetch_metadata:
+                self._store_fetch_metadata(symbol, market=market)
 
             logger.debug(f"Cached {symbol} recent data in Redis ({len(recent_data)} rows)")
 
         except Exception as e:
             logger.error(f"Error storing {symbol} in Redis: {e}", exc_info=True)
+
+    def _fetch_metadata_payload(self, calendar_market: str, now_et: datetime) -> Dict[str, Any]:
+        """Fetch metadata for a fetch at ``now_et``, judged by ``calendar_market``'s session.
+
+        Readers derive staleness from ``fetch_timestamp``; the flags are kept for
+        diagnostics and for readers still on the pre-calendar rule during rollout.
+        """
+        try:
+            partial = self._freshness_policy.partial_session_day(now_et, calendar_market) is not None
+        except Exception:
+            if calendar_market != "US":
+                logger.warning("Calendar unavailable for %s; marking fetch intraday", calendar_market)
+            partial = is_market_open(now_et) if calendar_market == "US" else True
+        return {
+            "fetch_timestamp": now_et.isoformat(),
+            "market": calendar_market,
+            "market_was_open": partial,
+            "data_type": "intraday" if partial else "closing",
+            "needs_refresh_after_close": partial,
+        }
 
     def _store_fetch_metadata(self, symbol: str, market: str | None = None) -> None:
         """
@@ -826,29 +882,14 @@ class PriceCacheService:
         - market_was_open: Whether market was open at fetch time
         - data_type: 'intraday' if fetched during market hours, 'closing' otherwise
         - needs_refresh_after_close: True if this is intraday data
+        - market: the market whose session the flags describe
         """
         if not self._redis_client:
             return
 
         try:
-            now_et = get_eastern_now()
-            market_open = is_market_open(now_et)
-
-            # Determine if this is intraday or closing data
-            # Data fetched during market hours is intraday (needs refresh after close)
-            # Data fetched after 4:30 PM ET is considered closing data
-            post_close_buffer = time(16, 30)  # 4:30 PM ET
-            is_after_close = now_et.time() >= post_close_buffer
-
-            data_type = "intraday" if market_open else "closing"
-            needs_refresh = market_open  # Only intraday data needs refresh
-
-            fetch_meta = {
-                "fetch_timestamp": now_et.isoformat(),
-                "market_was_open": market_open,
-                "data_type": data_type,
-                "needs_refresh_after_close": needs_refresh
-            }
+            calendar_market = self._calendar_markets([symbol], market=market)[symbol]
+            fetch_meta = self._fetch_metadata_payload(calendar_market, get_eastern_now())
 
             meta_key = self._redis_fetch_meta_key(symbol, market=market)
             self._redis_client.setex(
@@ -857,11 +898,20 @@ class PriceCacheService:
                 json.dumps(fetch_meta)
             )
 
-            if needs_refresh:
+            if fetch_meta["needs_refresh_after_close"]:
                 logger.debug(f"Stored fetch metadata for {symbol}: intraday data, needs refresh after close")
 
         except Exception as e:
             logger.error(f"Error storing fetch metadata for {symbol}: {e}", exc_info=True)
+
+    @staticmethod
+    def _parse_fetch_metadata(raw: Any) -> Optional[Dict]:
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
 
     def _get_fetch_metadata(self, symbol: str, market: str | None = None) -> Optional[Dict]:
         """
@@ -889,31 +939,42 @@ class PriceCacheService:
         self,
         meta: Optional[Dict],
         *,
-        now_et: Optional[datetime] = None,
+        market: str = "US",
+        now: Optional[datetime] = None,
     ) -> bool:
-        """Return True when a fetch-meta record marks a same-day bar stale after close."""
-        return self._freshness_policy.is_fetch_metadata_stale(meta, now_et=now_et)
+        """Return True when the cached bar was fetched mid-session and that session has closed."""
+        return self._freshness_policy.is_fetch_metadata_stale(meta, market=market, now=now)
 
-    def _is_intraday_data_stale(self, symbol: str, market: str | None = None) -> bool:
+    def _is_intraday_data_stale(
+        self,
+        symbol: str,
+        market: str | None = None,
+        *,
+        calendar_market: str | None = None,
+    ) -> bool:
         """
-        Check if cached data is stale intraday data.
+        Check if cached data holds a partial bar from a now-completed session.
 
-        Returns True if:
-        - Data was fetched during market hours AND
-        - Market is now closed (past 4:30 PM ET)
-
-        This catches the case where data was fetched at 2 PM with an
-        incomplete "today" bar, but user is now scanning at 6 PM.
+        ``market`` selects the metadata key (``None`` -> US key, as written);
+        ``calendar_market`` is the symbol's own market, resolved when omitted.
+        This catches data fetched mid-session (e.g. 2 PM) whose "today" bar is
+        incomplete once that market's session has closed.
         """
-        if market is None:
-            return self._freshness_policy.is_intraday_data_stale(symbol)
-        meta = self._get_fetch_metadata(symbol, market=market)
-        is_stale = self._freshness_policy.is_fetch_metadata_stale(meta)
+        calendar_market = calendar_market or self._calendar_markets([symbol], market=market)[symbol]
+        # Writers split between the caller's key (None -> US) and the symbol's
+        # own market key; judge the most recent write.
+        meta = latest_fetch_metadata(
+            self._get_fetch_metadata(symbol, market=key_market)
+            for key_market in self._metadata_key_markets(market, calendar_market)
+        )
+        if not meta:
+            return False
+        is_stale = self._is_fetch_metadata_stale(meta, market=calendar_market)
         if is_stale:
             logger.debug(
-                "%s: intraday data is stale for market %s (fetched during market, now after close)",
+                "%s: intraday data is stale for market %s (fetched mid-session, session now closed)",
                 symbol,
-                market,
+                calendar_market,
             )
         return is_stale
 
@@ -1126,7 +1187,7 @@ class PriceCacheService:
 
             # No task running (or stale lock was released above) — check SPY freshness
             spy_last_date = self._get_spy_last_date()
-            expected_date = self._get_expected_data_date()
+            expected_date = self._get_expected_data_date("US")
             warmup_meta = self._get_warmup_metadata()
 
             if spy_last_date is None:
@@ -1216,9 +1277,25 @@ class PriceCacheService:
             logger.error(f"Error getting SPY last date from Redis: {e}")
             return None
 
-    def _get_expected_data_date(self) -> Optional[date]:
+    def _get_expected_data_date(self, market: str | None = None) -> Optional[date]:
+        """Latest session the cache must cover: the market's last completed trading day.
+
+        ``MarketCalendarService`` counts a session complete 30 minutes after its
+        close. Calendar failure falls back to the pre-calendar US rule for US and
+        to ``None`` (stale) elsewhere.
         """
-        Calculate the date that cache should have data for.
+        market = (market or "US").upper()
+        try:
+            return self._freshness_policy.last_completed_trading_day(market)
+        except Exception as exc:
+            if market == "US":
+                return self._legacy_us_expected_data_date()
+            logger.warning("Calendar unavailable for %s expected session: %s", market, exc)
+            return None
+
+    def _legacy_us_expected_data_date(self) -> Optional[date]:
+        """
+        Calculate the date that cache should have data for (US clock only).
 
         Logic:
         - During market hours: Yesterday's close is sufficient
@@ -1533,15 +1610,21 @@ class PriceCacheService:
         finally:
             db.close()
 
-    def _is_data_fresh(self, last_date: date, max_age_days: int = 1) -> bool:
+    def _is_data_fresh(
+        self,
+        last_date: date,
+        max_age_days: int = 1,
+        *,
+        market: str = "US",
+    ) -> bool:
         """
-        Check if cached data is fresh enough using trading-day awareness.
+        Check if cached data covers ``market``'s last completed session.
 
-        Delegates to _get_expected_data_date() which correctly handles all
-        edge cases: market hours, grace periods, weekends, and holidays.
+        Delegates to _get_expected_data_date(market), which follows the
+        market's calendar: sessions, holidays and early closes.
         """
         del max_age_days
-        return self._freshness_policy.is_data_fresh(last_date)
+        return self._freshness_policy.is_data_fresh(last_date, market)
 
     def store_in_cache(
         self,
@@ -1612,15 +1695,12 @@ class PriceCacheService:
         if self._redis_client:
             try:
                 now_et = get_eastern_now()
-                market_open = is_market_open(now_et)
-                data_type = "intraday" if market_open else "closing"
-                # Pre-compute fetch metadata once (same for all symbols in batch)
-                fetch_meta_json = json.dumps({
-                    "fetch_timestamp": now_et.isoformat(),
-                    "market_was_open": market_open,
-                    "data_type": data_type,
-                    "needs_refresh_after_close": market_open
-                })
+                # Pre-compute fetch metadata once per market in the batch
+                calendar_markets = self._calendar_markets(list(batch_data), market=market)
+                meta_json_by_market = {
+                    calendar_market: json.dumps(self._fetch_metadata_payload(calendar_market, now_et))
+                    for calendar_market in set(calendar_markets.values())
+                }
 
                 pipeline = self._redis_client.pipeline()
                 for symbol, data in batch_data.items():
@@ -1658,7 +1738,7 @@ class PriceCacheService:
                         pipeline.setex(
                             meta_key,
                             self._cache_policy.ttl_seconds("price", market=market),
-                            fetch_meta_json,
+                            meta_json_by_market[calendar_markets[symbol]],
                         )
 
                         stored += 1
@@ -1679,6 +1759,25 @@ class PriceCacheService:
         if also_store_db:
             self._store_batch_in_database(batch_data)
 
+        return stored
+
+    def store_refreshed_batch(self, batch_data: Dict[str, pd.DataFrame]) -> int:
+        """Store a stale-intraday refresh under every key namespace readers use.
+
+        Writers split symbols between the US key (callers that omit the market)
+        and the symbol's own market key, and a stale partial bar may sit under
+        either. Overwrite both so neither keeps serving it; write the DB once.
+        """
+        if not batch_data:
+            return 0
+        stored = self.store_batch_in_cache(batch_data, also_store_db=False)
+        non_us: Dict[str, Dict[str, pd.DataFrame]] = {}
+        for symbol, calendar_market in self._calendar_markets(list(batch_data)).items():
+            if calendar_market != "US":
+                non_us.setdefault(calendar_market, {})[symbol] = batch_data[symbol]
+        for calendar_market, group in non_us.items():
+            self.store_batch_in_cache(group, also_store_db=False, market=calendar_market)
+        self._store_batch_in_database(batch_data)
         return stored
 
     def _store_batch_in_database(self, batch_data: Dict[str, pd.DataFrame]) -> None:
@@ -1760,6 +1859,72 @@ class PriceCacheService:
             return market_by_symbol[symbol]
         return market
 
+    @staticmethod
+    def _metadata_key_markets(key_market: str | None, calendar_market: str) -> tuple[str, ...]:
+        """Key namespaces that may hold a symbol's fetch metadata, the caller's key first.
+
+        Writers use either no market (the US key, e.g. the daily refresh) or the
+        symbol's own market (bulk fallback), so DB-freshness checks read all of
+        them; the first entry is the one paired with the caller's Redis frame.
+        """
+        return tuple(dict.fromkeys((str(key_market or "US").upper(), calendar_market, "US")))
+
+    def _calendar(self) -> "MarketCalendarService":
+        if self._market_calendar is None:
+            from ..wiring.bootstrap import get_market_calendar_service
+
+            try:
+                self._market_calendar = get_market_calendar_service()
+            except RuntimeError:
+                # Scripts that never initialized runtime services.
+                from .market_calendar_service import MarketCalendarService
+
+                self._market_calendar = MarketCalendarService()
+        return self._market_calendar
+
+    def _calendar_markets(
+        self,
+        symbols: list[str],
+        *,
+        market: str | None = None,
+        market_by_symbol: Dict[str, str | None] | None = None,
+        fallback_by_symbol: Mapping[str, str] | None = None,
+    ) -> dict[str, str]:
+        """Market whose calendar judges each symbol's freshness.
+
+        Cache keys keep the caller's market (``None`` -> US key), but the calendar
+        must be the symbol's own: explicit caller market, else its active
+        universe market, else ``fallback_by_symbol``, else US.
+        """
+        resolved: dict[str, str] = {}
+        unresolved: list[str] = []
+        for symbol in symbols:
+            explicit = self._market_for_symbol(
+                symbol, market=market, market_by_symbol=market_by_symbol
+            )
+            if explicit:
+                resolved[symbol] = str(explicit).upper()
+            else:
+                unresolved.append(symbol)
+        if unresolved:
+            # ponytail: one indexed universe lookup per call; memoize per process
+            # if per-symbol get_historical_data loops show up in profiles.
+            try:
+                universe = self._active_market_by_symbol(unresolved)
+            except Exception:
+                logger.debug("Universe market lookup failed; using fallback markets", exc_info=True)
+                universe = {}
+            registered = _registered_instrument_markets()
+            fallback = fallback_by_symbol or {}
+            for symbol in unresolved:
+                resolved[symbol] = str(
+                    universe.get(symbol)
+                    or registered.get(str(symbol).upper())
+                    or fallback.get(symbol)
+                    or "US"
+                ).upper()
+        return resolved
+
     def _active_market_by_symbol(self, symbols: list[str]) -> dict[str, str | None]:
         if not symbols:
             return {}
@@ -1821,15 +1986,22 @@ class PriceCacheService:
         if not symbols:
             return {}
 
-        expected_date = self._get_expected_data_date()
         now_et = get_eastern_now()
+        calendar_markets = self._calendar_markets(
+            symbols, market=market, market_by_symbol=market_by_symbol
+        )
+        expected_by_market = {
+            calendar_market: self._get_expected_data_date(calendar_market)
+            for calendar_market in set(calendar_markets.values())
+        }
 
         if not self._redis_client:
             logger.info("Redis unavailable for bulk get - using database and batch-fetch fallback")
             return self._resolve_bulk_fallback(
                 symbols,
                 period=period,
-                expected_date=expected_date,
+                calendar_markets=calendar_markets,
+                expected_by_market=expected_by_market,
                 now_et=now_et,
                 market=market,
                 market_by_symbol=market_by_symbol,
@@ -1857,6 +2029,7 @@ class PriceCacheService:
 
                 try:
                     pipeline = bulk_client.pipeline()
+                    meta_key_counts = []
                     for symbol in chunk_symbols:
                         symbol_market = self._market_for_symbol(
                             symbol,
@@ -1865,7 +2038,13 @@ class PriceCacheService:
                         )
                         redis_key = self._redis_recent_key(symbol, market=symbol_market)
                         pipeline.get(redis_key)
-                        pipeline.get(self._redis_fetch_meta_key(symbol, market=symbol_market))
+                        # Every namespace a writer may have used; the caller's key first.
+                        meta_key_markets = self._metadata_key_markets(
+                            symbol_market, calendar_markets[symbol]
+                        )
+                        for meta_key_market in meta_key_markets:
+                            pipeline.get(self._redis_fetch_meta_key(symbol, market=meta_key_market))
+                        meta_key_counts.append(len(meta_key_markets))
                     chunk_results = pipeline.execute()
                 except (redis.exceptions.TimeoutError, redis.exceptions.ConnectionError, OSError) as pipe_err:
                     logger.warning(
@@ -1878,16 +2057,14 @@ class PriceCacheService:
                     continue
 
                 chunk_hits = 0
-                recent_results = chunk_results[0::2]
-                meta_results = chunk_results[1::2]
-                for symbol, raw_data, meta_raw in zip(chunk_symbols, recent_results, meta_results):
-                    meta = None
-                    if meta_raw:
-                        try:
-                            meta = json.loads(meta_raw)
-                        except (TypeError, ValueError, json.JSONDecodeError):
-                            meta = None
-                    fetch_meta_by_symbol[symbol] = meta
+                results = iter(chunk_results)
+                for symbol, meta_key_count in zip(chunk_symbols, meta_key_counts):
+                    raw_data = next(results)
+                    metas = [self._parse_fetch_metadata(next(results)) for _ in range(meta_key_count)]
+                    # The Redis frame is judged by the metadata written with it
+                    # (same key); the shared DB row by the latest write anywhere.
+                    meta = metas[0]
+                    fetch_meta_by_symbol[symbol] = latest_fetch_metadata(metas)
                     if raw_data:
                         try:
                             df = pickle.loads(raw_data)
@@ -1900,13 +2077,17 @@ class PriceCacheService:
                             # Check if Redis data is sufficient for requested period
                             # Redis stores last 5 years (1825 days), but verify we have at least 200 days minimum
                             if len(df) >= 200:
-                                # Check freshness using pre-computed expected_date (B2 optimization)
+                                # Check freshness using the pre-computed per-market expected session (B2 optimization)
                                 last_date = df.index[-1]
                                 if hasattr(last_date, 'date'):
                                     last_date = last_date.date()
 
-                                is_fresh = last_date >= expected_date if expected_date else True
-                                meta_is_stale = self._is_fetch_metadata_stale(meta, now_et=now_et)
+                                calendar_market = calendar_markets[symbol]
+                                expected_date = expected_by_market[calendar_market]
+                                is_fresh = last_date >= expected_date if expected_date else False
+                                meta_is_stale = self._is_fetch_metadata_stale(
+                                    meta, market=calendar_market, now=now_et
+                                )
                                 if meta_is_stale:
                                     is_fresh = False
                                 if is_fresh:
@@ -1961,7 +2142,8 @@ class PriceCacheService:
                     self._resolve_bulk_fallback(
                         needs_db_fallback,
                         period=period,
-                        expected_date=expected_date,
+                        calendar_markets=calendar_markets,
+                        expected_by_market=expected_by_market,
                         now_et=now_et,
                         fetch_meta_by_symbol=fetch_meta_by_symbol,
                         market=market,
@@ -1990,7 +2172,8 @@ class PriceCacheService:
         symbols: list[str],
         *,
         period: str,
-        expected_date: Optional[date],
+        calendar_markets: Dict[str, str],
+        expected_by_market: Dict[str, Optional[date]],
         now_et: datetime,
         fetch_meta_by_symbol: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
         market: str | None = None,
@@ -2026,14 +2209,20 @@ class PriceCacheService:
         for symbol in symbols:
             df, last_date = db_results.get(symbol, (None, None))
             symbol_market = caller_market_by_symbol[symbol] or active_market_by_symbol.get(symbol)
+            calendar_market = calendar_markets[symbol]
+            expected_date = expected_by_market[calendar_market]
             is_fresh = (last_date >= expected_date) if (last_date and expected_date) else False
-            if self._is_fetch_metadata_stale(fetch_meta_by_symbol.get(symbol), now_et=now_et):
+            if self._is_fetch_metadata_stale(
+                fetch_meta_by_symbol.get(symbol), market=calendar_market, now=now_et
+            ):
                 is_fresh = False
             if df is not None and not df.empty and is_fresh:
                 cached_data[symbol] = df
                 db_hits.append(symbol)
                 if self._redis_client:
-                    self._store_recent_in_redis(symbol, df, market=symbol_market)
+                    self._store_recent_in_redis(
+                        symbol, df, market=symbol_market, stamp_fetch_metadata=False
+                    )
             else:
                 yfinance_needed.append(symbol)
 
