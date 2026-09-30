@@ -2235,8 +2235,15 @@ class PriceCacheService:
 
         missing_active_lookup = [symbol for symbol in yfinance_needed if symbol not in active_market_by_symbol]
         active_market_by_symbol.update(self._active_market_by_symbol(missing_active_lookup))
+        # Key-market instruments (e.g. ^HSI) are refreshed outside stock_universe;
+        # without this a stale row for them would be served instead of refetched.
+        registered = _registered_instrument_markets()
+        for symbol in missing_active_lookup:
+            registered_market = registered.get(str(symbol).upper())
+            if symbol not in active_market_by_symbol and registered_market:
+                active_market_by_symbol[symbol] = registered_market
 
-        inactive_symbols = [symbol for symbol in yfinance_needed if symbol not in active_market_by_symbol]
+        inactive_symbols =[symbol for symbol in yfinance_needed if symbol not in active_market_by_symbol]
         active_yfinance_needed = [symbol for symbol in yfinance_needed if symbol in active_market_by_symbol]
 
         logger.info(
