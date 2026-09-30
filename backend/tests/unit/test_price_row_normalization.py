@@ -102,6 +102,22 @@ def test_drop_non_finite_close_rows_matches_the_per_cell_finite_check(columns):
     pd.testing.assert_frame_equal(cleaned, payload.loc[expected_keep])
 
 
+def test_drop_non_finite_close_rows_drops_longdouble_values_that_overflow_float():
+    # Finite as an x86 longdouble, infinite once converted to a Python float.
+    closes = np.array(["100.5", "1e400", "102.5"], dtype=np.longdouble)
+    payload = pd.DataFrame(
+        {"Open": closes, "High": closes, "Low": closes, "Close": closes},
+        index=pd.to_datetime([date(2026, 6, 24), date(2026, 6, 25), date(2026, 6, 26)]),
+    )
+
+    cleaned = drop_non_finite_close_rows(payload)
+
+    assert cleaned.index.tolist() == [
+        pd.Timestamp(date(2026, 6, 24)),
+        pd.Timestamp(date(2026, 6, 26)),
+    ]
+
+
 def test_drop_non_finite_close_rows_returns_a_clean_frame_unchanged():
     payload = _ohlcv_frame([101.0, 102.0], [date(2026, 6, 24), date(2026, 6, 25)])
 

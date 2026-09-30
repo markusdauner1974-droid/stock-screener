@@ -50,9 +50,12 @@ def drop_non_finite_close_rows(data: pd.DataFrame | None) -> pd.DataFrame | None
 def _finite_mask(values: pd.Series) -> np.ndarray:
     """Per-cell ``finite_float_or_none(...) is not None``, vectorized for numpy numbers."""
     dtype = getattr(values, "dtype", None)
-    if isinstance(dtype, np.dtype) and dtype.kind in "fiu":
+    # Wider floats (x86 longdouble) can be finite yet overflow Python float, so they
+    # stay on the per-cell path with object and nullable-extension columns.
+    if isinstance(dtype, np.dtype) and (
+        dtype.kind in "iu" or (dtype.kind == "f" and dtype.itemsize <= 8)
+    ):
         return np.isfinite(values.to_numpy())
-    # Object and nullable-extension columns keep the per-cell rules (None, strings, pd.NA).
     return values.map(finite_float_or_none).notna().to_numpy()
 
 
