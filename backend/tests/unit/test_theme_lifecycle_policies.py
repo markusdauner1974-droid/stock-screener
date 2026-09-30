@@ -1126,3 +1126,52 @@ def test_get_lifecycle_transition_history_returns_context_rows(db_session):
     assert rows[0]["reason"] == "candidate_promotion_thresholds_met"
     assert "transition_history_path" in rows[0]
     assert "runbook_url" in rows[0]
+
+
+def test_update_all_theme_metrics_loads_spy_once_per_run(db_session):
+    """#419: the SPY benchmark series is the same for every theme in a run; load it once."""
+    from sqlalchemy import event
+
+    now = datetime(2026, 2, 24, 18, 0, 0)
+    themes = []
+    for name, key, symbol in (("Grid Demand", "grid_demand", "AAPL"), ("Chip Supply", "chip_supply", "MSFT")):
+        theme = _make_theme(db_session, name=name, canonical_key=key, state="active", now=now)
+        db_session.add(ThemeConstituent(
+            theme_cluster_id=theme.id, symbol=symbol, source="manual", confidence=1.0, is_active=True,
+        ))
+        themes.append(theme)
+    for index in range(10):
+        day = now - timedelta(days=9 - index)
+        _add_stock_price(db_session, symbol="AAPL", trade_date=day, close=100.0 + index)
+        _add_stock_price(db_session, symbol="MSFT", trade_date=day, close=200.0 - index)
+        _add_stock_price(db_session, symbol="SPY", trade_date=day, close=400.0 + index * 0.5)
+    db_session.commit()
+
+    service = ThemeDiscoveryService(db_session, pipeline="technical")
+    service.promote_candidate_themes = lambda now=None, limit=None, auto_commit=True: {"promoted": 0}  # type: ignore[method-assign]
+    service.apply_dormancy_and_reactivation_policies = lambda now=None, limit=None, auto_commit=True: {}  # type: ignore[method-assign]
+
+    spy_queries = []
+
+    def _count_spy(conn, cursor, statement, parameters, context, executemany):
+        if "stock_prices" in statement and "SPY" in str(parameters):
+            spy_queries.append(statement)
+
+    engine = db_session.get_bind()
+    event.listen(engine, "before_cursor_execute", _count_spy)
+    try:
+        result = service.update_all_theme_metrics(as_of_date=now)
+    finally:
+        event.remove(engine, "before_cursor_execute", _count_spy)
+
+    assert result["themes_updated"] == 2
+    assert len(spy_queries) == 1
+
+    # Shared SPY series gives the same RS as a standalone per-theme computation.
+    standalone = ThemeDiscoveryService(db_session, pipeline="technical")
+    for theme in themes:
+        stored = db_session.query(ThemeMetrics).filter(
+            ThemeMetrics.theme_cluster_id == theme.id, ThemeMetrics.date == now.date(),
+        ).one()
+        expected = standalone.calculate_price_metrics(theme.id, as_of_date=now)
+        assert stored.basket_rs_vs_spy == pytest.approx(expected["basket_rs_vs_spy"])
