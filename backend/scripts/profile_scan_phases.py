@@ -10,10 +10,13 @@ with every port the chunk loop calls wrapped in a timer:
     commit        uow.commit                             (parent, I/O)
     cancel_check  cancel.is_cancelled                    (parent, I/O)
 
-The scan row is created with status "completed" and its status is never
-changed, so the run does not take the single-active-scan slot and does not
-block user scans. The row and its results are deleted afterwards unless
---keep is passed.
+The scan row is created with status "failed" and its status is never changed.
+That status is not active, so the run does not take the single-active-scan
+slot or block user scans, and it is not "completed" or "cancelled", so nothing
+that reads the latest finished scan can pick up its partial results. The row
+and its results are deleted afterwards unless --keep is passed; if the process
+is killed first, the leftover is an inert failed scan whose universe_key starts
+with "profile-scan-phases:".
 
 Provider access is blocked. ``cache_only`` alone is not enough: the price
 cache's bulk read still batch-fetches from the provider for symbols with no
@@ -41,6 +44,7 @@ import sys
 import time
 import uuid
 from contextlib import contextmanager
+from itertools import pairwise
 from pathlib import Path
 
 backend_dir = Path(__file__).parent.parent
@@ -48,6 +52,7 @@ sys.path.insert(0, str(backend_dir))
 
 from app.config import settings  # noqa: E402
 from app.database import SessionLocal  # noqa: E402
+from app.domain.scanning.models import ScanStatus  # noqa: E402
 from app.domain.scanning.ports import ProgressSink  # noqa: E402
 from app.infra.db.uow import SqlUnitOfWork  # noqa: E402
 from app.infra.tasks.cancellation import DbCancellationToken  # noqa: E402
@@ -133,7 +138,10 @@ class _TimedCancel:
 
 
 class _InertScans:
-    """Scan repository whose status never changes (see module docstring)."""
+    """Scan repository whose status never changes (see module docstring).
+
+    The use case would otherwise mark the row running, then completed.
+    """
 
     def __init__(self, target) -> None:
         self._target = target
@@ -261,7 +269,8 @@ def _create_scan(scan_id: str, market: str, symbols: list[str], screeners: list[
             universe_market=market,
             screener_types=screeners,
             composite_method="weighted_average",
-            status="completed",
+            # Neither active nor selectable as a finished scan; see the module docstring.
+            status=ScanStatus.FAILED.value,
             total_stocks=len(symbols),
             passed_stocks=0,
             trigger_source="manual",
@@ -285,7 +294,7 @@ def summarize(chunks: list[dict[str, float]]) -> dict:
     # Prefetching chunk i+1 can only hide behind the compute of chunk i.
     overlap = sum(
         min(later.get("prefetch", 0.0), earlier.get("compute", 0.0))
-        for earlier, later in zip(chunks, chunks[1:])
+        for earlier, later in pairwise(chunks)
     )
     return {
         "chunks": len(chunks),
@@ -411,6 +420,9 @@ def main() -> int:
             f"{session_at_end}). The freshness cut-off moved, so chunks before and after "
             "are not comparable."
         )
+    if not clock.chunks:
+        print("No chunk finished, so there is nothing to report.")
+        return 1
     _print_report(
         summarize(clock.chunks),
         symbols=len(symbols),

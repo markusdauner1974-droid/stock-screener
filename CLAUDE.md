@@ -180,7 +180,7 @@ The Celery task `app.tasks.cache_tasks.cleanup_orphaned_scans` remains the sched
 - Manual user scans (`run_bulk_scan`) route to market-specific queues: `user_scans_us`, `user_scans_hk`, `user_scans_jp`, `user_scans_tw` (with `user_scans_shared` as fallback when no market is set)
 - `start_celery.sh` spawns one worker per market queue, so US and HK scans run in parallel on separate workers
 - `@serialized_market_workload` (see `tasks/workload_coordination.py`) holds a Redis lock keyed by market, so scans targeting the same market serialize while different markets remain independent
-- Manual scans run in **cache-only mode** — they do not fall back to yfinance/Finviz. The API boundary rejects scans with `409 market_data_stale` when cached prices haven't caught up to the last completed trading day for the market (see `services/market_data_freshness.py::check_symbol_freshness`). Known gap: symbols with fewer than 50 price bars are still batch-fetched by the bulk prefetch (#451)
+- Manual scans run in **cache-only mode** — they do not fall back to yfinance/Finviz. The API boundary rejects scans with `409 market_data_stale` when cached prices haven't caught up to the last completed trading day for the market (see `services/market_data_freshness.py::check_symbol_freshness`). Known gap: the bulk prefetch still batch-fetches any symbol with no usable database frame (#451). Stale symbols are kept out by the gate above, so through the API this affects symbols with fewer than 50 price bars; code that bypasses the gate fetches stale symbols too
 
 **Redis Caching Strategy** (three-tier: Redis → PostgreSQL → API):
 - DB 0: Celery broker
@@ -242,7 +242,7 @@ Price data means different things during and after a trading session. Check the 
 
 - **Freshness is judged against the last completed session.** `MarketCalendarService.last_completed_trading_day(market)` is that day; `is_market_open(market)` says whether a session is in progress. US regular hours are 09:30–16:00 ET (13:30–20:00 UTC in daylight time, 14:30–21:00 UTC otherwise). Every market has its own calendar.
 - **A fetch during a session stores a partial bar for today.** The price cache marks it in Redis fetch metadata (`needs_refresh_after_close`) and refreshes it after the close. The marker lives in the cache Redis database, so a process pointed at a different `CACHE_REDIS_DB` writes the partial bar to PostgreSQL with no marker the live stack can see.
-- **`cache_only` does not block every provider call.** It disables the per-symbol fallback only; `PriceCacheService.get_many` still batch-fetches symbols that have no usable database frame (#451). Scripts that drive the scan path outside the API must block provider access themselves, as `backend/scripts/profile_scan_phases.py` does.
+- **`cache_only` does not block every provider call.** It disables the per-symbol fallback only; `PriceCacheService.get_many` still batch-fetches symbols that have no usable database frame: stale rows, or fewer than 50 bars (#451). Scripts that drive the scan path outside the API must block provider access themselves, as `backend/scripts/profile_scan_phases.py` does.
 - **The freshness cut-off moves at the close.** A job that straddles it sees symbols turn stale part-way through. Start and finish long runs, benchmarks and profiles inside one session state, and record which state they ran in.
 - **Scheduled refresh jobs run after the close.** They compete for CPU and rewrite the cache, so timings taken then are not comparable with timings taken mid-session.
 
