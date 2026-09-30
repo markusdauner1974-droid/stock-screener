@@ -400,6 +400,25 @@ def test_registered_non_universe_instrument_uses_its_own_market(session_factory)
     assert service._is_intraday_data_stale("^HSI") is True
 
 
+def test_bulk_fallback_refreshes_registered_non_universe_instruments(session_factory, monkeypatch):
+    """^HSI is not in stock_universe but is a registered key-market instrument: fetch it as HK."""
+    import app.services.bulk_data_fetcher as bulk_module
+
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)))
+    fetched: list[tuple[tuple[str, ...], str | None]] = []
+
+    class _FakeFetcher:
+        def fetch_prices_in_batches(self, symbols, **kwargs):
+            fetched.append((tuple(symbols), kwargs.get("market")))
+            return {symbol: {"has_error": True, "error": "stub"} for symbol in symbols}
+
+    monkeypatch.setattr(bulk_module, "BulkDataFetcher", _FakeFetcher)
+
+    service.get_many(["^HSI"], period="2y")
+
+    assert fetched == [(("^HSI",), "HK")]
+
+
 def test_warming_redis_from_database_does_not_stamp_fetch_metadata(session_factory, monkeypatch):
     """A copy of DB rows is not a provider fetch; stamping it would vouch for the DB row later."""
     import app.services.price_cache_service as module
