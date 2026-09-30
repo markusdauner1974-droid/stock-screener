@@ -48,6 +48,8 @@ def encode_frame(frame: pd.DataFrame) -> bytes:
         raise TypeError(f"expected a DatetimeIndex, got {type(index).__name__}")
     if not all(isinstance(name, str) for name in frame.columns):
         raise TypeError("column names must be strings")
+    if not frame.columns.is_unique:
+        raise TypeError("column names must be unique")
     if index.name is not None and not isinstance(index.name, str):
         raise TypeError("index name must be a string")
     columns = [(name, _numeric_column(frame, name)) for name in frame.columns]
@@ -70,15 +72,28 @@ def encode_frame(frame: pd.DataFrame) -> bytes:
 
 
 def decode_frame(data: bytes | None) -> pd.DataFrame | None:
-    """Decode a frame; ``None`` for payloads in any other format (a cache miss)."""
+    """Decode a frame; ``None`` for payloads in any other format (a cache miss).
+
+    A payload in this format that is malformed raises ValueError, which the
+    cache readers also treat as a miss.
+    """
     if not data or not data.startswith(_FRAME_MAGIC):
         return None
+    try:
+        return _decode_frame(data)
+    except (struct.error, KeyError, TypeError, IndexError) as exc:
+        raise ValueError(f"malformed frame payload: {exc}") from exc
+
+
+def _decode_frame(data: bytes) -> pd.DataFrame:
     offset = len(_FRAME_MAGIC)
     (header_len,) = _HEADER_LEN.unpack_from(data, offset)
     offset += _HEADER_LEN.size
     meta = json.loads(data[offset:offset + header_len], object_hook=_from_json)
     offset += header_len
     rows = int(meta["rows"])
+    if rows < 0:
+        raise ValueError("negative row count in frame payload")
     unit = meta["unit"]
     if unit not in _INDEX_UNITS:
         raise ValueError(f"unsupported index unit {unit!r}")

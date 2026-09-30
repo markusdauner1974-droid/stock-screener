@@ -156,6 +156,40 @@ def test_truncated_frame_payload_is_rejected():
         decode_frame(blob[:-8])
 
 
+def _frame_payload(meta: dict, body: bytes = b"") -> bytes:
+    import json
+    import struct
+
+    header = json.dumps(meta).encode()
+    return b"SSCF1\n" + struct.pack("<I", len(header)) + header + body
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b"SSCF1\n\x01",  # header length cut short
+        _frame_payload({"unit": "ns", "tz": None, "name": None, "columns": []}),  # no rows
+        _frame_payload(  # negative count would make frombuffer read everything
+            {"rows": -1, "unit": "ns", "tz": None, "name": None, "columns": [["Close", "<f8"]]},
+            b"\x00" * 16,
+        ),
+    ],
+    ids=["short_header", "missing_rows", "negative_rows"],
+)
+def test_malformed_frame_payload_raises_value_error(payload):
+    # Callers treat ValueError as a cache miss.
+    with pytest.raises(ValueError):
+        decode_frame(payload)
+
+
+def test_frame_encoder_rejects_duplicate_column_labels():
+    frame = _ohlcv(None)
+    frame.columns = ["Open", "Open", "Low", "Close", "Adj Close", "Volume"]
+
+    with pytest.raises(TypeError):
+        encode_frame(frame)
+
+
 # ── The cache services write the codec and never unpickle ─────────────
 
 
