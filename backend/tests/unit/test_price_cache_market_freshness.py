@@ -311,6 +311,32 @@ def test_latest_fetch_metadata_wins_across_key_namespaces(session_factory):
     assert service.get_stale_intraday_symbols() == []
 
 
+def test_unscoped_bulk_get_consults_symbol_market_metadata(session_factory, monkeypatch):
+    """An unscoped get_many must not accept today's DB row fetched mid-session under the HK key."""
+    import app.services.bulk_data_fetcher as bulk_module
+    import app.services.price_cache_service as module
+
+    _store_hk_prices(session_factory, "0700.HK", date(2026, 7, 3))
+    redis = _DictRedis({
+        "price:HK:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 3, 0), legacy_flag=False),
+    })
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+    monkeypatch.setattr(module, "get_bulk_redis_client", lambda: None)
+    monkeypatch.setattr(service, "_store_batch_in_cache_for_market", lambda *args, **kwargs: 0)
+    fetched: list[str] = []
+
+    class _FakeFetcher:
+        def fetch_prices_in_batches(self, symbols, **kwargs):
+            fetched.extend(symbols)
+            return {symbol: {"has_error": True, "error": "stub"} for symbol in symbols}
+
+    monkeypatch.setattr(bulk_module, "BulkDataFetcher", _FakeFetcher)
+
+    service.get_many(["0700.HK"], period="2y")
+
+    assert fetched == ["0700.HK"]
+
+
 def test_refreshed_batch_overwrites_both_key_namespaces(session_factory, monkeypatch):
     import app.services.price_cache_service as module
 

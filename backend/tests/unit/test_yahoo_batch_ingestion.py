@@ -1585,6 +1585,75 @@ def test_track_symbol_failures_passes_updated_deactivation_threshold(monkeypatch
     assert captured == {"symbol": "AAPL", "deactivate_threshold": 5}
 
 
+def test_force_refresh_stale_intraday_fetches_each_market_with_its_provider_plan(monkeypatch):
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    TestingSessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+    import app.tasks.cache_tasks as module
+
+    _patch_cache_tasks_session_factory(monkeypatch, module, TestingSessionLocal)
+
+    db = TestingSessionLocal()
+    db.add_all(
+        [
+            StockUniverse(
+                symbol=symbol,
+                market=market,
+                exchange=exchange,
+                is_active=True,
+                status=UNIVERSE_STATUS_ACTIVE,
+                status_reason="active",
+            )
+            for symbol, market, exchange in (
+                ("AAPL", "US", "XNAS"),
+                ("0700.HK", "HK", "XHKG"),
+                ("005930.KS", "KR", "XKRX"),
+            )
+        ]
+    )
+    db.commit()
+    db.close()
+
+    class _StubPriceCache:
+        @staticmethod
+        def get_stale_intraday_symbols():
+            return ["AAPL", "0700.HK", "005930.KS"]
+
+        @staticmethod
+        def store_refreshed_batch(batch_data):
+            return None
+
+    fetched = []
+
+    def fake_fetch(
+        self,
+        symbols,
+        period="2y",
+        start_batch_size=None,
+        market=None,
+        progress_callback=None,
+    ):
+        del self, period, start_batch_size, progress_callback
+        fetched.append((tuple(symbols), market))
+        return {symbol: _success_result(symbol) for symbol in symbols}
+
+    monkeypatch.setattr("app.wiring.bootstrap.get_price_cache", lambda: _StubPriceCache())
+    monkeypatch.setattr(
+        "app.services.bulk_data_fetcher.BulkDataFetcher.fetch_prices_in_batches",
+        fake_fetch,
+    )
+
+    result = _force_refresh_stale_intraday_impl(task=None, symbols=None)
+
+    assert sorted(fetched) == [
+        (("005930.KS",), "KR"),
+        (("0700.HK",), "HK"),
+        (("AAPL",), "US"),
+    ]
+    assert result["refreshed"] == 3
+
+
 def test_force_refresh_stale_intraday_skips_inactive_symbols(monkeypatch):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

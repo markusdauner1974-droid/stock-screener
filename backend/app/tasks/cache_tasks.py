@@ -1295,6 +1295,38 @@ def _schedule_failed_symbol_retry(
         )
 
 
+def _group_symbols_by_market(symbols: List[str]) -> List[tuple]:
+    """Group symbols by active-universe market, preserving order within each group.
+
+    Provider plans are chosen per market (CN AKShare/BaoStock, KR KRX, HK close
+    repair); an unscoped fetch defaults to the US plan. Falls back to a single
+    unscoped group when the universe lookup fails.
+    """
+    from ..models.stock_universe import StockUniverse
+
+    try:
+        db = SessionLocal()
+        try:
+            rows = (
+                db.query(StockUniverse.symbol, StockUniverse.market)
+                .filter(StockUniverse.symbol.in_(symbols))
+                .all()
+            )
+        finally:
+            db.close()
+    except Exception:
+        logger.warning("Market lookup failed for stale refresh; fetching unscoped", exc_info=True)
+        return [(None, list(symbols))]
+
+    market_by_symbol = {
+        symbol: security_master_resolver.normalize_market(market) for symbol, market in rows
+    }
+    groups: dict = {}
+    for symbol in symbols:
+        groups.setdefault(market_by_symbol.get(symbol), []).append(symbol)
+    return list(groups.items())
+
+
 def _filter_active_symbols(symbols: List[str]) -> List[str]:
     """Limit stale-refresh batches to active universe symbols only."""
     if not symbols:
@@ -1437,24 +1469,30 @@ def _force_refresh_stale_intraday_impl(task, symbols: Optional[List[str]] = None
         failed = 0
         failed_symbols = []
 
-        # Process symbols in batches using shared yf.download() adapter
+        # Process symbols in per-market batches so each market's provider plan applies
         batch_size = 100  # Reduced from 200 to avoid rate limiting
+        batches = [
+            (batch_market, group[start:start + batch_size])
+            for batch_market, group in _group_symbols_by_market(symbols)
+            for start in range(0, len(group), batch_size)
+        ]
+        total_batches = len(batches)
+        processed = 0
 
-        for batch_start in range(0, total, batch_size):
-            batch_symbols = symbols[batch_start:batch_start + batch_size]
-            batch_num = (batch_start // batch_size) + 1
-            total_batches = (total + batch_size - 1) // batch_size
-
+        for batch_num, (batch_market, batch_symbols) in enumerate(batches, 1):
             logger.info(
-                "Batch %d/%d: Fetching %d active symbols using yf.download() batches",
+                "Batch %d/%d: Fetching %d active %s symbols",
                 batch_num,
                 total_batches,
                 len(batch_symbols),
+                batch_market or "unscoped",
             )
 
             try:
-                # Batch fetch using yf.download() with rate limit backoff
-                batch_results = _fetch_with_backoff(bulk_fetcher, batch_symbols, period="2y")
+                # Batch fetch with rate limit backoff
+                batch_results = _fetch_with_backoff(
+                    bulk_fetcher, batch_symbols, period="2y", market=batch_market
+                )
 
                 # Separate successes from failures, then batch-store
                 batch_to_store = {}
@@ -1486,7 +1524,8 @@ def _force_refresh_stale_intraday_impl(task, symbols: Optional[List[str]] = None
                 failed_symbols.extend(batch_symbols)
 
             # Update task state for progress tracking
-            progress = min((batch_start + batch_size), total)
+            processed += len(batch_symbols)
+            progress = processed
             if task is not None:
                 task.update_state(
                     state='PROGRESS',
@@ -1500,7 +1539,7 @@ def _force_refresh_stale_intraday_impl(task, symbols: Optional[List[str]] = None
                 )
 
             # Rate limit between batches (Redis-backed distributed limiter)
-            if batch_start + batch_size < total:
+            if batch_num < total_batches:
                 get_rate_limiter().wait(
                     "yfinance:batch",
                     min_interval_s=settings.yfinance_batch_rate_limit_interval,

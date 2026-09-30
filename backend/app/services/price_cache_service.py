@@ -884,6 +884,15 @@ class PriceCacheService:
         except Exception as e:
             logger.error(f"Error storing fetch metadata for {symbol}: {e}", exc_info=True)
 
+    @staticmethod
+    def _parse_fetch_metadata(raw: Any) -> Optional[Dict]:
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+
     def _get_fetch_metadata(self, symbol: str, market: str | None = None) -> Optional[Dict]:
         """
         Get fetch metadata for a symbol.
@@ -1986,6 +1995,7 @@ class PriceCacheService:
 
                 try:
                     pipeline = bulk_client.pipeline()
+                    meta_key_counts = []
                     for symbol in chunk_symbols:
                         symbol_market = self._market_for_symbol(
                             symbol,
@@ -1995,6 +2005,14 @@ class PriceCacheService:
                         redis_key = self._redis_recent_key(symbol, market=symbol_market)
                         pipeline.get(redis_key)
                         pipeline.get(self._redis_fetch_meta_key(symbol, market=symbol_market))
+                        # Writers split metadata between the caller's key and the
+                        # symbol's own market key; read both when they differ.
+                        calendar_market = calendar_markets[symbol]
+                        if calendar_market != str(symbol_market or "US").upper():
+                            pipeline.get(self._redis_fetch_meta_key(symbol, market=calendar_market))
+                            meta_key_counts.append(2)
+                        else:
+                            meta_key_counts.append(1)
                     chunk_results = pipeline.execute()
                 except (redis.exceptions.TimeoutError, redis.exceptions.ConnectionError, OSError) as pipe_err:
                     logger.warning(
@@ -2007,15 +2025,12 @@ class PriceCacheService:
                     continue
 
                 chunk_hits = 0
-                recent_results = chunk_results[0::2]
-                meta_results = chunk_results[1::2]
-                for symbol, raw_data, meta_raw in zip(chunk_symbols, recent_results, meta_results):
-                    meta = None
-                    if meta_raw:
-                        try:
-                            meta = json.loads(meta_raw)
-                        except (TypeError, ValueError, json.JSONDecodeError):
-                            meta = None
+                results = iter(chunk_results)
+                for symbol, meta_key_count in zip(chunk_symbols, meta_key_counts):
+                    raw_data = next(results)
+                    meta = latest_fetch_metadata(
+                        self._parse_fetch_metadata(next(results)) for _ in range(meta_key_count)
+                    )
                     fetch_meta_by_symbol[symbol] = meta
                     if raw_data:
                         try:
