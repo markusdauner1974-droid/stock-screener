@@ -82,7 +82,7 @@ class _FakePipeline:
         self.keys.append(key)
         return self
 
-    def execute(self):
+    def execute(self, raise_on_error=True):
         return list(self._results)
 
 

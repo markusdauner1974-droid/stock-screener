@@ -80,7 +80,7 @@ class _Pipeline:
         self.keys.append(key)
         return self
 
-    def execute(self):
+    def execute(self, raise_on_error=True):
         return list(self.results)
 
 
@@ -115,7 +115,7 @@ class _ScanningPipeline:
         self.keys.append(key)
         return self
 
-    def execute(self):
+    def execute(self, raise_on_error=True):
         return [self.redis.values[key] for key in self.keys]
 
 
@@ -137,7 +137,7 @@ class _FailingPipeline:
     def setex(self, *args, **kwargs):
         return None
 
-    def execute(self):
+    def execute(self, raise_on_error=True):
         raise RuntimeError("pipeline unavailable")
 
 

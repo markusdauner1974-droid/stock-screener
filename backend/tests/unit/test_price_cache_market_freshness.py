@@ -397,6 +397,70 @@ def test_many_cached_only_fresh_isolates_a_failing_metadata_key(session_factory)
     assert result["AAPL"] is not None
 
 
+def test_many_cached_only_fresh_uses_chunked_bulk_client(session_factory, monkeypatch):
+    """Full-universe metadata reads go through the long-timeout bulk client, in chunks;
+    a failing chunk loses only its own metadata."""
+    import app.services.price_cache_service as module
+
+    _store_bulk_prices(session_factory)
+    metas = {
+        "price:US:9988.HK:fetch_meta": _meta(_utc(2026, 7, 3, 3, 0), legacy_flag=False),  # partial
+    }
+    own_client = _CountingRedis(metas)
+    bulk_client = _CountingRedis(metas)
+    monkeypatch.setattr(module, "get_bulk_redis_client", lambda: bulk_client)
+    monkeypatch.setattr(module.settings, "redis_pipeline_chunk_size", 1)
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), own_client)
+
+    original_pipeline = bulk_client.pipeline
+    calls = {"n": 0}
+
+    def _first_chunk_times_out():
+        pipeline = original_pipeline()
+        calls["n"] += 1
+        if calls["n"] == 1:
+            def _timeout(raise_on_error=True):
+                raise TimeoutError("socket timeout")
+            pipeline.execute = _timeout
+        return pipeline
+
+    bulk_client.pipeline = _first_chunk_times_out
+
+    result = service.get_many_cached_only_fresh(["0700.HK", "9988.HK", "AAPL"], period="2y")
+
+    assert own_client.pipeline_executes == 0 and own_client.direct_gets == 0
+    assert calls["n"] == 3                  # one pipeline per symbol with chunk size 1
+    assert result["9988.HK"] is None        # a later chunk's partial marker still honoured
+
+
+def test_bulk_get_many_isolates_a_failing_redis_key(session_factory, monkeypatch):
+    """One corrupted key must not turn the whole get_many request into None."""
+    import app.services.price_cache_service as module
+
+    _store_bulk_prices(session_factory)
+    redis = _CountingRedis(error_keys={"price:US:9988.HK:recent"})
+    monkeypatch.setattr(module, "get_bulk_redis_client", lambda: None)
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+
+    result = service.get_many(["0700.HK", "9988.HK"], period="2y")
+
+    assert result["0700.HK"] is not None
+    assert result["9988.HK"] is not None  # the failing key reads as a miss -> DB fallback
+
+
+def test_stale_scan_isolates_a_failing_metadata_key(session_factory):
+    redis = _CountingRedis(
+        {
+            "price:HK:0700.HK:fetch_meta": _meta(_utc(2026, 7, 2, 3, 0), legacy_flag=False),
+            "price:US:AAPL:fetch_meta": "corrupt",
+        },
+        error_keys={"price:US:AAPL:fetch_meta"},
+    )
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+
+    assert service.get_stale_intraday_symbols() == ["0700.HK"]
+
+
 def test_latest_fetch_metadata_wins_across_key_namespaces(session_factory):
     # Partial HK-key fetch at 11:00 HKT, then a final US-key refresh at 17:00 HKT.
     _store_hk_prices(session_factory, "0700.HK", date(2026, 7, 3))

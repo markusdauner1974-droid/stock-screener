@@ -388,23 +388,31 @@ class PriceCacheService:
             ]
             for symbol, calendar_market in calendar_market_by_symbol.items()
         }
-        try:
-            pipeline = self._redis_client.pipeline()
-            for keys in keys_by_symbol.values():
-                for key in keys:
-                    pipeline.get(key)
-            # Per-command errors (e.g. WRONGTYPE on one corrupted key) come back in
-            # place, so only that key reads as missing, as the per-key reads did.
-            raw_results = iter(pipeline.execute(raise_on_error=False))
-        except Exception as exc:
-            logger.error("Error batch-reading fetch metadata: %s", exc, exc_info=True)
-            return {}
-        return {
-            symbol: latest_fetch_metadata(
-                self._parse_fetch_metadata(next(raw_results)) for _ in keys
-            )
-            for symbol, keys in keys_by_symbol.items()
-        }
+        # Full-universe reads use the long-timeout bulk client in bounded chunks,
+        # like get_many; a failing chunk loses only its own symbols' metadata.
+        client = get_bulk_redis_client() or self._redis_client
+        chunk_size = max(1, int(getattr(settings, "redis_pipeline_chunk_size", 500) or 500))
+        symbols = list(keys_by_symbol)
+        meta_by_symbol: Dict[str, Optional[Dict]] = {}
+        for start in range(0, len(symbols), chunk_size):
+            chunk = symbols[start:start + chunk_size]
+            try:
+                pipeline = client.pipeline()
+                for symbol in chunk:
+                    for key in keys_by_symbol[symbol]:
+                        pipeline.get(key)
+                # Per-command errors (e.g. WRONGTYPE on one corrupted key) come back
+                # in place, so only that key reads as missing, as per-key reads did.
+                raw_results = iter(pipeline.execute(raise_on_error=False))
+            except Exception as exc:
+                logger.error("Error batch-reading fetch metadata: %s", exc, exc_info=True)
+                continue
+            for symbol in chunk:
+                meta_by_symbol[symbol] = latest_fetch_metadata(
+                    self._parse_fetch_metadata(next(raw_results))
+                    for _ in keys_by_symbol[symbol]
+                )
+        return meta_by_symbol
 
     def _get_from_database(self, symbol: str, period: str) -> tuple[Optional[pd.DataFrame], Optional[date]]:
         """
@@ -2085,7 +2093,8 @@ class PriceCacheService:
                         for meta_key_market in meta_key_markets:
                             pipeline.get(self._redis_fetch_meta_key(symbol, market=meta_key_market))
                         meta_key_counts.append(len(meta_key_markets))
-                    chunk_results = pipeline.execute()
+                    # One corrupted key (e.g. WRONGTYPE) must only miss its own symbol.
+                    chunk_results = pipeline.execute(raise_on_error=False)
                 except (redis.exceptions.TimeoutError, redis.exceptions.ConnectionError, OSError) as pipe_err:
                     logger.warning(
                         f"Redis pipeline chunk {chunk_num}/{total_chunks} failed ({len(chunk_symbols)} symbols): {pipe_err}"
@@ -2100,6 +2109,8 @@ class PriceCacheService:
                 results = iter(chunk_results)
                 for symbol, meta_key_count in zip(chunk_symbols, meta_key_counts):
                     raw_data = next(results)
+                    if isinstance(raw_data, Exception):
+                        raw_data = None  # per-key error: treat as a cache miss
                     metas = [self._parse_fetch_metadata(next(results)) for _ in range(meta_key_count)]
                     # The Redis frame is judged by the metadata written with it
                     # (same key); the shared DB row by the latest write anywhere.
