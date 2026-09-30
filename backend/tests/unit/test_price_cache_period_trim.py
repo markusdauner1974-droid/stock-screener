@@ -64,17 +64,112 @@ def test_get_many_trims_redis_hit_to_the_window_the_db_tier_returns(period, tz):
     pd.testing.assert_frame_equal(result, expected)
 
 
-def test_get_many_returns_full_redis_frame_for_five_year_requests():
-    frame = _five_year_frame(None)
-
-    result = _redis_hit_service(frame).get_many(["AAPL"], period="5y")["AAPL"]
-
-    pd.testing.assert_frame_equal(result, frame)
-
-
 def test_get_many_leaves_a_redis_frame_already_inside_the_window_alone():
     frame = _five_year_frame(None).iloc[-250:]
 
     result = _redis_hit_service(frame).get_many(["AAPL"], period="2y")["AAPL"]
 
     pd.testing.assert_frame_equal(result, frame)
+
+
+class _DictRedis:
+    def __init__(self):
+        self.store: dict = {}
+
+    def setex(self, key, _ttl, value):
+        self.store[key] = value
+
+    def get(self, key):
+        return self.store.get(key)
+
+    def pipeline(self):
+        redis = self
+
+        class Pipeline:
+            def __init__(self):
+                self.commands = []
+
+            def get(self, key):
+                self.commands.append(lambda: redis.store.get(key))
+                return self
+
+            def setex(self, key, ttl, value):
+                self.commands.append(lambda: redis.setex(key, ttl, value))
+                return self
+
+            def execute(self, raise_on_error=True):
+                return [command() for command in self.commands]
+
+        return Pipeline()
+
+
+def _db_backed_service(db_frame: pd.DataFrame) -> tuple[PriceCacheService, list[str]]:
+    """Service over an in-memory Redis whose database tier holds ``db_frame``."""
+    service = PriceCacheService(redis_client=_DictRedis(), session_factory=lambda: None)
+    last_date = db_frame.index[-1].date()
+    db_reads: list[str] = []
+
+    def read_db(symbols, period, **_kwargs):
+        db_reads.append(period)
+        frame = PriceCacheService._trim_to_period(db_frame, period)
+        return {symbol: (frame, last_date) for symbol in symbols}
+
+    service._get_expected_data_date = lambda market=None: last_date  # type: ignore[assignment]
+    service._active_market_by_symbol = lambda symbols: {}  # type: ignore[assignment]
+    service._get_many_from_database = read_db  # type: ignore[assignment]
+    return service, db_reads
+
+
+def test_five_year_request_is_not_served_a_frame_cut_for_a_two_year_request():
+    db_frame = _five_year_frame(None)
+    service, db_reads = _db_backed_service(db_frame)
+
+    two_year = service.get_many(["AAPL"], period="2y")["AAPL"]
+    five_year = service.get_many(["AAPL"], period="5y")["AAPL"]
+
+    assert db_reads == ["2y", "5y"]
+    assert len(two_year) < len(five_year)
+    pd.testing.assert_frame_equal(five_year, db_frame)
+
+
+def test_frame_cut_for_five_years_serves_later_requests_from_redis():
+    db_frame = _five_year_frame(None)
+    service, db_reads = _db_backed_service(db_frame)
+    service.get_many(["AAPL"], period="5y")
+
+    five_year = service.get_many(["AAPL"], period="5y")["AAPL"]
+    two_year = service.get_many(["AAPL"], period="2y")["AAPL"]
+
+    assert db_reads == ["5y"]
+    pd.testing.assert_frame_equal(five_year, db_frame)
+    pd.testing.assert_frame_equal(
+        two_year, PriceCacheService._trim_to_period(db_frame, "2y")
+    )
+
+
+def test_young_stock_cut_for_five_years_is_served_from_redis():
+    # All the history there is: 250 bars, read with a 5y window.
+    db_frame = _five_year_frame(None).iloc[-250:]
+    service, db_reads = _db_backed_service(db_frame)
+    service.get_many(["AAPL"], period="5y")
+
+    result = service.get_many(["AAPL"], period="5y")["AAPL"]
+
+    assert db_reads == ["5y"]
+    pd.testing.assert_frame_equal(result, db_frame)
+
+
+@pytest.mark.parametrize("writer", ["store_in_cache", "store_batch_in_cache"])
+def test_restoring_a_cache_read_frame_does_not_keep_its_five_year_claim(writer):
+    db_frame = _five_year_frame(None)
+    service, db_reads = _db_backed_service(db_frame)
+    service.get_many(["AAPL"], period="5y")
+    one_year = service.get_many(["AAPL"], period="1y")["AAPL"]
+
+    if writer == "store_in_cache":
+        service.store_in_cache("AAPL", one_year, also_store_db=False)
+    else:
+        service.store_batch_in_cache({"AAPL": one_year}, also_store_db=False)
+    service.get_many(["AAPL"], period="5y")
+
+    assert db_reads == ["5y", "5y"]
