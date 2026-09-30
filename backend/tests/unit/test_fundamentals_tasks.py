@@ -847,6 +847,51 @@ def test_scoped_refresh_fails_open_when_preferences_unreadable(monkeypatch, task
     assert fetched == ["0700.HK"]
 
 
+@pytest.mark.parametrize("task_name", ["refresh_all_fundamentals", "refresh_all_fundamentals_hybrid"])
+@pytest.mark.parametrize(
+    "run_market, expected",
+    [
+        (None, ["0700.HK", "AAPL"]),  # unscoped: every enabled market, not just US
+        ("HK", ["0700.HK"]),          # scoped to HK while US is also enabled
+    ],
+)
+def test_us_snapshot_does_not_stand_in_for_non_us_scope(monkeypatch, task_name, run_market, expected):
+    """The US-only snapshot must never complete a refresh whose scope includes a non-US market."""
+    import app.tasks.fundamentals_tasks as module
+
+    _runtime_markets(monkeypatch, "HK", "US", primary="HK")
+    _prepare_refresh(monkeypatch, module, cutover=True)
+
+    def _must_not_run(*args, **kwargs):
+        pytest.fail("the US-only snapshot pipeline must not complete a non-US refresh scope")
+
+    monkeypatch.setattr(module, "_run_snapshot_pipeline", _must_not_run)
+    fetched: list[str] = []
+    monkeypatch.setattr(module, "get_fundamentals_cache", lambda: _recording_cache(fetched))
+
+    class _HybridStub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        @staticmethod
+        def fetch_fundamentals_batch(symbols, *args, **kwargs):
+            fetched.extend(symbols)
+            return {symbol: {"symbol": symbol} for symbol in symbols}
+
+        @staticmethod
+        def store_all_caches(*args, **kwargs):
+            return {"fundamentals_stored": 1, "quarterly_stored": 1, "failed": 0}
+
+    monkeypatch.setattr(module, "HybridFundamentalsService", _HybridStub)
+    kwargs = {"include_finviz": False} if task_name.endswith("hybrid") else {}
+    if run_market is not None:
+        kwargs["market"] = run_market
+
+    getattr(module, task_name).run(**kwargs)
+
+    assert sorted(fetched) == expected
+
+
 def test_populate_initial_cache_skips_disabled_markets(monkeypatch):
     import app.tasks.fundamentals_tasks as module
 

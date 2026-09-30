@@ -158,9 +158,20 @@ def _market_enabled(market: str, enabled_markets: frozenset[str] | None) -> bool
     return enabled_markets is None or market in enabled_markets
 
 
-def _us_snapshot_allowed(enabled_markets: frozenset[str] | None) -> bool:
-    """The snapshot pipeline builds the US Finviz universe and snapshot; skip it when US is disabled."""
-    return enabled_markets is None or "US" in enabled_markets
+def _us_only_refresh_scope(
+    scoped_market: str | None,
+    enabled_markets: frozenset[str] | None,
+) -> bool:
+    """Whether a refresh covers US alone, so the US-only snapshot pipeline may complete it.
+
+    The snapshot pipeline builds and hydrates only the US Finviz universe and
+    snapshot, so it must never stand in for a scope that includes another
+    market. Scoped runs use their market; unscoped runs use the enabled set.
+    Unreadable preferences (None) keep the pre-#414 behaviour.
+    """
+    if scoped_market is not None:
+        return scoped_market == "US"
+    return enabled_markets is None or enabled_markets == frozenset({"US"})
 
 
 def _load_active_universe_stocks(
@@ -355,7 +366,7 @@ def refresh_all_fundamentals(
                 "duration_seconds": round(duration, 2),
                 "timestamp": datetime.now().isoformat(),
             }
-        if settings.provider_snapshot_cutover_enabled and _us_snapshot_allowed(enabled_markets):
+        if settings.provider_snapshot_cutover_enabled and _us_only_refresh_scope(scoped_market, enabled_markets):
             total_stocks = len(_load_active_universe_stocks(
                 db, market=scoped_market, enabled_markets=enabled_markets
             ))
@@ -1058,7 +1069,7 @@ def refresh_all_fundamentals_hybrid(
         if (
             settings.provider_snapshot_cutover_enabled
             or settings.provider_snapshot_ingestion_enabled
-        ) and _us_snapshot_allowed(enabled_markets):
+        ) and _us_only_refresh_scope(scoped_market, enabled_markets):
             publish = settings.provider_snapshot_cutover_enabled
             total_stocks = len(_load_active_universe_stocks(
                 db, market=scoped_market, enabled_markets=enabled_markets
