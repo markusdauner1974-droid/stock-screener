@@ -81,6 +81,12 @@ def _period_days(period: str) -> int:
     return PERIOD_DAYS.get(period, DEFAULT_PERIOD_DAYS)
 
 
+# DataFrame.attrs key on a Redis frame: the window (calendar days) it was cut from.
+# A 5y read that returns 250 bars is complete for 5y; a 2y read of 500 bars is not,
+# and row counts cannot tell the two apart.
+_COVERAGE_ATTR = "price_cache_period_days"
+
+
 class PriceCacheService:
     """
     Service for caching stock price data with incremental updates.
@@ -192,7 +198,12 @@ class PriceCacheService:
 
                 # Also store in Redis for faster next access
                 self._store_recent_in_redis(
-                    symbol, cached_data, market=market, stamp_fetch_metadata=False
+                    symbol,
+                    cached_data,
+                    market=market,
+                    stamp_fetch_metadata=False,
+                    period=period,
+                    from_database=True,
                 )
 
                 return cached_data
@@ -622,7 +633,7 @@ class PriceCacheService:
 
             # Persist first: fetch metadata must only vouch for committed rows.
             if self._store_in_database(symbol, data):
-                self._store_recent_in_redis(symbol, data, market=market)
+                self._store_recent_in_redis(symbol, data, market=market, period=period)
 
             return data
 
@@ -800,8 +811,11 @@ class PriceCacheService:
 
             # Persist only new/updated rows first; fetch metadata must only
             # vouch for committed rows, so Redis is updated after the DB.
+            # The merged history is the database window for ``period`` plus the top-up.
             if self._store_in_database(symbol, new_data_filtered):
-                self._store_recent_in_redis(symbol, merged_data, market=market)
+                self._store_recent_in_redis(
+                    symbol, merged_data, market=market, period=period, from_database=True
+                )
 
             return merged_data
 
@@ -832,12 +846,19 @@ class PriceCacheService:
         market: str | None = None,
         *,
         stamp_fetch_metadata: bool = True,
+        period: str | None = None,
+        from_database: bool = False,
     ) -> None:
         """
         Store historical data (up to 5 years) in Redis for fast access.
 
         Stores full 5-year data to support volume breakthrough analysis
         and Minervini 200-day MA calculations without requiring database fallback.
+
+        ``period`` is the window ``data`` was read or fetched with, when known,
+        and ``from_database`` says its history is a database read of that window;
+        ``get_many`` only serves the frame to requests it covers (see
+        ``_mark_coverage``).
 
         Also stores fetch metadata for intraday staleness detection, unless the
         frame is a warm copy of DB rows (``stamp_fetch_metadata=False``): that is
@@ -859,7 +880,11 @@ class PriceCacheService:
             else:
                 cutoff_date = pd.Timestamp(cutoff_datetime)
 
-            recent_data = data[data.index >= cutoff_date]
+            recent_data = self._mark_coverage(
+                data[data.index >= cutoff_date],
+                period,
+                from_database=from_database,
+            )
 
             if recent_data.empty:
                 return
@@ -1714,6 +1739,7 @@ class PriceCacheService:
         batch_data: Dict[str, pd.DataFrame],
         also_store_db: bool = True,
         market: str | None = None,
+        period: str | None = None,
     ) -> int:
         """
         Store multiple symbols' price data in cache using Redis pipeline.
@@ -1726,6 +1752,9 @@ class PriceCacheService:
             also_store_db: Whether to also store in database (default True).
                 With False the caller owns the DB write and must call this only
                 after it succeeded, because the Redis write stamps fetch metadata.
+            period: Period the frames were fetched with. Pass it when it can be
+                shorter than 2y, so ``get_many`` does not serve them to longer
+                requests.
 
         Returns:
             Number of symbols successfully cached (0 when the DB write failed)
@@ -1767,7 +1796,7 @@ class PriceCacheService:
                             cutoff_date = pd.Timestamp(cutoff_datetime, tz=data.index.tz)
                         else:
                             cutoff_date = pd.Timestamp(cutoff_datetime)
-                        recent_data = data[data.index >= cutoff_date]
+                        recent_data = self._mark_coverage(data[data.index >= cutoff_date], period)
                         if recent_data.empty:
                             continue
 
@@ -1806,7 +1835,7 @@ class PriceCacheService:
                 # Fall back to individual writes
                 for symbol, data in batch_data.items():
                     if data is not None and not data.empty:
-                        self._store_recent_in_redis(symbol, data, market=market)
+                        self._store_recent_in_redis(symbol, data, market=market, period=period)
 
         return stored
 
@@ -2003,15 +2032,21 @@ class PriceCacheService:
         *,
         also_store_db: bool,
         market: str | None,
+        period: str | None = None,
     ) -> int:
+        # Only a sub-2y fetch needs its period recorded; omitting the keyword
+        # otherwise keeps two-argument test doubles working, as with ``market``.
+        kwargs: Dict[str, Any] = {"also_store_db": also_store_db}
+        if PERIOD_DAYS.get(period, DEFAULT_PERIOD_DAYS) < DEFAULT_PERIOD_DAYS:
+            kwargs["period"] = period
         if market is None:
-            return self.store_batch_in_cache(batch_data, also_store_db=also_store_db)
+            return self.store_batch_in_cache(batch_data, **kwargs)
         try:
-            return self.store_batch_in_cache(batch_data, also_store_db=also_store_db, market=market)
+            return self.store_batch_in_cache(batch_data, market=market, **kwargs)
         except TypeError as exc:
             if "market" not in str(exc):
                 raise
-            return self.store_batch_in_cache(batch_data, also_store_db=also_store_db)
+            return self.store_batch_in_cache(batch_data, **kwargs)
 
     @classmethod
     def _trim_to_period(cls, df: pd.DataFrame, period: str) -> pd.DataFrame:
@@ -2031,7 +2066,42 @@ class PriceCacheService:
         if start == 0:
             return df
         # .copy() releases the 5y block and keeps later column writes warning-free.
-        return df.iloc[start:].copy()
+        trimmed = df.iloc[start:].copy()
+        # The cut frame covers only this window, whatever the frame it came from claimed.
+        trimmed.attrs = {**trimmed.attrs, _COVERAGE_ATTR: days}
+        return trimmed
+
+    @classmethod
+    def _mark_coverage(
+        cls,
+        frame: pd.DataFrame,
+        period: str | None,
+        *,
+        from_database: bool = False,
+    ) -> pd.DataFrame:
+        """Stamp a frame about to be cached with the window it was cut from.
+
+        A database read vouches for its whole window. A provider fetch can return
+        less than it was asked for, so it may lower the claim below the 2y that
+        unstamped frames get (a 1y fetch) but never raise it (a 5y fetch).
+        A stamp the frame already carries (it was read from the cache) is never
+        raised either, so storing it again cannot widen what it claims.
+        """
+        claims = [frame.attrs.get(_COVERAGE_ATTR)]
+        if period in PERIOD_DAYS:
+            limit = cls.RECENT_DAYS if from_database else DEFAULT_PERIOD_DAYS
+            claims.append(min(PERIOD_DAYS[period], limit))
+        known = [days for days in claims if days is not None]
+        if known:
+            frame.attrs = {**frame.attrs, _COVERAGE_ATTR: min(known)}
+        return frame
+
+    @staticmethod
+    def _covers_period(df: pd.DataFrame, period: str) -> bool:
+        """Whether a Redis frame was cut from a window at least as long as ``period``."""
+        # Unstamped frames (writers that do not know their period, and frames
+        # stored before stamping existed) are trusted up to 2y, as before.
+        return df.attrs.get(_COVERAGE_ATTR, DEFAULT_PERIOD_DAYS) >= _period_days(period)
 
     def get_many(
         self,
@@ -2156,9 +2226,9 @@ class PriceCacheService:
                                 redis_misses.append(symbol)
                                 continue
 
-                            # Check if Redis data is sufficient for requested period
-                            # Redis stores last 5 years (1825 days), but verify we have at least 200 days minimum
-                            if len(df) >= 200:
+                            # Check if Redis data is sufficient for requested period:
+                            # at least 200 days, cut from a window no shorter than the request
+                            if len(df) >= 200 and self._covers_period(df, period):
                                 # Check freshness using the pre-computed per-market expected session (B2 optimization)
                                 last_date = df.index[-1]
                                 if hasattr(last_date, 'date'):
@@ -2194,7 +2264,10 @@ class PriceCacheService:
                             else:
                                 cached_data[symbol] = None
                                 insufficient_data.append(symbol)
-                                logger.debug(f"Bulk cache HIT but INSUFFICIENT for {symbol} (Redis has {len(df)} days, need 200+)")
+                                logger.debug(
+                                    f"Bulk cache HIT but INSUFFICIENT for {symbol} "
+                                    f"(Redis has {len(df)} days, need 200+ covering {period})"
+                                )
                         except Exception as e:
                             logger.warning(f"Error deserializing {symbol}: {e}")
                             cached_data[symbol] = None
@@ -2303,7 +2376,12 @@ class PriceCacheService:
                 db_hits.append(symbol)
                 if self._redis_client:
                     self._store_recent_in_redis(
-                        symbol, df, market=symbol_market, stamp_fetch_metadata=False
+                        symbol,
+                        df,
+                        market=symbol_market,
+                        stamp_fetch_metadata=False,
+                        period=period,
+                        from_database=True,
                     )
             else:
                 yfinance_needed.append(symbol)
@@ -2392,6 +2470,7 @@ class PriceCacheService:
                     batch_to_store,
                     also_store_db=True,
                     market=group_market,
+                    period=period,
                 )
 
         logger.info("yfinance batch fetch complete: %d success, %d failed", yfinance_success, yfinance_failed)

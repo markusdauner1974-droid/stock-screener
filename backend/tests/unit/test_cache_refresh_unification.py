@@ -1078,7 +1078,10 @@ def test_warm_price_cache_uses_batch_store(monkeypatch):
     assert price_cache.store_in_cache.call_count == 0
     stored_batch = price_cache.store_batch_in_cache.call_args.args[0]
     assert set(stored_batch) == {"AAPL", "MSFT"}
-    assert price_cache.store_batch_in_cache.call_args.kwargs == {"also_store_db": True}
+    assert price_cache.store_batch_in_cache.call_args.kwargs == {
+        "also_store_db": True,
+        "period": "2y",
+    }
 
 
 def test_task_registry_lists_daily_market_pipelines_only():
