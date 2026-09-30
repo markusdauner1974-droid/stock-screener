@@ -198,7 +198,12 @@ class PriceCacheService:
 
                 # Also store in Redis for faster next access
                 self._store_recent_in_redis(
-                    symbol, cached_data, market=market, stamp_fetch_metadata=False, period=period
+                    symbol,
+                    cached_data,
+                    market=market,
+                    stamp_fetch_metadata=False,
+                    period=period,
+                    from_database=True,
                 )
 
                 return cached_data
@@ -810,7 +815,10 @@ class PriceCacheService:
             logger.info(f"Merged data for {symbol}: {len(merged_data)} total rows")
 
             # Update cache with merged data
-            self._store_recent_in_redis(symbol, merged_data, market=market, period=period)
+            # The merged history is the database window for ``period`` plus the top-up.
+            self._store_recent_in_redis(
+                symbol, merged_data, market=market, period=period, from_database=True
+            )
             self._store_in_database(symbol, new_data_filtered)  # Only persist new/updated rows
 
             return merged_data
@@ -843,6 +851,7 @@ class PriceCacheService:
         *,
         stamp_fetch_metadata: bool = True,
         period: str | None = None,
+        from_database: bool = False,
     ) -> None:
         """
         Store historical data (up to 5 years) in Redis for fast access.
@@ -850,7 +859,8 @@ class PriceCacheService:
         Stores full 5-year data to support volume breakthrough analysis
         and Minervini 200-day MA calculations without requiring database fallback.
 
-        ``period`` is the window ``data`` was read or fetched with, when known;
+        ``period`` is the window ``data`` was read or fetched with, when known,
+        and ``from_database`` says its history is a database read of that window;
         ``get_many`` only serves the frame to requests it covers (see
         ``_mark_coverage``).
 
@@ -874,11 +884,10 @@ class PriceCacheService:
             else:
                 cutoff_date = pd.Timestamp(cutoff_datetime)
 
-            # stamp_fetch_metadata=False marks a warm copy of database rows.
             recent_data = self._mark_coverage(
                 data[data.index >= cutoff_date],
                 period,
-                from_database=not stamp_fetch_metadata,
+                from_database=from_database,
             )
 
             if recent_data.empty:
@@ -2042,7 +2051,10 @@ class PriceCacheService:
         if start == 0:
             return df
         # .copy() releases the 5y block and keeps later column writes warning-free.
-        return df.iloc[start:].copy()
+        trimmed = df.iloc[start:].copy()
+        # The cut frame covers only this window, whatever the frame it came from claimed.
+        trimmed.attrs = {**trimmed.attrs, _COVERAGE_ATTR: days}
+        return trimmed
 
     @classmethod
     def _mark_coverage(
@@ -2057,13 +2069,16 @@ class PriceCacheService:
         A database read vouches for its whole window. A provider fetch can return
         less than it was asked for, so it may lower the claim below the 2y that
         unstamped frames get (a 1y fetch) but never raise it (a 5y fetch).
-        An unknown period drops any stamp inherited from a cache-read frame.
+        A stamp the frame already carries (it was read from the cache) is never
+        raised either, so storing it again cannot widen what it claims.
         """
-        attrs = {key: value for key, value in frame.attrs.items() if key != _COVERAGE_ATTR}
+        claims = [frame.attrs.get(_COVERAGE_ATTR)]
         if period in PERIOD_DAYS:
             limit = cls.RECENT_DAYS if from_database else DEFAULT_PERIOD_DAYS
-            attrs[_COVERAGE_ATTR] = min(PERIOD_DAYS[period], limit)
-        frame.attrs = attrs
+            claims.append(min(PERIOD_DAYS[period], limit))
+        known = [days for days in claims if days is not None]
+        if known:
+            frame.attrs = {**frame.attrs, _COVERAGE_ATTR: min(known)}
         return frame
 
     @staticmethod
@@ -2351,6 +2366,7 @@ class PriceCacheService:
                         market=symbol_market,
                         stamp_fetch_metadata=False,
                         period=period,
+                        from_database=True,
                     )
             else:
                 yfinance_needed.append(symbol)

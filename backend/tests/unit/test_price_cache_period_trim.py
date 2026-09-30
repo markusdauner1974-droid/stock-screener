@@ -213,6 +213,37 @@ def test_five_year_provider_fetch_does_not_claim_five_years(writer):
     assert db_reads == ["5y"]
 
 
+def test_incremental_merge_of_a_five_year_database_frame_keeps_its_coverage():
+    db_frame = _five_year_frame(None)
+    service, db_reads = _db_backed_service(db_frame)
+    service._fetch_direct_historical_data = lambda symbol, period: db_frame.iloc[-3:]  # type: ignore[assignment]
+    service._store_in_database = lambda symbol, data: None  # type: ignore[assignment]
+    cached = db_frame.iloc[:-1]
+
+    service._fetch_incremental_and_merge("AAPL", "5y", cached, cached.index[-1].date())
+    result = service.get_many(["AAPL"], period="5y")["AAPL"]
+
+    assert db_reads == []
+    assert len(result) == len(db_frame)
+
+
+@pytest.mark.parametrize("warm_period", ["1y", "5y"])
+@pytest.mark.parametrize("writer", ["store_in_cache", "store_batch_in_cache"])
+def test_restored_one_year_cache_read_is_not_served_to_a_two_year_request(writer, warm_period):
+    db_frame = _five_year_frame(None)
+    service, db_reads = _db_backed_service(db_frame)
+    service.get_many(["AAPL"], period=warm_period)
+    one_year = service.get_many(["AAPL"], period="1y")["AAPL"]
+
+    if writer == "store_in_cache":
+        service.store_in_cache("AAPL", one_year, also_store_db=False)
+    else:
+        service.store_batch_in_cache({"AAPL": one_year}, also_store_db=False)
+    service.get_many(["AAPL"], period="2y")
+
+    assert db_reads == [warm_period, "2y"]
+
+
 @pytest.mark.parametrize("writer", ["store_in_cache", "store_batch_in_cache"])
 def test_restoring_a_cache_read_frame_does_not_keep_its_five_year_claim(writer):
     db_frame = _five_year_frame(None)
