@@ -158,6 +158,41 @@ def _market_enabled(market: str, enabled_markets: frozenset[str] | None) -> bool
     return enabled_markets is None or market in enabled_markets
 
 
+def _sync_weekly_bundles(
+    db,
+    *,
+    effective_market: str,
+    scoped_market: str | None,
+    enabled_markets: frozenset[str] | None,
+) -> tuple[dict, frozenset[str]]:
+    """Sync the GitHub weekly bundle for every market in the refresh scope.
+
+    Returns the primary (``effective_market``) sync result and the markets whose
+    bundle did not sync. The GitHub fast path may complete the refresh only
+    when nothing is pending; otherwise the run continues for the pending ones.
+    """
+    if scoped_market is not None or enabled_markets is None:
+        markets = [effective_market]
+    else:
+        markets = [effective_market, *sorted(enabled_markets - {effective_market})]
+    service = get_provider_snapshot_service()
+    results = {
+        sync_market: service.sync_weekly_reference_from_github(
+            db,
+            market=sync_market,
+            hydrate_cache=True,
+            hydrate_mode="static",
+        )
+        for sync_market in markets
+    }
+    pending = frozenset(
+        sync_market
+        for sync_market, result in results.items()
+        if result.get("status") not in _GITHUB_SYNC_SUCCESS_STATUSES
+    )
+    return results[effective_market], pending
+
+
 def _us_only_refresh_scope(
     scoped_market: str | None,
     enabled_markets: frozenset[str] | None,
@@ -319,13 +354,13 @@ def refresh_all_fundamentals(
             task_id=task_id,
             message="Refreshing fundamentals",
         )
-        github_sync = get_provider_snapshot_service().sync_weekly_reference_from_github(
+        github_sync, pending_markets = _sync_weekly_bundles(
             db,
-            market=effective_market,
-            hydrate_cache=True,
-            hydrate_mode="static",
+            effective_market=effective_market,
+            scoped_market=scoped_market,
+            enabled_markets=enabled_markets,
         )
-        if github_sync.get("status") in _GITHUB_SYNC_SUCCESS_STATUSES:
+        if not pending_markets:
             total_stocks = len(_load_active_universe_stocks(
                 db, market=scoped_market, enabled_markets=enabled_markets
             ))
@@ -366,6 +401,9 @@ def refresh_all_fundamentals(
                 "duration_seconds": round(duration, 2),
                 "timestamp": datetime.now().isoformat(),
             }
+        if scoped_market is None and enabled_markets is not None:
+            # Markets refreshed from their GitHub bundle are done; continue with the rest.
+            enabled_markets = pending_markets
         if settings.provider_snapshot_cutover_enabled and _us_only_refresh_scope(scoped_market, enabled_markets):
             total_stocks = len(_load_active_universe_stocks(
                 db, market=scoped_market, enabled_markets=enabled_markets
@@ -1017,13 +1055,13 @@ def refresh_all_fundamentals_hybrid(
             task_id=task_id,
             message="Refreshing fundamentals",
         )
-        github_sync = get_provider_snapshot_service().sync_weekly_reference_from_github(
+        github_sync, pending_markets = _sync_weekly_bundles(
             db,
-            market=effective_market,
-            hydrate_cache=True,
-            hydrate_mode="static",
+            effective_market=effective_market,
+            scoped_market=scoped_market,
+            enabled_markets=enabled_markets,
         )
-        if github_sync.get("status") in _GITHUB_SYNC_SUCCESS_STATUSES:
+        if not pending_markets:
             total_stocks = len(_load_active_universe_stocks(
                 db, market=scoped_market, enabled_markets=enabled_markets
             ))
@@ -1066,6 +1104,9 @@ def refresh_all_fundamentals_hybrid(
                 "duration_minutes": round(duration / 60, 1),
                 "timestamp": datetime.now().isoformat(),
             }
+        if scoped_market is None and enabled_markets is not None:
+            # Markets refreshed from their GitHub bundle are done; continue with the rest.
+            enabled_markets = pending_markets
         if (
             settings.provider_snapshot_cutover_enabled
             or settings.provider_snapshot_ingestion_enabled

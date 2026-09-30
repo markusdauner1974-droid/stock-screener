@@ -717,7 +717,7 @@ def _runtime_markets(monkeypatch, *enabled, primary="US"):
     )
 
 
-def _prepare_refresh(monkeypatch, module, *, cutover=False, github_markets=None):
+def _prepare_refresh(monkeypatch, module, *, cutover=False, github_markets=None, github_statuses=None):
     _patch_serialized_lock(monkeypatch)
     monkeypatch.setattr(module, "SessionLocal", _universe_session_factory())
     monkeypatch.setattr(module.settings, "provider_snapshot_cutover_enabled", cutover)
@@ -734,12 +734,14 @@ def _prepare_refresh(monkeypatch, module, *, cutover=False, github_markets=None)
     ):
         monkeypatch.setattr(module, name, lambda *args, **kwargs: None)
     synced = github_markets if github_markets is not None else []
+    statuses = github_statuses or {}
     monkeypatch.setattr(
         module,
         "get_provider_snapshot_service",
         lambda: SimpleNamespace(
             sync_weekly_reference_from_github=(
-                lambda db, market, **kwargs: synced.append(market) or {"status": "missing"}
+                lambda db, market, **kwargs: synced.append(market)
+                or {"status": statuses.get(market, "missing"), "market": market}
             )
         ),
     )
@@ -890,6 +892,51 @@ def test_us_snapshot_does_not_stand_in_for_non_us_scope(monkeypatch, task_name, 
     getattr(module, task_name).run(**kwargs)
 
     assert sorted(fetched) == expected
+
+
+def _hybrid_recording_stub(fetched):
+    class _HybridStub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        @staticmethod
+        def fetch_fundamentals_batch(symbols, *args, **kwargs):
+            fetched.extend(symbols)
+            return {symbol: {"symbol": symbol} for symbol in symbols}
+
+        @staticmethod
+        def store_all_caches(*args, **kwargs):
+            return {"fundamentals_stored": 1, "quarterly_stored": 1, "failed": 0}
+
+    return _HybridStub
+
+
+@pytest.mark.parametrize("task_name", ["refresh_all_fundamentals", "refresh_all_fundamentals_hybrid"])
+@pytest.mark.parametrize(
+    "statuses, expected_fetch",
+    [
+        ({"HK": "success", "US": "up_to_date"}, []),       # every enabled bundle synced: done
+        ({"HK": "success", "US": "missing"}, ["AAPL"]),    # only the unsynced market is fetched
+    ],
+)
+def test_unscoped_github_sync_covers_every_enabled_market(
+    monkeypatch, task_name, statuses, expected_fetch
+):
+    """The GitHub fast path must not complete an unscoped refresh after syncing only the primary market."""
+    import app.tasks.fundamentals_tasks as module
+
+    _runtime_markets(monkeypatch, "HK", "US", primary="HK")
+    synced: list[str] = []
+    _prepare_refresh(monkeypatch, module, github_markets=synced, github_statuses=statuses)
+    fetched: list[str] = []
+    monkeypatch.setattr(module, "get_fundamentals_cache", lambda: _recording_cache(fetched))
+    monkeypatch.setattr(module, "HybridFundamentalsService", _hybrid_recording_stub(fetched))
+    kwargs = {"include_finviz": False} if task_name.endswith("hybrid") else {}
+
+    getattr(module, task_name).run(**kwargs)
+
+    assert sorted(synced) == ["HK", "US"]
+    assert sorted(fetched) == expected_fetch
 
 
 def test_populate_initial_cache_skips_disabled_markets(monkeypatch):
