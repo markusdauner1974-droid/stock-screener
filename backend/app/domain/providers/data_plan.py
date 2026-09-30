@@ -14,7 +14,7 @@ from app.domain.markets.market import SUPPORTED_MARKET_CODES
 
 DATASET_FUNDAMENTALS = "fundamentals"
 DATASET_PRICES = "prices"
-PLAN_VERSION = "2026.09.29.2"
+PLAN_VERSION = "2026.09.30.1"
 
 PROVIDER_AKSHARE = "akshare"
 PROVIDER_ALPHAVANTAGE = "alphavantage"
@@ -215,7 +215,12 @@ provider_data_plan_registry = ProviderDataPlanRegistry(
         ("SG", DATASET_FUNDAMENTALS): (_yf(),),
         ("MY", DATASET_FUNDAMENTALS): (_yf(),),
         ("AU", DATASET_FUNDAMENTALS): (_yf(),),
-        ("US", DATASET_PRICES): (_yf(batch_size=150),),
+        # Yahoo's daily history drops the latest US session from 00:00 UTC until
+        # its EOD publish; quotes repair it (services/yahoo_quote_price_repair.py).
+        ("US", DATASET_PRICES): (
+            _yf(batch_size=150),
+            ProviderPlanStep(PROVIDER_YAHOO_QUOTE, batch_size=100),
+        ),
         # Sina only repairs the latest session Yahoo is missing; see
         # services/hk_sina_price_repair.py.
         ("HK", DATASET_PRICES): (

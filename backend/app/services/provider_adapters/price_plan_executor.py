@@ -168,22 +168,22 @@ class PriceProviderPlanExecutor:
         if plan.allows(PROVIDER_SINA):
             self._repair_latest_sessions_from_sina(results, market=market)
         if plan.allows(PROVIDER_YAHOO_QUOTE):
-            self._repair_latest_sessions_from_yahoo_quote(results, market=market)
+            self._repair_latest_sessions_from_yahoo_quote(results, market=plan.market)
         return self._with_plan_metadata(results, plan)
 
     def _repair_latest_sessions_from_yahoo_quote(
         self,
         results: dict[str, dict[str, Any]],
         *,
-        market: str | None,
+        market: str,
     ) -> None:
         from app.services.market_calendar_service import MarketCalendarService
         from app.services.yahoo_quote_price_repair import repair_from_yahoo_quotes
 
         calendar = MarketCalendarService()
         try:
-            expected_session = calendar.last_completed_trading_day(market or "JP")
-            market_tz = calendar.market_timezone(market or "JP")
+            expected_session = calendar.last_completed_trading_day(market)
+            market_tz = calendar.market_timezone(market)
         except Exception as exc:  # calendar gap: keep Yahoo results as-is
             logger.warning("Skipping Yahoo quote price repair for %s: %s", market, exc)
             return

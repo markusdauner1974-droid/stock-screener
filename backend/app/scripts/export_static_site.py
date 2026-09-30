@@ -414,7 +414,8 @@ def _resolve_static_rs_benchmark_anchors(*, market: str, as_of_date: date) -> An
         if attempt + 1 < STATIC_RS_BENCHMARK_HYDRATION_ATTEMPTS:
             print(
                 f"[static-rs] Benchmark anchor for {market} is missing or stale "
-                f"for {as_of_date.isoformat()}; retrying benchmark candidates.",
+                f"for {as_of_date.isoformat()}; retrying benchmark candidates "
+                f"({_describe_benchmark_candidates(last_resolution)}).",
                 flush=True,
             )
     cached_resolution = _resolve_static_rs_benchmark_bundle(
@@ -425,6 +426,12 @@ def _resolve_static_rs_benchmark_anchors(*, market: str, as_of_date: date) -> An
     )
     if cached_resolution.bundle is not None:
         return cached_resolution
+    print(
+        f"[static-rs] No benchmark anchor for {market} on {as_of_date.isoformat()}: "
+        f"{_describe_benchmark_candidates(last_resolution)}; "
+        f"cached: {_describe_benchmark_candidates(cached_resolution)}.",
+        flush=True,
+    )
     if (
         getattr(last_resolution, "error", None)
         == STATIC_RS_BENCHMARK_RESOLUTION_EXCEPTION
@@ -445,6 +452,15 @@ def _resolve_static_rs_benchmark_anchors(*, market: str, as_of_date: date) -> An
             or getattr(last_resolution, "error", None),
         )
     return last_resolution
+
+
+def _describe_benchmark_candidates(resolution: Any) -> str:
+    statuses = getattr(resolution, "candidate_statuses", ()) or ()
+    return ", ".join(
+        f"{status.symbol}/{status.source.value}={status.outcome.value}"
+        f"@{status.latest_date.isoformat() if status.latest_date else 'none'}"
+        for status in statuses
+    ) or "no candidates"
 
 
 def _benchmark_resolution_candidates(resolution: Any) -> tuple[str, ...]:
