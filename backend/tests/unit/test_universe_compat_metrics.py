@@ -20,7 +20,7 @@ class _FakePipeline:
         self._ops.append(("set", (key, value)))
         return self
 
-    def execute(self):
+    def execute(self, raise_on_error=True):
         results = []
         for op, args in self._ops:
             if op == "incr":

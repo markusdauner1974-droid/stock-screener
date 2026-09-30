@@ -165,7 +165,7 @@ def test_get_many_falls_back_to_db_when_redis_payload_normalizes_away():
         def get(self, _key):
             return self
 
-        def execute(self):
+        def execute(self, raise_on_error=True):
             poisoned = _price_frame([float("nan")], [date(2026, 6, 24)])
             return [pickle.dumps(poisoned), None]
 

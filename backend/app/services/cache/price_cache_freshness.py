@@ -205,12 +205,13 @@ class PriceCacheFreshnessPolicy:
             pipeline = self._redis_client.pipeline()
             for key, _symbol in all_keys:
                 pipeline.get(key)
-            meta_values = pipeline.execute()
+            # One corrupted key must not blank the whole scan.
+            meta_values = pipeline.execute(raise_on_error=False)
             calendar_markets = self._resolve_calendar_markets(key_market_by_symbol)
 
             metas_by_symbol: Dict[str, list] = {}
             for (_key, symbol), meta_json in zip(all_keys, meta_values):
-                if not meta_json:
+                if not meta_json or isinstance(meta_json, Exception):
                     continue
                 try:
                     metas_by_symbol.setdefault(symbol, []).append(json.loads(meta_json))

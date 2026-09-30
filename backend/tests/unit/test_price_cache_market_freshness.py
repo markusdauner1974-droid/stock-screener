@@ -12,6 +12,7 @@ from datetime import date, datetime, timezone
 
 import pandas as pd
 import pytest
+from redis.exceptions import ResponseError as RedisResponseError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -86,7 +87,7 @@ class _DictRedis:
                 self.calls.append(("set", key, value))
                 return self
 
-            def execute(self):
+            def execute(self, raise_on_error=True):
                 results = []
                 for op, key, value in self.calls:
                     if op == "set":
@@ -296,6 +297,168 @@ def test_many_cached_only_fresh_reads_market_scoped_metadata(session_factory):
     service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
 
     assert service.get_many_cached_only_fresh(["0700.HK"], period="2y")["0700.HK"] is None
+
+
+class _CountingRedis(_DictRedis):
+    """Counts direct GETs and pipeline executions to pin Redis round-trips."""
+
+    def __init__(self, values=None, *, fail_pipeline=False, error_keys=()):
+        super().__init__(values)
+        self.direct_gets = 0
+        self.pipeline_executes = 0
+        self.fail_pipeline = fail_pipeline
+        self.error_keys = set(error_keys)
+
+    def get(self, key):
+        self.direct_gets += 1
+        return super().get(key)
+
+    def pipeline(self):
+        redis = self
+
+        class _CountingPipeline:
+            def __init__(self):
+                self.keys = []
+
+            def get(self, key):
+                self.keys.append(key)
+                return self
+
+            def execute(self, raise_on_error=True):
+                """Mirrors redis-py: command errors raise unless raise_on_error=False."""
+                redis.pipeline_executes += 1
+                if redis.fail_pipeline:
+                    raise ConnectionError("redis down")
+                results = []
+                for key in self.keys:
+                    if key in redis.error_keys:
+                        error = RedisResponseError(f"WRONGTYPE {key}")
+                        if raise_on_error:
+                            raise error
+                        results.append(error)
+                    else:
+                        results.append(redis.values.get(key))
+                return results
+
+        return _CountingPipeline()
+
+
+def _store_bulk_prices(session_factory):
+    _store_hk_prices(session_factory, "0700.HK", date(2026, 7, 3))
+    _store_hk_prices(session_factory, "9988.HK", date(2026, 7, 3))
+    _store_hk_prices(session_factory, "AAPL", date(2026, 7, 2))  # US holiday on 07-03
+
+
+def test_many_cached_only_fresh_reads_metadata_in_one_pipeline(session_factory):
+    _store_bulk_prices(session_factory)
+    redis = _CountingRedis({
+        "price:HK:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 3, 0), legacy_flag=False),  # partial
+        "price:US:9988.HK:fetch_meta": _meta(_utc(2026, 7, 3, 9, 0), legacy_flag=False),  # final
+    })
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+
+    result = service.get_many_cached_only_fresh(["0700.HK", "9988.HK", "AAPL"], period="2y")
+
+    assert result["0700.HK"] is None
+    assert result["9988.HK"] is not None
+    assert result["AAPL"] is not None
+    assert redis.direct_gets == 0
+    assert redis.pipeline_executes == 1
+
+
+def test_many_cached_only_fresh_keeps_redis_failure_behaviour(session_factory):
+    """A Redis error means no metadata, as the per-symbol reads did: rows stay fresh by date."""
+    _store_bulk_prices(session_factory)
+    redis = _CountingRedis({
+        "price:HK:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 3, 0), legacy_flag=False),
+    }, fail_pipeline=True)
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+
+    result = service.get_many_cached_only_fresh(["0700.HK", "9988.HK", "AAPL"], period="2y")
+
+    assert all(result[symbol] is not None for symbol in ("0700.HK", "9988.HK", "AAPL"))
+
+
+def test_many_cached_only_fresh_isolates_a_failing_metadata_key(session_factory):
+    """One corrupted key (e.g. WRONGTYPE) must not discard every other symbol's metadata."""
+    _store_bulk_prices(session_factory)
+    redis = _CountingRedis(
+        {
+            "price:US:9988.HK:fetch_meta": _meta(_utc(2026, 7, 3, 3, 0), legacy_flag=False),  # partial
+        },
+        error_keys={"price:US:0700.HK:fetch_meta"},
+    )
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+
+    result = service.get_many_cached_only_fresh(["0700.HK", "9988.HK", "AAPL"], period="2y")
+
+    assert result["9988.HK"] is None       # its partial marker is still honoured
+    assert result["0700.HK"] is not None   # only the failing key is treated as missing
+    assert result["AAPL"] is not None
+
+
+def test_many_cached_only_fresh_uses_chunked_bulk_client(session_factory, monkeypatch):
+    """Full-universe metadata reads go through the long-timeout bulk client, in chunks;
+    a failing chunk loses only its own metadata."""
+    import app.services.price_cache_service as module
+
+    _store_bulk_prices(session_factory)
+    metas = {
+        "price:US:9988.HK:fetch_meta": _meta(_utc(2026, 7, 3, 3, 0), legacy_flag=False),  # partial
+    }
+    own_client = _CountingRedis(metas)
+    bulk_client = _CountingRedis(metas)
+    monkeypatch.setattr(module, "get_bulk_redis_client", lambda: bulk_client)
+    monkeypatch.setattr(module.settings, "redis_pipeline_chunk_size", 1)
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), own_client)
+
+    original_pipeline = bulk_client.pipeline
+    calls = {"n": 0}
+
+    def _first_chunk_times_out():
+        pipeline = original_pipeline()
+        calls["n"] += 1
+        if calls["n"] == 1:
+            def _timeout(raise_on_error=True):
+                raise TimeoutError("socket timeout")
+            pipeline.execute = _timeout
+        return pipeline
+
+    bulk_client.pipeline = _first_chunk_times_out
+
+    result = service.get_many_cached_only_fresh(["0700.HK", "9988.HK", "AAPL"], period="2y")
+
+    assert own_client.pipeline_executes == 0 and own_client.direct_gets == 0
+    assert calls["n"] == 3                  # one pipeline per symbol with chunk size 1
+    assert result["9988.HK"] is None        # a later chunk's partial marker still honoured
+
+
+def test_bulk_get_many_isolates_a_failing_redis_key(session_factory, monkeypatch):
+    """One corrupted key must not turn the whole get_many request into None."""
+    import app.services.price_cache_service as module
+
+    _store_bulk_prices(session_factory)
+    redis = _CountingRedis(error_keys={"price:US:9988.HK:recent"})
+    monkeypatch.setattr(module, "get_bulk_redis_client", lambda: None)
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+
+    result = service.get_many(["0700.HK", "9988.HK"], period="2y")
+
+    assert result["0700.HK"] is not None
+    assert result["9988.HK"] is not None  # the failing key reads as a miss -> DB fallback
+
+
+def test_stale_scan_isolates_a_failing_metadata_key(session_factory):
+    redis = _CountingRedis(
+        {
+            "price:HK:0700.HK:fetch_meta": _meta(_utc(2026, 7, 2, 3, 0), legacy_flag=False),
+            "price:US:AAPL:fetch_meta": "corrupt",
+        },
+        error_keys={"price:US:AAPL:fetch_meta"},
+    )
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+
+    assert service.get_stale_intraday_symbols() == ["0700.HK"]
 
 
 def test_latest_fetch_metadata_wins_across_key_namespaces(session_factory):
