@@ -123,7 +123,7 @@ def test_fetch_full_and_cache_uses_cleaned_price_frame_for_redis_db_and_return()
     captured = {}
 
     service._fetch_direct_historical_data = lambda symbol, period: raw  # type: ignore[assignment]
-    service._store_recent_in_redis = lambda symbol, data, market=None: captured.setdefault("redis", data)  # type: ignore[assignment]
+    service._store_recent_in_redis = lambda symbol, data, market=None, **_: captured.setdefault("redis", data)  # type: ignore[assignment]
     service._store_in_database = lambda symbol, data: captured.setdefault("db", data)  # type: ignore[assignment]
 
     result = service._fetch_full_and_cache("SPY", "2y")
@@ -144,7 +144,7 @@ def test_incremental_merge_uses_cleaned_price_frame_for_redis_db_and_return():
     captured = {}
 
     service._fetch_direct_historical_data = lambda symbol, period: raw_incremental  # type: ignore[assignment]
-    service._store_recent_in_redis = lambda symbol, data, market=None: captured.setdefault("redis", data)  # type: ignore[assignment]
+    service._store_recent_in_redis = lambda symbol, data, market=None, **_: captured.setdefault("redis", data)  # type: ignore[assignment]
     service._store_in_database = lambda symbol, data: captured.setdefault("db", data)  # type: ignore[assignment]
 
     result = service._fetch_incremental_and_merge(
@@ -182,7 +182,7 @@ def test_get_many_falls_back_to_db_when_redis_payload_normalizes_away():
         symbol: (db_frame, date(2026, 6, 24)) for symbol in symbols
     }
     service._active_market_by_symbol = lambda symbols: {symbol: "US" for symbol in symbols}  # type: ignore[assignment]
-    service._store_recent_in_redis = lambda symbol, data, market=None: None  # type: ignore[assignment]
+    service._store_recent_in_redis = lambda symbol, data, market=None, **_: None  # type: ignore[assignment]
 
     original_resolve = service._resolve_bulk_fallback
 

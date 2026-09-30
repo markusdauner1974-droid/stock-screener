@@ -13,6 +13,7 @@ docs/learning_loop/adr_ll2_e1_canonical_price_contract_v1.md
 import json
 import logging
 import pickle
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Optional, Dict, List, Callable, Mapping
 from datetime import datetime, timedelta, date
 import pandas as pd
@@ -49,6 +50,18 @@ if TYPE_CHECKING:
     from .market_calendar_service import MarketCalendarService
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _registered_instrument_markets() -> Dict[str, str]:
+    """Trading market of key-market instruments fetched outside ``stock_universe`` (e.g. ^HSI)."""
+    from ..domain.markets.key_markets import KEY_MARKET_INSTRUMENTS_BY_MARKET
+
+    return {
+        instrument.data_symbol.upper(): instrument.market
+        for instruments in KEY_MARKET_INSTRUMENTS_BY_MARKET.values()
+        for instrument in instruments
+    }
 
 # Redis keys for warmup metadata
 WARMUP_METADATA_KEY = "cache:warmup:metadata"
@@ -165,7 +178,9 @@ class PriceCacheService:
                 logger.info(f"Cache HIT for {symbol} (Database, last: {last_date})")
 
                 # Also store in Redis for faster next access
-                self._store_recent_in_redis(symbol, cached_data, market=market)
+                self._store_recent_in_redis(
+                    symbol, cached_data, market=market, stamp_fetch_metadata=False
+                )
 
                 return cached_data
             else:
@@ -777,6 +792,8 @@ class PriceCacheService:
         symbol: str,
         data: pd.DataFrame,
         market: str | None = None,
+        *,
+        stamp_fetch_metadata: bool = True,
     ) -> None:
         """
         Store historical data (up to 5 years) in Redis for fast access.
@@ -784,7 +801,9 @@ class PriceCacheService:
         Stores full 5-year data to support volume breakthrough analysis
         and Minervini 200-day MA calculations without requiring database fallback.
 
-        Also stores fetch metadata for intraday staleness detection.
+        Also stores fetch metadata for intraday staleness detection, unless the
+        frame is a warm copy of DB rows (``stamp_fetch_metadata=False``): that is
+        not a provider fetch, so it must not vouch for the DB row later.
         """
         if not self._redis_client:
             return
@@ -826,7 +845,8 @@ class PriceCacheService:
             )
 
             # Store fetch metadata for intraday staleness detection
-            self._store_fetch_metadata(symbol, market=market)
+            if stamp_fetch_metadata:
+                self._store_fetch_metadata(symbol, market=market)
 
             logger.debug(f"Cached {symbol} recent data in Redis ({len(recent_data)} rows)")
 
@@ -1884,10 +1904,14 @@ class PriceCacheService:
             except Exception:
                 logger.debug("Universe market lookup failed; using fallback markets", exc_info=True)
                 universe = {}
+            registered = _registered_instrument_markets()
             fallback = fallback_by_symbol or {}
             for symbol in unresolved:
                 resolved[symbol] = str(
-                    universe.get(symbol) or fallback.get(symbol) or "US"
+                    universe.get(symbol)
+                    or registered.get(str(symbol).upper())
+                    or fallback.get(symbol)
+                    or "US"
                 ).upper()
         return resolved
 
@@ -2188,7 +2212,9 @@ class PriceCacheService:
                 cached_data[symbol] = df
                 db_hits.append(symbol)
                 if self._redis_client:
-                    self._store_recent_in_redis(symbol, df, market=symbol_market)
+                    self._store_recent_in_redis(
+                        symbol, df, market=symbol_market, stamp_fetch_metadata=False
+                    )
             else:
                 yfinance_needed.append(symbol)
 

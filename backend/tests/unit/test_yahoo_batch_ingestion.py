@@ -1249,7 +1249,7 @@ def test_bulk_fallback_warms_fresh_db_hits_to_inferred_symbol_market(monkeypatch
     monkeypatch.setattr(
         service,
         "_store_recent_in_redis",
-        lambda symbol, data, market=None: stored.append((symbol, market)),
+        lambda symbol, data, market=None, **_: stored.append((symbol, market)),
     )
 
     result = service._resolve_bulk_fallback(

@@ -362,6 +362,34 @@ def test_redis_payload_is_judged_by_its_own_namespace_metadata(session_factory, 
     assert float(frame["Close"].iloc[-1]) == 359.0
 
 
+def test_registered_non_universe_instrument_uses_its_own_market(session_factory):
+    # ^HSI is fetched via the key-market registry, not stock_universe.
+    redis = _DictRedis({
+        "price:US:^HSI:fetch_meta": _meta(_utc(2026, 7, 2, 3, 0), legacy_flag=False),  # 11:00 HKT
+    })
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 2, 9, 0)), redis)  # 17:00 HKT
+
+    assert service._calendar_markets(["^HSI", "BTC-USD"]) == {"^HSI": "HK", "BTC-USD": "US"}
+    assert service._is_intraday_data_stale("^HSI") is True
+
+
+def test_warming_redis_from_database_does_not_stamp_fetch_metadata(session_factory, monkeypatch):
+    """A copy of DB rows is not a provider fetch; stamping it would vouch for the DB row later."""
+    import app.services.price_cache_service as module
+
+    _store_hk_prices(session_factory, "0700.HK", date(2026, 7, 3))
+    redis = _DictRedis()
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+    monkeypatch.setattr(module, "get_bulk_redis_client", lambda: None)
+
+    frame = service.get_many(["0700.HK"], period="2y")["0700.HK"]
+    service.get_historical_data("0700.HK", period="2y")
+
+    assert frame is not None
+    assert any(key.endswith(":recent") for key in redis.values)  # the warm still happens
+    assert not [key for key in redis.values if key.endswith(":fetch_meta")]
+
+
 def test_refreshed_batch_overwrites_both_key_namespaces(session_factory, monkeypatch):
     import app.services.price_cache_service as module
 
