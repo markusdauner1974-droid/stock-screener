@@ -12,7 +12,6 @@ docs/learning_loop/adr_ll2_e1_canonical_price_contract_v1.md
 """
 import json
 import logging
-import pickle
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Optional, Dict, List, Callable, Mapping
 from datetime import datetime, timedelta, date
@@ -37,6 +36,7 @@ from .cache.price_cache_failure_telemetry import PriceCacheFailureTelemetry
 from .cache.price_cache_freshness import PriceCacheFreshnessPolicy, latest_fetch_metadata
 from .cache.market_cache_policy import MarketAwareCachePolicy, market_cache_policy
 from .cache.price_cache_warmup import PriceCacheWarmupStore
+from .cache.redis_codec import decode_frame, encode_frame
 from .errors import CacheRefreshError
 from .price_row_normalization import (
     normalize_price_batch,
@@ -907,12 +907,11 @@ class PriceCacheService:
                 return
 
             redis_key = self._redis_recent_key(symbol, market=market)
-            pickled_data = pickle.dumps(recent_data)
 
             self._redis_client.setex(
                 redis_key,
                 self._cache_policy.ttl_seconds("price", market=market),
-                pickled_data
+                encode_frame(recent_data),
             )
 
             # Also store last update timestamp
@@ -1866,11 +1865,10 @@ class PriceCacheService:
                             continue
 
                         redis_key = self._redis_recent_key(symbol, market=market)
-                        pickled_data = pickle.dumps(recent_data)
                         pipeline.setex(
                             redis_key,
                             self._cache_policy.ttl_seconds("price", market=market),
-                            pickled_data,
+                            encode_frame(recent_data),
                         )
 
                         last_update_key = self._redis_last_update_key(symbol, market=market)
@@ -2284,8 +2282,8 @@ class PriceCacheService:
                     fetch_meta_by_symbol[symbol] = latest_fetch_metadata(metas)
                     if raw_data:
                         try:
-                            df = pickle.loads(raw_data)
-                            df = normalize_price_frame(df)
+                            # A legacy (pickled) payload decodes to None: a miss.
+                            df = normalize_price_frame(decode_frame(raw_data))
                             if df is None:
                                 cached_data[symbol] = None
                                 redis_misses.append(symbol)

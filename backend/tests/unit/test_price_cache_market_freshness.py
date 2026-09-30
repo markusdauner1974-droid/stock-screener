@@ -16,6 +16,7 @@ from redis.exceptions import ResponseError as RedisResponseError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.services.cache.redis_codec import encode_frame
 from app.database import Base
 from app.models.stock import StockPrice
 from app.models.stock_universe import UNIVERSE_STATUS_ACTIVE, StockUniverse
@@ -529,7 +530,6 @@ def test_scoped_bulk_get_consults_unscoped_metadata(session_factory, monkeypatch
 
 def test_redis_payload_is_judged_by_its_own_namespace_metadata(session_factory, monkeypatch):
     """A partial US-key frame must not borrow freshness from newer HK-key metadata."""
-    import pickle
 
     import app.services.price_cache_service as module
 
@@ -540,7 +540,7 @@ def test_redis_payload_is_judged_by_its_own_namespace_metadata(session_factory, 
         index=days,
     )
     redis = _DictRedis({
-        "price:US:0700.HK:recent": pickle.dumps(partial),
+        "price:US:0700.HK:recent": encode_frame(partial),
         "price:US:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 3, 0), legacy_flag=False),  # 11:00 HKT
         "price:HK:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 9, 0), legacy_flag=False),  # 17:00 HKT
     })

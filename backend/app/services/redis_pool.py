@@ -91,7 +91,7 @@ def get_redis_pool() -> Optional[ConnectionPool]:
             max_connections=10,
             socket_connect_timeout=2,
             socket_timeout=2,
-            decode_responses=False  # Binary mode for pickle
+            decode_responses=False  # Binary mode for cache payloads (cache.redis_codec)
         )
 
         # Verify pool works by getting a test connection

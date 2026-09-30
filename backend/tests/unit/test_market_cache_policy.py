@@ -5,11 +5,11 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import fnmatch
 import json
-import pickle
 
 import pandas as pd
 import pytest
 
+from app.services.cache.redis_codec import encode_dict
 from app.domain.markets import Market
 from app.domain.providers.data_plan import DATASET_FUNDAMENTALS, PLAN_VERSION
 from app.services.benchmark_cache_service import BenchmarkCacheService
@@ -148,7 +148,7 @@ class _FailingPipelineRedis:
 
 def test_fundamentals_bulk_get_reads_market_scoped_keys():
     payload = {"market_cap": 100, "sector": "Internet"}
-    redis = _Redis([pickle.dumps(payload)])
+    redis = _Redis([encode_dict(payload)])
     service = FundamentalsCacheService(redis_client=redis, session_factory=lambda: None)
     service._needs_db_enrichment = lambda fundamentals: False  # type: ignore[method-assign]
 
