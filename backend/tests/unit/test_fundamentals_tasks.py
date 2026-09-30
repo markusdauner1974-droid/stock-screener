@@ -41,6 +41,10 @@ def test_refresh_all_fundamentals_retries_transient_outer_failures(monkeypatch):
     fake_query.filter.return_value.all.return_value = [
         SimpleNamespace(symbol="AAPL", market="US")
     ]
+    # Unscoped runs add an enabled-markets filter (#414).
+    fake_query.filter.return_value.filter.return_value.all.return_value = [
+        SimpleNamespace(symbol="AAPL", market="US")
+    ]
     fake_db.query.return_value = fake_query
     monkeypatch.setattr(module, "SessionLocal", lambda: fake_db)
     _patch_serialized_lock(monkeypatch)
@@ -72,6 +76,10 @@ def test_refresh_all_fundamentals_retry_survives_activity_publish_failure(monkey
     fake_db = MagicMock()
     fake_query = MagicMock()
     fake_query.filter.return_value.all.return_value = [
+        SimpleNamespace(symbol="AAPL", market="US")
+    ]
+    # Unscoped runs add an enabled-markets filter (#414).
+    fake_query.filter.return_value.filter.return_value.all.return_value = [
         SimpleNamespace(symbol="AAPL", market="US")
     ]
     fake_db.query.return_value = fake_query
@@ -109,6 +117,10 @@ def test_refresh_all_fundamentals_reraises_soft_time_limit(monkeypatch):
     fake_query.filter.return_value.all.return_value = [
         SimpleNamespace(symbol="AAPL", market="US")
     ]
+    # Unscoped runs add an enabled-markets filter (#414).
+    fake_query.filter.return_value.filter.return_value.all.return_value = [
+        SimpleNamespace(symbol="AAPL", market="US")
+    ]
     fake_db.query.return_value = fake_query
     monkeypatch.setattr(module, "SessionLocal", lambda: fake_db)
     _patch_serialized_lock(monkeypatch)
@@ -127,6 +139,10 @@ def test_refresh_all_fundamentals_reraises_nested_soft_time_limit(monkeypatch):
     fake_db = MagicMock()
     fake_query = MagicMock()
     fake_query.filter.return_value.all.return_value = [
+        SimpleNamespace(symbol="AAPL", market="US")
+    ]
+    # Unscoped runs add an enabled-markets filter (#414).
+    fake_query.filter.return_value.filter.return_value.all.return_value = [
         SimpleNamespace(symbol="AAPL", market="US")
     ]
     fake_db.query.return_value = fake_query
@@ -150,6 +166,10 @@ def test_refresh_all_fundamentals_hybrid_passes_session_factory(monkeypatch):
     fake_db = MagicMock()
     fake_query = MagicMock()
     fake_query.filter.return_value.all.return_value = [
+        SimpleNamespace(symbol="AAPL", market="US")
+    ]
+    # Unscoped runs add an enabled-markets filter (#414).
+    fake_query.filter.return_value.filter.return_value.all.return_value = [
         SimpleNamespace(symbol="AAPL", market="US")
     ]
     fake_db.query.return_value = fake_query
@@ -244,6 +264,10 @@ def test_refresh_all_fundamentals_publishes_market_activity(monkeypatch):
     fake_query.filter.return_value.all.return_value = [
         SimpleNamespace(symbol="AAPL", market="US")
     ]
+    # Unscoped runs add an enabled-markets filter (#414).
+    fake_query.filter.return_value.filter.return_value.all.return_value = [
+        SimpleNamespace(symbol="AAPL", market="US")
+    ]
     fake_db.query.return_value = fake_query
     monkeypatch.setattr(module, "SessionLocal", lambda: fake_db)
     _patch_serialized_lock(monkeypatch)
@@ -280,6 +304,10 @@ def test_refresh_all_fundamentals_prefers_github_weekly_bundle(monkeypatch):
     fake_db = MagicMock()
     fake_query = MagicMock()
     fake_query.filter.return_value.all.return_value = [
+        SimpleNamespace(symbol="AAPL", market="US")
+    ]
+    # Unscoped runs add an enabled-markets filter (#414).
+    fake_query.filter.return_value.filter.return_value.all.return_value = [
         SimpleNamespace(symbol="AAPL", market="US")
     ]
     fake_db.query.return_value = fake_query
@@ -330,6 +358,10 @@ def test_refresh_all_fundamentals_hybrid_prefers_github_weekly_bundle(monkeypatc
     fake_db = MagicMock()
     fake_query = MagicMock()
     fake_query.filter.return_value.all.return_value = [
+        SimpleNamespace(symbol="AAPL", market="US")
+    ]
+    # Unscoped runs add an enabled-markets filter (#414).
+    fake_query.filter.return_value.filter.return_value.all.return_value = [
         SimpleNamespace(symbol="AAPL", market="US")
     ]
     fake_db.query.return_value = fake_query
@@ -644,3 +676,169 @@ def test_refresh_all_fundamentals_progress_counts_failed_iterations(monkeypatch)
     assert any(update["current"] < update["total"] for update in progress_updates)
     assert progress_updates[-1]["current"] == 30
     assert progress_updates[-1]["total"] == 30
+
+
+# ── #414: fundamentals refreshes stay inside runtime-enabled markets ─────
+
+_UNIVERSE = (("AAPL", "US"), ("0700.HK", "HK"), ("7203.T", "JP"))
+
+
+def _universe_session_factory():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from app.database import Base
+    from app.models.stock_universe import UNIVERSE_STATUS_ACTIVE, StockUniverse
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+    db = factory()
+    for symbol, market in _UNIVERSE:
+        db.add(StockUniverse(
+            symbol=symbol, market=market, exchange="X", is_active=True,
+            status=UNIVERSE_STATUS_ACTIVE, status_reason="active",
+        ))
+    db.commit()
+    db.close()
+    return factory
+
+
+def _runtime_markets(monkeypatch, *enabled, primary="US"):
+    import app.services.runtime_preferences_service as prefs
+
+    monkeypatch.setattr(
+        prefs,
+        "runtime_preferences_now",
+        lambda: SimpleNamespace(primary_market=primary, enabled_markets=list(enabled)),
+    )
+    monkeypatch.setattr(
+        prefs, "is_market_enabled_now", lambda market: market is None or market.upper() in enabled
+    )
+
+
+def _prepare_refresh(monkeypatch, module, *, cutover=False, github_markets=None):
+    _patch_serialized_lock(monkeypatch)
+    monkeypatch.setattr(module, "SessionLocal", _universe_session_factory())
+    monkeypatch.setattr(module.settings, "provider_snapshot_cutover_enabled", cutover)
+    monkeypatch.setattr(module.settings, "provider_snapshot_ingestion_enabled", False)
+    monkeypatch.setattr(module, "get_ticker_validation_service", lambda: MagicMock())
+    monkeypatch.setattr(
+        module.calculate_eps_rating_percentiles, "delay", lambda: SimpleNamespace(id="eps")
+    )
+    for name in (
+        "mark_market_activity_started",
+        "mark_market_activity_completed",
+        "mark_market_activity_failed",
+        "mark_market_activity_progress",
+    ):
+        monkeypatch.setattr(module, name, lambda *args, **kwargs: None)
+    synced = github_markets if github_markets is not None else []
+    monkeypatch.setattr(
+        module,
+        "get_provider_snapshot_service",
+        lambda: SimpleNamespace(
+            sync_weekly_reference_from_github=(
+                lambda db, market, **kwargs: synced.append(market) or {"status": "missing"}
+            )
+        ),
+    )
+
+
+def _recording_cache(fetched):
+    return SimpleNamespace(
+        get_fundamentals=lambda symbol, **kwargs: fetched.append(symbol) or {"symbol": symbol}
+    )
+
+
+def test_unscoped_fundamentals_refresh_skips_disabled_markets(monkeypatch):
+    import app.tasks.fundamentals_tasks as module
+
+    _runtime_markets(monkeypatch, "US", "HK")
+    _prepare_refresh(monkeypatch, module)
+    fetched: list[str] = []
+    monkeypatch.setattr(module, "get_fundamentals_cache", lambda: _recording_cache(fetched))
+
+    result = module.refresh_all_fundamentals.run()
+
+    assert sorted(fetched) == ["0700.HK", "AAPL"]
+    assert result["total_stocks"] == 2
+
+
+def test_unscoped_hybrid_refresh_skips_disabled_markets(monkeypatch):
+    import app.tasks.fundamentals_tasks as module
+
+    _runtime_markets(monkeypatch, "US", "HK")
+    _prepare_refresh(monkeypatch, module)
+    monkeypatch.setattr(module, "get_fundamentals_cache", lambda: MagicMock())
+    requested: list[str] = []
+
+    class _HybridStub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        @staticmethod
+        def fetch_fundamentals_batch(symbols, *args, **kwargs):
+            requested.extend(symbols)
+            return {symbol: {"symbol": symbol} for symbol in symbols}
+
+        @staticmethod
+        def store_all_caches(*args, **kwargs):
+            return {"fundamentals_stored": 2, "quarterly_stored": 2, "failed": 0}
+
+    monkeypatch.setattr(module, "HybridFundamentalsService", _HybridStub)
+
+    module.refresh_all_fundamentals_hybrid.run(include_finviz=False)
+
+    assert sorted(requested) == ["0700.HK", "AAPL"]
+
+
+def test_hybrid_refresh_skips_disabled_market(monkeypatch):
+    import app.tasks.fundamentals_tasks as module
+
+    _runtime_markets(monkeypatch, "US", "HK")
+    _prepare_refresh(monkeypatch, module)
+
+    def _must_not_fetch(*args, **kwargs):
+        pytest.fail("a disabled market must not be fetched")
+
+    monkeypatch.setattr(module, "HybridFundamentalsService", _must_not_fetch)
+
+    result = module.refresh_all_fundamentals_hybrid.run(market="JP", include_finviz=False)
+
+    assert result["status"] == "skipped"
+    assert result["market"] == "JP"
+
+
+def test_populate_initial_cache_skips_disabled_markets(monkeypatch):
+    import app.tasks.fundamentals_tasks as module
+
+    _runtime_markets(monkeypatch, "US", "HK")
+    _prepare_refresh(monkeypatch, module)
+    fetched: list[str] = []
+    monkeypatch.setattr(module, "get_fundamentals_cache", lambda: _recording_cache(fetched))
+
+    module.populate_initial_cache.run()
+
+    assert sorted(fetched) == ["0700.HK", "AAPL"]
+
+
+def test_unscoped_refresh_uses_primary_market_when_us_disabled(monkeypatch):
+    """A non-US install must not sync US reference data or run the US-only snapshot pipeline."""
+    import app.tasks.fundamentals_tasks as module
+
+    _runtime_markets(monkeypatch, "HK", primary="HK")
+    synced: list[str] = []
+    _prepare_refresh(monkeypatch, module, cutover=True, github_markets=synced)
+
+    def _must_not_run(*args, **kwargs):
+        pytest.fail("the US-only snapshot pipeline must not run when US is disabled")
+
+    monkeypatch.setattr(module, "_run_snapshot_pipeline", _must_not_run)
+    fetched: list[str] = []
+    monkeypatch.setattr(module, "get_fundamentals_cache", lambda: _recording_cache(fetched))
+
+    module.refresh_all_fundamentals.run()
+
+    assert synced == ["HK"]
+    assert fetched == ["0700.HK"]

@@ -134,14 +134,42 @@ def _maybe_publish_fundamentals_progress(
     progress_state["last_time"] = now
 
 
+def _runtime_market_scope() -> tuple[str, frozenset[str]] | None:
+    """(primary market, enabled markets) from runtime preferences, or None if unreadable.
+
+    None fails open (no market filter, the behaviour before #414) rather than
+    silently stopping fundamentals refreshes when preferences can't be read.
+    """
+    from ..services.runtime_preferences_service import runtime_preferences_now
+
+    try:
+        prefs = runtime_preferences_now()
+    except Exception:
+        logger.warning(
+            "Runtime preferences unreadable; fundamentals refresh is not market-filtered",
+            exc_info=True,
+        )
+        return None
+    return prefs.primary_market, frozenset(prefs.enabled_markets)
+
+
+def _us_snapshot_allowed(enabled_markets: frozenset[str] | None) -> bool:
+    """The snapshot pipeline builds the US Finviz universe and snapshot; skip it when US is disabled."""
+    return enabled_markets is None or "US" in enabled_markets
+
+
 def _load_active_universe_stocks(
     db,
     *,
     market: str | None = None,
+    enabled_markets: frozenset[str] | None = None,
 ) -> list[StockUniverse]:
+    """Active universe rows for ``market``, or for every enabled market when unscoped."""
     query = db.query(StockUniverse).filter(StockUniverse.is_active)
     if market is not None:
         query = query.filter(StockUniverse.market == market)
+    elif enabled_markets is not None:
+        query = query.filter(StockUniverse.market.in_(sorted(enabled_markets)))
     return query.all()
 
 
@@ -235,7 +263,14 @@ def refresh_all_fundamentals(
     logger.info("Timestamp: %s", datetime.now().strftime('%Y-%m-%d %H:%M:%S'), extra=_log_extra)
     logger.info("=" * 60)
 
-    effective_market = normalize_market(market) if market is not None else "US"
+    scope = _runtime_market_scope()
+    enabled_markets = scope[1] if scope is not None else None
+    # Unscoped runs cover every enabled market; activity and the GitHub bundle
+    # use the primary market (US unless the install runs non-US markets only).
+    effective_market = (
+        normalize_market(market) if market is not None
+        else scope[0] if scope is not None else "US"
+    )
     activity_lifecycle = activity_lifecycle or "weekly_refresh"
     if market is not None and not is_market_enabled_now(effective_market):
         logger.info("Skipping fundamentals refresh for disabled market %s", market, extra=_log_extra)
@@ -276,7 +311,9 @@ def refresh_all_fundamentals(
             hydrate_mode="static",
         )
         if github_sync.get("status") in _GITHUB_SYNC_SUCCESS_STATUSES:
-            total_stocks = len(_load_active_universe_stocks(db, market=scoped_market))
+            total_stocks = len(_load_active_universe_stocks(
+                db, market=scoped_market, enabled_markets=enabled_markets
+            ))
             if total_stocks > 0:
                 _maybe_publish_fundamentals_progress(
                     db,
@@ -314,8 +351,10 @@ def refresh_all_fundamentals(
                 "duration_seconds": round(duration, 2),
                 "timestamp": datetime.now().isoformat(),
             }
-        if settings.provider_snapshot_cutover_enabled:
-            total_stocks = len(_load_active_universe_stocks(db, market=scoped_market))
+        if settings.provider_snapshot_cutover_enabled and _us_snapshot_allowed(enabled_markets):
+            total_stocks = len(_load_active_universe_stocks(
+                db, market=scoped_market, enabled_markets=enabled_markets
+            ))
             _maybe_publish_fundamentals_progress(
                 db,
                 market=effective_market,
@@ -369,7 +408,9 @@ def refresh_all_fundamentals(
             return response
 
         # Get all active stocks from universe (market-filtered when scoped)
-        universe_stocks = _load_active_universe_stocks(db, market=scoped_market)
+        universe_stocks = _load_active_universe_stocks(
+                db, market=scoped_market, enabled_markets=enabled_markets
+            )
 
         if not universe_stocks:
             logger.warning("No active stocks found in universe", extra=_log_extra)
@@ -673,8 +714,11 @@ def populate_initial_cache(self, limit: Optional[int] = None):
     ticker_validation_service = get_ticker_validation_service()
 
     try:
-        # Get all active stocks from universe
+        # Get all active stocks in runtime-enabled markets
         query = db.query(StockUniverse).filter(StockUniverse.is_active)
+        scope = _runtime_market_scope()
+        if scope is not None:
+            query = query.filter(StockUniverse.market.in_(sorted(scope[1])))
 
         if limit:
             query = query.limit(limit)
@@ -917,10 +961,28 @@ def refresh_all_fundamentals_hybrid(
     logger.info("yfinance batch size: %s", yfinance_batch_size, extra=_log_extra)
     logger.info("=" * 60)
 
+    from ..services.runtime_preferences_service import is_market_enabled_now
+
+    scope = _runtime_market_scope()
+    enabled_markets = scope[1] if scope is not None else None
+    # Unscoped runs cover every enabled market; activity and the GitHub bundle
+    # use the primary market (US unless the install runs non-US markets only).
+    effective_market = (
+        normalize_market(market) if market is not None
+        else scope[0] if scope is not None else "US"
+    )
+    if market is not None and not is_market_enabled_now(effective_market):
+        logger.info("Skipping hybrid fundamentals refresh for disabled market %s", market, extra=_log_extra)
+        return {
+            'status': 'skipped',
+            'reason': f'market {effective_market} is disabled in local runtime preferences',
+            'market': effective_market,
+            'timestamp': datetime.now().isoformat(),
+        }
+
     db = SessionLocal()
     start_time = time.time()
     ticker_validation_service = get_ticker_validation_service()
-    effective_market = normalize_market(market) if market is not None else "US"
     activity_lifecycle = activity_lifecycle or "weekly_refresh"
     task_name = getattr(self, "name", "refresh_all_fundamentals_hybrid")
     task_id = getattr(getattr(self, "request", None), "id", None)
@@ -948,7 +1010,9 @@ def refresh_all_fundamentals_hybrid(
             hydrate_mode="static",
         )
         if github_sync.get("status") in _GITHUB_SYNC_SUCCESS_STATUSES:
-            total_stocks = len(_load_active_universe_stocks(db, market=scoped_market))
+            total_stocks = len(_load_active_universe_stocks(
+                db, market=scoped_market, enabled_markets=enabled_markets
+            ))
             if total_stocks > 0:
                 _maybe_publish_fundamentals_progress(
                     db,
@@ -988,9 +1052,14 @@ def refresh_all_fundamentals_hybrid(
                 "duration_minutes": round(duration / 60, 1),
                 "timestamp": datetime.now().isoformat(),
             }
-        if settings.provider_snapshot_cutover_enabled or settings.provider_snapshot_ingestion_enabled:
+        if (
+            settings.provider_snapshot_cutover_enabled
+            or settings.provider_snapshot_ingestion_enabled
+        ) and _us_snapshot_allowed(enabled_markets):
             publish = settings.provider_snapshot_cutover_enabled
-            total_stocks = len(_load_active_universe_stocks(db, market=scoped_market))
+            total_stocks = len(_load_active_universe_stocks(
+                db, market=scoped_market, enabled_markets=enabled_markets
+            ))
             _maybe_publish_fundamentals_progress(
                 db,
                 market=effective_market,
@@ -1046,7 +1115,9 @@ def refresh_all_fundamentals_hybrid(
             return response
 
         # Get all active stocks from universe (market-filtered when scoped)
-        universe_stocks = _load_active_universe_stocks(db, market=scoped_market)
+        universe_stocks = _load_active_universe_stocks(
+                db, market=scoped_market, enabled_markets=enabled_markets
+            )
 
         if not universe_stocks:
             logger.warning("No active stocks found in universe", extra=_log_extra)
