@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import date
 from typing import Any, Mapping, Sequence
 
@@ -45,7 +46,7 @@ def persist_stock_price_mappings(
     max_date = max(all_dates)
     existing_pairs: dict[
         tuple[str, date],
-        tuple[int, object, object, object, object, object],
+        tuple[int, object, object, object, object, object, object],
     ] = {}
     for chunk_start in range(0, len(symbols), chunk_size):
         chunk_symbols = symbols[chunk_start:chunk_start + chunk_size]
@@ -59,6 +60,7 @@ def persist_stock_price_mappings(
                 StockPrice.high,
                 StockPrice.low,
                 StockPrice.close,
+                StockPrice.volume,
             )
             .filter(
                 StockPrice.symbol.in_(chunk_symbols),
@@ -76,6 +78,7 @@ def persist_stock_price_mappings(
             high,
             low,
             close,
+            volume,
         ) in rows:
             target_dates = symbol_dates.get(record_symbol)
             if target_dates and record_date in target_dates:
@@ -86,6 +89,7 @@ def persist_stock_price_mappings(
                     high,
                     low,
                     close,
+                    volume,
                 )
 
     rows_to_insert: list[dict[str, Any]] = []
@@ -98,7 +102,7 @@ def persist_stock_price_mappings(
                 rows_to_insert.append(price_row)
                 continue
 
-            existing_id, existing_adj_close, open_, high, low, close = existing
+            existing_id, existing_adj_close, open_, high, low, close, volume = existing
             if (
                 row_date == latest_dates.get(symbol)
                 or not is_usable_adjusted_close(existing_adj_close)
@@ -106,6 +110,10 @@ def persist_stock_price_mappings(
             ):
                 price_row["id"] = existing_id
                 rows_to_update.append(price_row)
+            elif _heals_same_basis_bar(price_row, open_, high, low, close, volume):
+                rows_to_update.append(
+                    {"id": existing_id, **{key: price_row[key] for key in _HEALED_FIELDS}}
+                )
 
     for chunk_start in range(0, len(rows_to_insert), chunk_size):
         db.bulk_insert_mappings(
@@ -119,3 +127,33 @@ def persist_stock_price_mappings(
         )
     db.flush()
     return {"inserted": len(rows_to_insert), "updated": len(rows_to_update)}
+
+
+_HEALED_FIELDS = ("open", "high", "low", "close", "volume")
+
+
+def _heals_same_basis_bar(
+    price_row: Mapping[str, Any],
+    open_: object,
+    high: object,
+    low: object,
+    close: object,
+    volume: object,
+) -> bool:
+    """Whether a refetched older bar should replace a stored bar on the same price basis.
+
+    Heals bars filled from a quote when Yahoo's daily history lacked the session
+    (see ``yahoo_quote_price_repair``): the close matches, but open/high/low and
+    volume differ slightly. A changed close means back-adjusted history (split),
+    which is left to the full-history replacement path so rows never splice.
+    ``adj_close`` is kept for the same reason.
+    """
+    try:
+        if not math.isclose(float(price_row["close"]), float(close), rel_tol=1e-4):
+            return False
+        return int(price_row["volume"] or 0) != int(volume or 0) or not all(
+            math.isclose(float(price_row[key]), float(stored), rel_tol=1e-6)
+            for key, stored in (("open", open_), ("high", high), ("low", low))
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
