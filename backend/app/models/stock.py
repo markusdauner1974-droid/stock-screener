@@ -23,7 +23,6 @@ class StockPrice(Base):
 
     __table_args__ = (
         UniqueConstraint("symbol", "date", name="uix_symbol_date"),
-        Index("idx_symbol_date", "symbol", "date"),
     )
 
 
