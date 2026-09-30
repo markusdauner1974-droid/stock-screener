@@ -63,6 +63,14 @@ def _registered_instrument_markets() -> Dict[str, str]:
         for instrument in instruments
     }
 
+PERIOD_DAYS = {"5y": 1825, "2y": 730, "1y": 365, "max": 3650}
+
+
+def period_days(period: str) -> int:
+    """Calendar days covered by a yfinance-style period; unknown periods mean 2y."""
+    return PERIOD_DAYS.get(period, 730)
+
+
 # Redis keys for warmup metadata
 WARMUP_METADATA_KEY = "cache:warmup:metadata"
 WARMUP_HEARTBEAT_KEY = "cache:warmup:heartbeat"
@@ -427,15 +435,7 @@ class PriceCacheService:
             # Calculate date range
             end_date = datetime.now().date()
 
-            # Support multiple periods with backward compatibility
-            period_days_map = {
-                "5y": 1825,  # 5 years
-                "2y": 730,   # 2 years
-                "1y": 365,   # 1 year
-                "max": 3650  # 10 years for max
-            }
-            days = period_days_map.get(period, 730)  # Default to 2y for backward compat
-            start_date = end_date - timedelta(days=days)
+            start_date = end_date - timedelta(days=period_days(period))
 
             # Query StockPrice table
             prices = db.query(StockPrice).filter(
@@ -513,14 +513,7 @@ class PriceCacheService:
         try:
             # Calculate date range
             end_date = datetime.now().date()
-            period_days_map = {
-                "5y": 1825,
-                "2y": 730,
-                "1y": 365,
-                "max": 3650
-            }
-            days = period_days_map.get(period, 730)
-            start_date = end_date - timedelta(days=days)
+            start_date = end_date - timedelta(days=period_days(period))
 
             chunk_size = max(1, int(getattr(settings, "price_cache_db_chunk_size", 250) or 250))
             total_chunks = (len(symbols) + chunk_size - 1) // chunk_size
@@ -795,11 +788,7 @@ class PriceCacheService:
             merged_data = merged_data.sort_index()
 
             # Trim to requested period
-            period_days_map = {
-                "5y": 1825, "2y": 730, "1y": 365, "max": 3650
-            }
-            days = period_days_map.get(period, 730)
-            cutoff_date = today - timedelta(days=days)
+            cutoff_date = today - timedelta(days=period_days(period))
 
             merged_data = merged_data[merged_data.index >= pd.Timestamp(cutoff_date)]
             merged_data = normalize_price_frame(merged_data)
