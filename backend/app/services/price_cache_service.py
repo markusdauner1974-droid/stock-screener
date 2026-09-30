@@ -1766,10 +1766,10 @@ class PriceCacheService:
             return 0
 
         # Persist first: fetch metadata must only vouch for committed rows. The
-        # batch is one transaction, so a failure skips Redis for every symbol
-        # and the older frame + metadata pair stays in place.
-        if also_store_db and not self._store_batch_in_database(batch_data):
-            return 0
+        # batch is one transaction; a failure raises before Redis is touched, so
+        # the older frame + metadata pair stays in place for every symbol.
+        if also_store_db:
+            self._store_batch_in_database(batch_data)
 
         stored = 0
 
@@ -1845,12 +1845,11 @@ class PriceCacheService:
         Writers split symbols between the US key (callers that omit the market)
         and the symbol's own market key, and a stale partial bar may sit under
         either. Overwrite both so neither keeps serving it; write the DB once,
-        first, and touch Redis only if it committed.
+        first (a failure raises before Redis is touched).
         """
         if not batch_data:
             return 0
-        if not self._store_batch_in_database(batch_data):
-            return 0
+        self._store_batch_in_database(batch_data)
         stored = self.store_batch_in_cache(batch_data, also_store_db=False)
         non_us: Dict[str, Dict[str, pd.DataFrame]] = {}
         for symbol, calendar_market in self._calendar_markets(list(batch_data)).items():
@@ -1860,7 +1859,7 @@ class PriceCacheService:
             self.store_batch_in_cache(group, also_store_db=False, market=calendar_market)
         return stored
 
-    def _store_batch_in_database(self, batch_data: Dict[str, pd.DataFrame]) -> bool:
+    def _store_batch_in_database(self, batch_data: Dict[str, pd.DataFrame]) -> None:
         """
         Store multiple symbols' price data in database in a single transaction.
 
@@ -1870,15 +1869,15 @@ class PriceCacheService:
         Args:
             batch_data: Dict mapping symbol to price DataFrame
 
-        Returns:
-            True once the transaction commits (or had nothing new). It is one
-            transaction, so success is all-or-nothing for the batch.
+        Raises:
+            The database error after rolling back. It is one transaction, so a
+            failure means nothing in the batch was persisted.
         """
         if not batch_data:
-            return False
+            return
         batch_data = normalize_price_batch(batch_data)
         if not batch_data:
-            return False
+            return
 
         db = self._session_factory()
 
@@ -1924,12 +1923,13 @@ class PriceCacheService:
                 )
             else:
                 logger.debug(f"No new rows to persist for batch of {len(batch_data)} symbols")
-            return True
 
         except Exception as e:
             logger.error(f"Error in batch database write: {e}", exc_info=True)
             db.rollback()
-            return False
+            # Refresh runners classify this (retrying transient DB errors) and
+            # mark the batch failed; swallowing it reported lost writes as done.
+            raise
 
         finally:
             db.close()
@@ -2466,12 +2466,22 @@ class PriceCacheService:
                     cached_data[symbol] = None
                     yfinance_failed += 1
             for group_market, batch_to_store in batch_to_store_by_market.items():
-                self._store_batch_in_cache_for_market(
-                    batch_to_store,
-                    also_store_db=True,
-                    market=group_market,
-                    period=period,
-                )
+                # A read path: the fetched frames are already in cached_data, so
+                # a failed write only means they are not cached for next time.
+                try:
+                    self._store_batch_in_cache_for_market(
+                        batch_to_store,
+                        also_store_db=True,
+                        market=group_market,
+                        period=period,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Could not persist %d fetched price frames (%s): %s",
+                        len(batch_to_store),
+                        group_market or "US",
+                        exc,
+                    )
 
         logger.info("yfinance batch fetch complete: %d success, %d failed", yfinance_success, yfinance_failed)
         return cached_data

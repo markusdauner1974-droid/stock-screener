@@ -92,6 +92,9 @@ def test_store_batch_in_cache_skips_non_finite_close_rows():
         def bulk_update_mappings(self, _model, _rows):
             raise AssertionError("No existing rows should be updated")
 
+        def flush(self):
+            pass
+
         def commit(self):
             pass
 

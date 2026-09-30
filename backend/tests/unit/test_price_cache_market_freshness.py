@@ -606,7 +606,7 @@ def test_refreshed_batch_overwrites_both_key_namespaces(session_factory, monkeyp
     redis = _DictRedis()
     service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 9, 0)), redis)
     db_writes = []
-    monkeypatch.setattr(service, "_store_batch_in_database", lambda batch: db_writes.append(set(batch)) or True)
+    monkeypatch.setattr(service, "_store_batch_in_database", lambda batch: db_writes.append(set(batch)))
     days = pd.bdate_range(end=pd.Timestamp("2026-07-03"), periods=5)
     frame = pd.DataFrame(
         {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Adj Close": 1.0, "Volume": 1},
@@ -703,15 +703,47 @@ _PRICE_WRITERS = {
 }
 
 
-@pytest.mark.parametrize("write", _PRICE_WRITERS.values(), ids=_PRICE_WRITERS.keys())
-def test_failed_db_write_leaves_redis_frame_and_metadata_untouched(session_factory, write):
+_BATCH_WRITERS = {"batch", "refreshed_batch"}
+
+
+@pytest.mark.parametrize("name", _PRICE_WRITERS)
+def test_failed_db_write_leaves_redis_frame_and_metadata_untouched(session_factory, name):
     # Writing the frame without fresh metadata would pair today's bar with the
     # older record, so a partial bar could pass as final; keep the old pair.
+    from sqlalchemy.exc import OperationalError
+
     redis = _DictRedis()
     service = _service(_commit_fails(session_factory), _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
 
-    write(service, _recent_frame())
+    if name in _BATCH_WRITERS:
+        # Refresh runners classify the error (retry transient ones) and mark the
+        # batch failed; swallowing it would report a lost write as refreshed.
+        with pytest.raises(OperationalError):
+            _PRICE_WRITERS[name](service, _recent_frame())
+    else:
+        _PRICE_WRITERS[name](service, _recent_frame())
 
+    assert redis.values == {}
+
+
+def test_bulk_fallback_still_returns_fetched_frames_when_db_write_fails(session_factory, monkeypatch):
+    import app.services.bulk_data_fetcher as bulk_module
+    import app.services.price_cache_service as module
+
+    monkeypatch.setattr(module, "get_bulk_redis_client", lambda: None)
+    redis = _DictRedis()
+    service = _service(_commit_fails(session_factory), _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+    frame = _recent_frame()
+
+    class _FakeFetcher:
+        def fetch_prices_in_batches(self, symbols, **kwargs):
+            return {symbol: {"has_error": False, "price_data": frame} for symbol in symbols}
+
+    monkeypatch.setattr(bulk_module, "BulkDataFetcher", _FakeFetcher)
+
+    result = service.get_many(["AAPL"], period="2y")
+
+    assert result["AAPL"] is not None
     assert redis.values == {}
 
 
