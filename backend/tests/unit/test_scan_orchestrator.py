@@ -881,6 +881,40 @@ class TestScanOrchestratorDataFlow:
         assert provider.last_requirements.needs_benchmark is True
         assert provider.last_requirements.needs_event_calendar is True
 
+    def test_merged_requirements_skip_setup_engine_when_disabled(self, monkeypatch):
+        class SetupEngine(make_fake_screener_class("setup_engine", 50.0, True)):
+            def get_data_requirements(self, criteria=None) -> DataRequirements:
+                return DataRequirements(needs_fundamentals=True)
+
+        registry = ScreenerRegistry()
+        registry.register(make_fake_screener_class("alpha", 75.0, True))
+        registry.register(SetupEngine)
+        orch = ScanOrchestrator(data_provider=FakeDataProvider({}), registry=registry)
+        names = ["alpha", "setup_engine"]
+
+        monkeypatch.setattr("app.scanners.scan_orchestrator.settings.setup_engine_enabled", False)
+        assert orch.get_merged_requirements(names).needs_fundamentals is False
+        monkeypatch.setattr("app.scanners.scan_orchestrator.settings.setup_engine_enabled", True)
+        assert orch.get_merged_requirements(names).needs_fundamentals is True
+
+    def test_pre_merged_requirements_skip_screener_merge(self):
+        class NeedsFundamentals(make_fake_screener_class("alpha", 75.0, True)):
+            def get_data_requirements(self, criteria=None) -> DataRequirements:
+                return DataRequirements(needs_fundamentals=True)
+
+        provider = FakeDataProvider({"TEST": _make_stock_data("TEST", n_days=260)})
+        registry = ScreenerRegistry()
+        registry.register(NeedsFundamentals)
+        orch = ScanOrchestrator(data_provider=provider, registry=registry)
+
+        orch.scan_stock_multi(
+            "TEST",
+            ["alpha"],
+            pre_merged_requirements=DataRequirements(needs_fundamentals=False),
+        )
+
+        assert provider.last_requirements.needs_fundamentals is False
+
     def test_pre_fetched_data_skips_provider(self):
         """When pre_fetched_data is passed, provider.prepare_data is not called."""
         stock_data = _make_stock_data("TEST", n_days=200)

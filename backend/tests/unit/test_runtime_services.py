@@ -134,3 +134,36 @@ def test_runtime_group_rank_service_uses_process_canonical_group_service():
 
     assert runtime._canonical_rs_runtime is None
     assert runtime.canonical_group_ranking_service() is not canonical
+
+
+def test_lazy_builds_once_under_concurrency_and_allows_reentrant_factories():
+    import threading
+    import time
+
+    runtime = build_runtime_services()
+    calls = []
+
+    def build_inner():
+        calls.append("inner")
+        return object()
+
+    def build_outer():
+        calls.append("outer")
+        time.sleep(0.05)  # widen the race window
+        # Factories call other accessors while holding the (reentrant) lock.
+        return (runtime._lazy("_rate_limiter", build_inner),)
+
+    results = []
+    threads = [
+        threading.Thread(
+            target=lambda: results.append(runtime._lazy("_eps_rating_service", build_outer))
+        )
+        for _ in range(8)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert calls == ["outer", "inner"]
+    assert all(result is results[0] for result in results)

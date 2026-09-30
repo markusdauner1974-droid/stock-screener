@@ -347,14 +347,11 @@ class PriceCacheService:
         technical input data. ``minimum_rows`` lets formula-specific consumers
         admit shorter but structurally valid histories.
         """
-        if minimum_rows == 50:
-            results = self._get_many_from_database(symbols, period)
-        else:
-            results = self._get_many_from_database(
-                symbols,
-                period,
-                minimum_rows=minimum_rows,
-            )
+        results = self._get_many_from_database(
+            symbols,
+            period,
+            minimum_rows=minimum_rows,
+        )
         fresh_results: Dict[str, Optional[pd.DataFrame]] = {}
         calendar_markets = self._calendar_markets(list(results))
 

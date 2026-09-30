@@ -89,3 +89,10 @@ def test_identical_older_bar_is_not_rewritten():
     )
 
     assert result == {"inserted": 1, "updated": 0}
+
+
+def test_stock_price_declares_no_index_duplicating_the_unique_constraint():
+    # #426: uix_symbol_date already indexes (symbol, date); no migration
+    # creates idx_symbol_date, so create_all/autogenerate must not add it.
+    assert [index.name for index in StockPrice.__table__.indexes
+            if [c.name for c in index.columns] == ["symbol", "date"]] == []

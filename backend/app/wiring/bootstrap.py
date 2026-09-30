@@ -6,7 +6,7 @@ from collections.abc import Callable, Iterator
 from contextvars import Token
 from dataclasses import dataclass
 from threading import RLock
-from typing import TYPE_CHECKING, TypeAlias
+from typing import TYPE_CHECKING, TypeAlias, TypeVar
 
 from fastapi import Request
 from sqlalchemy.orm import Session
@@ -99,6 +99,7 @@ if TYPE_CHECKING:
 
 
 SessionFactory: TypeAlias = Callable[[], Session]
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True)
@@ -148,240 +149,218 @@ class RuntimeServices:
     def session_factory(self) -> SessionFactory:
         return self._session_factory
 
-    def job_backend(self) -> JobBackend:
-        if self._job_backend is None:
+    def _lazy(self, attr: str, factory: Callable[[], _T]) -> _T:
+        """Build ``self.<attr>`` once (double-checked, reentrant lock).
+
+        Factories keep their imports local (import cycles, startup cost) and may
+        call other accessors while the lock is held, hence the RLock.
+        """
+        value = getattr(self, attr)
+        if value is None:
             with self._init_lock:
-                if self._job_backend is None:
-                    self._job_backend = CeleryJobBackend()
-        return self._job_backend
+                value = getattr(self, attr)
+                if value is None:
+                    value = factory()
+                    setattr(self, attr, value)
+        return value
+
+    def job_backend(self) -> JobBackend:
+        return self._lazy("_job_backend", CeleryJobBackend)
 
     def task_dispatcher(self) -> TaskDispatcher:
-        if self._task_dispatcher is None:
-            with self._init_lock:
-                if self._task_dispatcher is None:
-                    from app.infra.tasks.dispatcher import CeleryTaskDispatcher
+        def build():
+            from app.infra.tasks.dispatcher import CeleryTaskDispatcher
 
-                    self._task_dispatcher = CeleryTaskDispatcher()
-        return self._task_dispatcher
+            return CeleryTaskDispatcher()
+
+        return self._lazy("_task_dispatcher", build)
 
     def ui_snapshot_service(self) -> UISnapshotService:
-        if self._ui_snapshot_service is None:
-            with self._init_lock:
-                if self._ui_snapshot_service is None:
-                    from app.services.ui_snapshot_service import UISnapshotService
+        def build():
+            from app.services.ui_snapshot_service import UISnapshotService
 
-                    self._ui_snapshot_service = UISnapshotService(
-                        session_factory=self._session_factory
-                    )
-        return self._ui_snapshot_service
+            return UISnapshotService(session_factory=self._session_factory)
+
+        return self._lazy("_ui_snapshot_service", build)
 
     def cache_bundle(self) -> CacheBundle:
-        if self._cache_bundle is None:
-            with self._init_lock:
-                if self._cache_bundle is None:
-                    from app.services.benchmark_cache_service import (
-                        BenchmarkCacheService,
-                    )
-                    from app.services.fundamentals_cache_service import (
-                        FundamentalsCacheService,
-                    )
-                    from app.services.price_cache_service import PriceCacheService
+        def build():
+            from app.services.benchmark_cache_service import BenchmarkCacheService
+            from app.services.fundamentals_cache_service import (
+                FundamentalsCacheService,
+            )
+            from app.services.price_cache_service import PriceCacheService
 
-                    redis_client = get_redis_client()
-                    self._cache_bundle = CacheBundle(
-                        price=PriceCacheService(
-                            redis_client=redis_client,
-                            session_factory=self._session_factory,
-                        ),
-                        fundamentals=FundamentalsCacheService(
-                            redis_client=redis_client,
-                            session_factory=self._session_factory,
-                        ),
-                        benchmark=BenchmarkCacheService(
-                            redis_client=redis_client,
-                            session_factory=self._session_factory,
-                        ),
-                    )
-        return self._cache_bundle
+            redis_client = get_redis_client()
+            return CacheBundle(
+                price=PriceCacheService(
+                    redis_client=redis_client,
+                    session_factory=self._session_factory,
+                ),
+                fundamentals=FundamentalsCacheService(
+                    redis_client=redis_client,
+                    session_factory=self._session_factory,
+                ),
+                benchmark=BenchmarkCacheService(
+                    redis_client=redis_client,
+                    session_factory=self._session_factory,
+                ),
+            )
+
+        return self._lazy("_cache_bundle", build)
 
     def group_rank_service(self) -> IBDGroupRankService:
-        if self._group_rank_service is None:
-            with self._init_lock:
-                if self._group_rank_service is None:
-                    from app.scanners.criteria.relative_strength import (
-                        RelativeStrengthCalculator,
-                    )
-                    from app.services.group_rank_historical_calculator import (
-                        GroupRankHistoricalCalculator,
-                    )
-                    from app.services.group_rank_input_loader import (
-                        GroupRankInputLoader,
-                    )
-                    from app.services.group_rank_input_sources import (
-                        IBDIndustryTaxonomySource,
-                        SqlGroupRankMarketCapSource,
-                        StockUniverseGroupRankSource,
-                    )
-                    from app.services.group_rank_legacy_adapter import (
-                        LegacyGroupRankPrefetchAdapter,
-                    )
-                    from app.services.group_ranking_calculator import (
-                        GroupRankingCalculator,
-                    )
-                    from app.services.group_ranking_repository import (
-                        GroupRankingRepository,
-                    )
-                    from app.services.ibd_group_rank_service import IBDGroupRankService
+        def build():
+            from app.scanners.criteria.relative_strength import (
+                RelativeStrengthCalculator,
+            )
+            from app.services.group_rank_historical_calculator import (
+                GroupRankHistoricalCalculator,
+            )
+            from app.services.group_rank_input_loader import GroupRankInputLoader
+            from app.services.group_rank_input_sources import (
+                IBDIndustryTaxonomySource,
+                SqlGroupRankMarketCapSource,
+                StockUniverseGroupRankSource,
+            )
+            from app.services.group_rank_legacy_adapter import (
+                LegacyGroupRankPrefetchAdapter,
+            )
+            from app.services.group_ranking_calculator import GroupRankingCalculator
+            from app.services.group_ranking_repository import GroupRankingRepository
+            from app.services.ibd_group_rank_service import IBDGroupRankService
 
-                    cache_bundle = self.cache_bundle()
-                    input_loader = GroupRankInputLoader(
-                        price_cache=cache_bundle.price,
-                        benchmark_cache=cache_bundle.benchmark,
-                        universe_source=StockUniverseGroupRankSource(
-                            self.stock_universe_service()
-                        ),
-                        taxonomy_source=IBDIndustryTaxonomySource(),
-                        market_cap_source=SqlGroupRankMarketCapSource(),
-                    )
-                    ranking_calculator = GroupRankingCalculator(
-                        RelativeStrengthCalculator()
-                    )
-                    ranking_repository = GroupRankingRepository()
-                    legacy_adapter = LegacyGroupRankPrefetchAdapter()
-                    historical_calculator = GroupRankHistoricalCalculator(
-                        input_loader=input_loader,
-                        ranking_calculator=ranking_calculator,
-                        repository=ranking_repository,
-                        calendar_service=self.market_calendar_service(),
-                        legacy_adapter=legacy_adapter,
-                    )
-                    self._group_rank_service = IBDGroupRankService(
-                        price_cache=cache_bundle.price,
-                        benchmark_cache=cache_bundle.benchmark,
-                        canonical_group_service=self.canonical_group_ranking_service(),
-                        market_rs_repository=self.market_rs_run_repository(),
-                        market_rs_snapshot_service=(
-                            self.canonical_rs_runtime().snapshot_service()
-                        ),
-                        input_loader=input_loader,
-                        ranking_calculator=ranking_calculator,
-                        ranking_repository=ranking_repository,
-                        historical_calculator=historical_calculator,
-                        legacy_prefetch_adapter=legacy_adapter,
-                    )
-        return self._group_rank_service
+            cache_bundle = self.cache_bundle()
+            input_loader = GroupRankInputLoader(
+                price_cache=cache_bundle.price,
+                benchmark_cache=cache_bundle.benchmark,
+                universe_source=StockUniverseGroupRankSource(
+                    self.stock_universe_service()
+                ),
+                taxonomy_source=IBDIndustryTaxonomySource(),
+                market_cap_source=SqlGroupRankMarketCapSource(),
+            )
+            ranking_calculator = GroupRankingCalculator(RelativeStrengthCalculator())
+            ranking_repository = GroupRankingRepository()
+            legacy_adapter = LegacyGroupRankPrefetchAdapter()
+            historical_calculator = GroupRankHistoricalCalculator(
+                input_loader=input_loader,
+                ranking_calculator=ranking_calculator,
+                repository=ranking_repository,
+                calendar_service=self.market_calendar_service(),
+                legacy_adapter=legacy_adapter,
+            )
+            return IBDGroupRankService(
+                price_cache=cache_bundle.price,
+                benchmark_cache=cache_bundle.benchmark,
+                canonical_group_service=self.canonical_group_ranking_service(),
+                market_rs_repository=self.market_rs_run_repository(),
+                market_rs_snapshot_service=(
+                    self.canonical_rs_runtime().snapshot_service()
+                ),
+                input_loader=input_loader,
+                ranking_calculator=ranking_calculator,
+                ranking_repository=ranking_repository,
+                historical_calculator=historical_calculator,
+                legacy_prefetch_adapter=legacy_adapter,
+            )
+
+        return self._lazy("_group_rank_service", build)
 
     def canonical_group_ranking_service(self) -> CanonicalGroupRankingService:
         return self.canonical_rs_runtime().canonical_group_service()
 
     def canonical_rs_runtime(self) -> CanonicalRsRuntime:
-        if self._canonical_rs_runtime is None:
-            with self._init_lock:
-                if self._canonical_rs_runtime is None:
-                    from app.wiring.canonical_rs_runtime import CanonicalRsRuntime
+        def build():
+            from app.wiring.canonical_rs_runtime import CanonicalRsRuntime
 
-                    self._canonical_rs_runtime = CanonicalRsRuntime(
-                        session_factory=self._session_factory,
-                        market_calendar=self.market_calendar_service(),
-                        legacy_group_service_provider=self.group_rank_service,
-                    )
-        return self._canonical_rs_runtime
+            return CanonicalRsRuntime(
+                session_factory=self._session_factory,
+                market_calendar=self.market_calendar_service(),
+                legacy_group_service_provider=self.group_rank_service,
+            )
+
+        return self._lazy("_canonical_rs_runtime", build)
 
     def rrg_service(self) -> RRGService:
-        if self._rrg_service is None:
-            with self._init_lock:
-                if self._rrg_service is None:
-                    from app.services.market_taxonomy_service import (
-                        get_market_taxonomy_service,
-                    )
-                    from app.services.rrg_history_provider import (
-                        build_rrg_history_provider,
-                    )
-                    from app.services.rrg_service import RRGService
+        def build():
+            from app.services.market_taxonomy_service import (
+                get_market_taxonomy_service,
+            )
+            from app.services.rrg_history_provider import build_rrg_history_provider
+            from app.services.rrg_service import RRGService
 
-                    self._rrg_service = RRGService(
-                        history_provider=build_rrg_history_provider(
-                            group_rank_service=self.group_rank_service(),
-                            market_rs_repository=self.market_rs_run_repository(),
-                        ),
-                        taxonomy_service=get_market_taxonomy_service(),
-                    )
-        return self._rrg_service
+            return RRGService(
+                history_provider=build_rrg_history_provider(
+                    group_rank_service=self.group_rank_service(),
+                    market_rs_repository=self.market_rs_run_repository(),
+                ),
+                taxonomy_service=get_market_taxonomy_service(),
+            )
+
+        return self._lazy("_rrg_service", build)
 
     def task_registry_service(self) -> TaskRegistryService:
-        if self._task_registry_service is None:
-            with self._init_lock:
-                if self._task_registry_service is None:
-                    from app.services.task_registry_service import TaskRegistryService
+        def build():
+            from app.services.task_registry_service import TaskRegistryService
 
-                    self._task_registry_service = TaskRegistryService()
-        return self._task_registry_service
+            return TaskRegistryService()
+
+        return self._lazy("_task_registry_service", build)
 
     def data_fetch_lock(self) -> DataFetchLock:
-        if self._data_fetch_lock is None:
-            with self._init_lock:
-                if self._data_fetch_lock is None:
-                    from app.tasks.data_fetch_lock import DataFetchLock
+        def build():
+            from app.tasks.data_fetch_lock import DataFetchLock
 
-                    self._data_fetch_lock = DataFetchLock()
-        return self._data_fetch_lock
+            return DataFetchLock()
+
+        return self._lazy("_data_fetch_lock", build)
 
     def workload_coordination(self) -> WorkloadCoordination:
-        if self._workload_coordination is None:
-            with self._init_lock:
-                if self._workload_coordination is None:
-                    from app.tasks.workload_coordination import WorkloadCoordination
+        def build():
+            from app.tasks.workload_coordination import WorkloadCoordination
 
-                    self._workload_coordination = WorkloadCoordination()
-        return self._workload_coordination
+            return WorkloadCoordination()
+
+        return self._lazy("_workload_coordination", build)
 
     def groq_key_manager(self) -> GroqKeyManager:
-        if self._groq_key_manager is None:
-            with self._init_lock:
-                if self._groq_key_manager is None:
-                    from app.services.llm.groq_key_manager import (
-                        GroqKeyManager,
-                        _get_keys_from_settings,
-                    )
+        def build():
+            from app.services.llm.groq_key_manager import (
+                GroqKeyManager,
+                _get_keys_from_settings,
+            )
 
-                    self._groq_key_manager = GroqKeyManager(
-                        keys=_get_keys_from_settings() or []
-                    )
-        return self._groq_key_manager
+            return GroqKeyManager(keys=_get_keys_from_settings() or [])
+
+        return self._lazy("_groq_key_manager", build)
 
     def zai_key_manager(self) -> ZAIKeyManager:
-        if self._zai_key_manager is None:
-            with self._init_lock:
-                if self._zai_key_manager is None:
-                    from app.services.llm.zai_key_manager import (
-                        ZAIKeyManager,
-                        _get_keys_from_settings,
-                    )
+        def build():
+            from app.services.llm.zai_key_manager import (
+                ZAIKeyManager,
+                _get_keys_from_settings,
+            )
 
-                    self._zai_key_manager = ZAIKeyManager(
-                        keys=_get_keys_from_settings() or []
-                    )
-        return self._zai_key_manager
+            return ZAIKeyManager(keys=_get_keys_from_settings() or [])
+
+        return self._lazy("_zai_key_manager", build)
 
     def rate_limiter(self) -> RedisRateLimiter:
-        if self._rate_limiter is None:
-            with self._init_lock:
-                if self._rate_limiter is None:
-                    from app.services.rate_limiter import RedisRateLimiter
+        def build():
+            from app.services.rate_limiter import RedisRateLimiter
 
-                    self._rate_limiter = RedisRateLimiter()
-        return self._rate_limiter
+            return RedisRateLimiter()
+
+        return self._lazy("_rate_limiter", build)
 
     def market_calendar_service(self) -> MarketCalendarService:
-        if self._market_calendar_service is None:
-            with self._init_lock:
-                if self._market_calendar_service is None:
-                    from app.services.market_calendar_service import (
-                        MarketCalendarService,
-                    )
+        def build():
+            from app.services.market_calendar_service import MarketCalendarService
 
-                    self._market_calendar_service = MarketCalendarService()
-        return self._market_calendar_service
+            return MarketCalendarService()
+
+        return self._lazy("_market_calendar_service", build)
 
     def point_in_time_universe_service(self) -> PointInTimeUniverseService:
         return self.canonical_rs_runtime().point_in_time_universe_service()
@@ -414,175 +393,153 @@ class RuntimeServices:
         return self.canonical_rs_runtime().group_rank_snapshot_coordinator()
 
     def github_release_sync_service(self) -> GitHubReleaseSyncService:
-        if self._github_release_sync_service is None:
-            with self._init_lock:
-                if self._github_release_sync_service is None:
-                    from app.config import settings
-                    from app.services.github_release_sync_service import (
-                        GitHubReleaseSyncService,
-                    )
+        def build():
+            from app.config import settings
+            from app.services.github_release_sync_service import (
+                GitHubReleaseSyncService,
+            )
 
-                    self._github_release_sync_service = GitHubReleaseSyncService(
-                        api_base=settings.github_data_api_base,
-                    )
-        return self._github_release_sync_service
+            return GitHubReleaseSyncService(api_base=settings.github_data_api_base)
+
+        return self._lazy("_github_release_sync_service", build)
 
     def security_master_resolver(self) -> SecurityMasterResolver:
-        if self._security_master_resolver is None:
-            with self._init_lock:
-                if self._security_master_resolver is None:
-                    from app.services.security_master_service import (
-                        security_master_resolver,
-                    )
+        def build():
+            from app.services.security_master_service import security_master_resolver
 
-                    self._security_master_resolver = security_master_resolver
-        return self._security_master_resolver
+            return security_master_resolver
+
+        return self._lazy("_security_master_resolver", build)
 
     def eps_rating_service(self) -> EPSRatingService:
-        if self._eps_rating_service is None:
-            with self._init_lock:
-                if self._eps_rating_service is None:
-                    from app.services.eps_rating_service import EPSRatingService
+        def build():
+            from app.services.eps_rating_service import EPSRatingService
 
-                    self._eps_rating_service = EPSRatingService()
-        return self._eps_rating_service
+            return EPSRatingService()
+
+        return self._lazy("_eps_rating_service", build)
 
     def yfinance_service(self) -> YFinanceService:
-        if self._yfinance_service is None:
-            with self._init_lock:
-                if self._yfinance_service is None:
-                    from app.services.yfinance_service import YFinanceService
+        def build():
+            from app.services.yfinance_service import YFinanceService
 
-                    self._yfinance_service = YFinanceService(
-                        rate_limiter=self.rate_limiter(),
-                        eps_rating_service=self.eps_rating_service(),
-                    )
-        return self._yfinance_service
+            return YFinanceService(
+                rate_limiter=self.rate_limiter(),
+                eps_rating_service=self.eps_rating_service(),
+            )
+
+        return self._lazy("_yfinance_service", build)
 
     def finviz_service(self) -> FinvizService:
-        if self._finviz_service is None:
-            with self._init_lock:
-                if self._finviz_service is None:
-                    from app.services.finviz_service import FinvizService
+        def build():
+            from app.services.finviz_service import FinvizService
 
-                    self._finviz_service = FinvizService(
-                        rate_limiter=self.rate_limiter(),
-                    )
-        return self._finviz_service
+            return FinvizService(rate_limiter=self.rate_limiter())
+
+        return self._lazy("_finviz_service", build)
 
     def alphavantage_service(self) -> AlphaVantageService:
-        if self._alphavantage_service is None:
-            with self._init_lock:
-                if self._alphavantage_service is None:
-                    from app.services.alphavantage_service import AlphaVantageService
+        def build():
+            from app.services.alphavantage_service import AlphaVantageService
 
-                    self._alphavantage_service = AlphaVantageService()
-        return self._alphavantage_service
+            return AlphaVantageService()
+
+        return self._lazy("_alphavantage_service", build)
 
     def data_source_service(self) -> DataSourceService:
-        if self._data_source_service is None:
-            with self._init_lock:
-                if self._data_source_service is None:
-                    from app.services.data_source_service import DataSourceService
+        def build():
+            from app.services.data_source_service import DataSourceService
 
-                    self._data_source_service = DataSourceService(
-                        finviz_service=self.finviz_service(),
-                        yfinance_service=self.yfinance_service(),
-                        eps_rating_service=self.eps_rating_service(),
-                        rate_limiter=self.rate_limiter(),
-                        prefer_finviz=True,
-                        enable_fallback=True,
-                        strict_validation=True,
-                    )
-        return self._data_source_service
+            return DataSourceService(
+                finviz_service=self.finviz_service(),
+                yfinance_service=self.yfinance_service(),
+                eps_rating_service=self.eps_rating_service(),
+                rate_limiter=self.rate_limiter(),
+                prefer_finviz=True,
+                enable_fallback=True,
+                strict_validation=True,
+            )
+
+        return self._lazy("_data_source_service", build)
 
     def stock_universe_service(self) -> StockUniverseService:
-        if self._stock_universe_service is None:
-            with self._init_lock:
-                if self._stock_universe_service is None:
-                    from app.services.stock_universe_service import StockUniverseService
+        def build():
+            from app.services.stock_universe_service import StockUniverseService
 
-                    self._stock_universe_service = StockUniverseService()
-        return self._stock_universe_service
+            return StockUniverseService()
+
+        return self._lazy("_stock_universe_service", build)
 
     def ticker_validation_service(self) -> TickerValidationService:
-        if self._ticker_validation_service is None:
-            with self._init_lock:
-                if self._ticker_validation_service is None:
-                    from app.services.ticker_validation_service import (
-                        TickerValidationService,
-                    )
+        def build():
+            from app.services.ticker_validation_service import (
+                TickerValidationService,
+            )
 
-                    self._ticker_validation_service = TickerValidationService()
-        return self._ticker_validation_service
+            return TickerValidationService()
+
+        return self._lazy("_ticker_validation_service", build)
 
     def provider_snapshot_service(self) -> ProviderSnapshotService:
-        if self._provider_snapshot_service is None:
-            with self._init_lock:
-                if self._provider_snapshot_service is None:
-                    from app.services.provider_snapshot_service import (
-                        ProviderSnapshotService,
-                    )
+        def build():
+            from app.services.provider_snapshot_service import (
+                ProviderSnapshotService,
+            )
 
-                    cache_bundle = self.cache_bundle()
-                    self._provider_snapshot_service = ProviderSnapshotService(
-                        price_cache=cache_bundle.price,
-                        fundamentals_cache=cache_bundle.fundamentals,
-                        rate_limiter=self.rate_limiter(),
-                    )
-        return self._provider_snapshot_service
+            cache_bundle = self.cache_bundle()
+            return ProviderSnapshotService(
+                price_cache=cache_bundle.price,
+                fundamentals_cache=cache_bundle.fundamentals,
+                rate_limiter=self.rate_limiter(),
+            )
+
+        return self._lazy("_provider_snapshot_service", build)
 
     def daily_price_bundle_service(self) -> DailyPriceBundleService:
-        if self._daily_price_bundle_service is None:
-            with self._init_lock:
-                if self._daily_price_bundle_service is None:
-                    from app.services.daily_price_bundle_service import (
-                        DailyPriceBundleService,
-                    )
+        def build():
+            from app.services.daily_price_bundle_service import (
+                DailyPriceBundleService,
+            )
 
-                    self._daily_price_bundle_service = DailyPriceBundleService(
-                        market_calendar=self.market_calendar_service(),
-                    )
-        return self._daily_price_bundle_service
+            return DailyPriceBundleService(
+                market_calendar=self.market_calendar_service(),
+            )
+
+        return self._lazy("_daily_price_bundle_service", build)
 
     def hybrid_fundamentals_service(self) -> HybridFundamentalsService:
-        if self._hybrid_fundamentals_service is None:
-            with self._init_lock:
-                if self._hybrid_fundamentals_service is None:
-                    from app.services.hybrid_fundamentals_service import (
-                        HybridFundamentalsService,
-                    )
+        def build():
+            from app.services.hybrid_fundamentals_service import (
+                HybridFundamentalsService,
+            )
 
-                    self._hybrid_fundamentals_service = HybridFundamentalsService(
-                        price_cache=self.cache_bundle().price,
-                        finviz_service=self.finviz_service(),
-                    )
-        return self._hybrid_fundamentals_service
+            return HybridFundamentalsService(
+                price_cache=self.cache_bundle().price,
+                finviz_service=self.finviz_service(),
+            )
+
+        return self._lazy("_hybrid_fundamentals_service", build)
 
     def stock_data_provider(self) -> DataPrepStockDataProvider:
-        if self._stock_data_provider is None:
-            with self._init_lock:
-                if self._stock_data_provider is None:
-                    from app.infra.providers.stock_data import DataPrepStockDataProvider
+        def build():
+            from app.infra.providers.stock_data import DataPrepStockDataProvider
 
-                    self._stock_data_provider = DataPrepStockDataProvider(
-                        cache_bundle=self.cache_bundle(),
-                    )
-        return self._stock_data_provider
+            return DataPrepStockDataProvider(cache_bundle=self.cache_bundle())
+
+        return self._lazy("_stock_data_provider", build)
 
     def scan_orchestrator(self) -> ScanOrchestrator:
-        if self._scan_orchestrator is None:
-            with self._init_lock:
-                if self._scan_orchestrator is None:
-                    from app.scanners.scan_orchestrator import ScanOrchestrator
-                    from app.scanners.screener_registry import screener_registry
+        def build():
+            from app.scanners.scan_orchestrator import ScanOrchestrator
+            from app.scanners.screener_registry import screener_registry
 
-                    self._scan_orchestrator = ScanOrchestrator(
-                        data_provider=self.stock_data_provider(),
-                        registry=screener_registry,
-                        market_rs_reader=self.market_rs_reader(),
-                    )
-        return self._scan_orchestrator
+            return ScanOrchestrator(
+                data_provider=self.stock_data_provider(),
+                registry=screener_registry,
+                market_rs_reader=self.market_rs_reader(),
+            )
+
+        return self._lazy("_scan_orchestrator", build)
 
     def reset_for_tests(self) -> None:
         with self._init_lock:
