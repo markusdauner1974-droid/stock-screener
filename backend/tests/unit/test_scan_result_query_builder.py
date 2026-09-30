@@ -2,8 +2,8 @@
 
 These tests verify the query builder's public API (apply_filters,
 apply_sort_and_paginate) by checking the behavior of the _COLUMN_MAP,
-_JSON_FIELD_MAP, _JSON_SORT_NUMERIC, and _PYTHON_SORT_FIELDS constants
-and helper functions.
+_JSON_FIELD_MAP and _JSON_SORT_NUMERIC constants, the supported sort
+fields, and helper functions.
 """
 
 import pytest
@@ -19,8 +19,8 @@ from app.domain.scanning.filter_spec import (
 from app.infra.query.scan_result_query import (
     _FIELD_BINDINGS,
     _FILTER_FIELD_RESOLVER,
-    _PYTHON_SORT_FIELDS,
     apply_filters,
+    supported_sort_fields,
 )
 from app.infra.query.sql_filter_compiler import apply_sql_sort
 from app.models.scan_result import ScanResult
@@ -79,11 +79,12 @@ class TestColumnMapCoverage:
     def test_json_field_is_mapped(self, field):
         assert field in _JSON_FIELD_MAP, f"{field} should be in _JSON_FIELD_MAP"
 
-    @pytest.mark.parametrize("field", [
-        "stage_name", "ma_alignment", "vcp_detected", "passes_template",
-    ])
-    def test_python_sort_fields(self, field):
-        assert field in _PYTHON_SORT_FIELDS, f"{field} should be in _PYTHON_SORT_FIELDS"
+    def test_sort_support_is_exactly_the_sql_resolver(self):
+        # #421: a truncating in-Python sort used to be layered on top (and took
+        # priority even where SQL could sort, e.g. ma_alignment). The adapter now
+        # claims exactly what SQL sorts; stage_name has no SQL sort mapping.
+        assert supported_sort_fields() == _FILTER_FIELD_RESOLVER.supported_sort_fields
+        assert "stage_name" not in supported_sort_fields()
 
 
 class TestSetupEngineFieldCoverage:

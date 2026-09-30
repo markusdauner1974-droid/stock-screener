@@ -15,7 +15,6 @@ from app.domain.scanning.filter_expression_model import FilterExpression, QueryS
 from app.domain.scanning.models import FilterOptions, ResultPage, ScanResultItemDomain
 from app.domain.scanning.ports import ScanResultRepository, ScanResultRsAudit
 from app.infra.db.repositories.market_rs_repo import MarketRsRunRepository
-from app.infra.query import scan_result_query
 from app.infra.query.scan_result_query import (
     apply_filter_expression,
     apply_sort_all,
@@ -712,9 +711,7 @@ class SqlScanResultRepository(ScanResultRepository):
         q = _scan_results_query(self._session, scan_id)
         q = apply_filter_expression(q, spec.expression)
 
-        rows, total, _python_sorted = apply_sort_and_paginate(
-            q, spec.sort, spec.page,
-        )
+        rows, total = apply_sort_and_paginate(q, spec.sort, spec.page)
 
         items = tuple(
             _map_row_to_domain(
@@ -741,18 +738,6 @@ class SqlScanResultRepository(ScanResultRepository):
         page: PageSpec | None = None,
     ) -> tuple[tuple[str, ...], int]:
         """Return filtered/sorted symbols for navigation."""
-        # Python-sort fields read ScanResult.details, so we need the full row.
-        if scan_result_query.requires_python_sort(sort.field):
-            q = _scan_results_query(self._session, scan_id)
-            q = apply_filter_expression(q, expression)
-            if page is None:
-                rows = apply_sort_all(q, sort)
-                symbols = tuple(row[0].symbol for row in rows)
-                return symbols, len(symbols)
-            rows, total, _ = apply_sort_and_paginate(q, sort, page)
-            symbols = tuple(row[0].symbol for row in rows)
-            return symbols, total
-
         q = _scan_results_symbol_query(self._session, scan_id)
         q = apply_filter_expression(q, expression)
 
@@ -761,7 +746,7 @@ class SqlScanResultRepository(ScanResultRepository):
             symbols = tuple(symbol for (symbol,) in rows)
             return symbols, len(symbols)
 
-        rows, total, _ = apply_sort_and_paginate(q, sort, page)
+        rows, total = apply_sort_and_paginate(q, sort, page)
         symbols = tuple(symbol for (symbol,) in rows)
         return symbols, total
 
