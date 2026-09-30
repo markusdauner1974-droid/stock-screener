@@ -12,6 +12,7 @@ from datetime import date, datetime, timezone
 
 import pandas as pd
 import pytest
+from redis.exceptions import ResponseError as RedisResponseError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -86,7 +87,7 @@ class _DictRedis:
                 self.calls.append(("set", key, value))
                 return self
 
-            def execute(self):
+            def execute(self, raise_on_error=True):
                 results = []
                 for op, key, value in self.calls:
                     if op == "set":
@@ -301,30 +302,43 @@ def test_many_cached_only_fresh_reads_market_scoped_metadata(session_factory):
 class _CountingRedis(_DictRedis):
     """Counts direct GETs and pipeline executions to pin Redis round-trips."""
 
-    def __init__(self, values=None, *, fail_pipeline=False):
+    def __init__(self, values=None, *, fail_pipeline=False, error_keys=()):
         super().__init__(values)
         self.direct_gets = 0
         self.pipeline_executes = 0
         self.fail_pipeline = fail_pipeline
+        self.error_keys = set(error_keys)
 
     def get(self, key):
         self.direct_gets += 1
         return super().get(key)
 
     def pipeline(self):
-        inner = super().pipeline()
         redis = self
 
         class _CountingPipeline:
+            def __init__(self):
+                self.keys = []
+
             def get(self, key):
-                inner.get(key)
+                self.keys.append(key)
                 return self
 
-            def execute(self):
+            def execute(self, raise_on_error=True):
+                """Mirrors redis-py: command errors raise unless raise_on_error=False."""
                 redis.pipeline_executes += 1
                 if redis.fail_pipeline:
                     raise ConnectionError("redis down")
-                return inner.execute()
+                results = []
+                for key in self.keys:
+                    if key in redis.error_keys:
+                        error = RedisResponseError(f"WRONGTYPE {key}")
+                        if raise_on_error:
+                            raise error
+                        results.append(error)
+                    else:
+                        results.append(redis.values.get(key))
+                return results
 
         return _CountingPipeline()
 
@@ -363,6 +377,24 @@ def test_many_cached_only_fresh_keeps_redis_failure_behaviour(session_factory):
     result = service.get_many_cached_only_fresh(["0700.HK", "9988.HK", "AAPL"], period="2y")
 
     assert all(result[symbol] is not None for symbol in ("0700.HK", "9988.HK", "AAPL"))
+
+
+def test_many_cached_only_fresh_isolates_a_failing_metadata_key(session_factory):
+    """One corrupted key (e.g. WRONGTYPE) must not discard every other symbol's metadata."""
+    _store_bulk_prices(session_factory)
+    redis = _CountingRedis(
+        {
+            "price:US:9988.HK:fetch_meta": _meta(_utc(2026, 7, 3, 3, 0), legacy_flag=False),  # partial
+        },
+        error_keys={"price:US:0700.HK:fetch_meta"},
+    )
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+
+    result = service.get_many_cached_only_fresh(["0700.HK", "9988.HK", "AAPL"], period="2y")
+
+    assert result["9988.HK"] is None       # its partial marker is still honoured
+    assert result["0700.HK"] is not None   # only the failing key is treated as missing
+    assert result["AAPL"] is not None
 
 
 def test_latest_fetch_metadata_wins_across_key_namespaces(session_factory):

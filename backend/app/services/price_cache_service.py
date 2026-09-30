@@ -393,7 +393,9 @@ class PriceCacheService:
             for keys in keys_by_symbol.values():
                 for key in keys:
                     pipeline.get(key)
-            raw_results = iter(pipeline.execute())
+            # Per-command errors (e.g. WRONGTYPE on one corrupted key) come back in
+            # place, so only that key reads as missing, as the per-key reads did.
+            raw_results = iter(pipeline.execute(raise_on_error=False))
         except Exception as exc:
             logger.error("Error batch-reading fetch metadata: %s", exc, exc_info=True)
             return {}
@@ -944,7 +946,7 @@ class PriceCacheService:
 
     @staticmethod
     def _parse_fetch_metadata(raw: Any) -> Optional[Dict]:
-        if not raw:
+        if not raw or isinstance(raw, Exception):
             return None
         try:
             return json.loads(raw)
