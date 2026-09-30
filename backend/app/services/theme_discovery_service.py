@@ -330,6 +330,28 @@ class ThemeDiscoveryService:
             as_of_date=as_of_date,
         ).get(theme_cluster_id, self._empty_mention_metrics())
 
+    def _load_spy_returns(self, as_of_date: datetime) -> pd.Series:
+        """Daily SPY returns over the price-metrics lookback ending at ``as_of_date``.
+
+        Theme discovery is scoped to the US universe today (English-language
+        content sources); see app.domain.analytics.scope. When the feature
+        becomes market-aware, resolve the benchmark symbol via
+        BenchmarkCacheService.
+        """
+        date_lookback = as_of_date - timedelta(days=260)
+        spy_prices = self.db.query(StockPrice).filter(
+            StockPrice.symbol == "SPY",
+            StockPrice.date >= date_lookback.date(),
+            StockPrice.date <= as_of_date.date(),
+        ).order_by(StockPrice.date).all()
+
+        spy_df = pd.DataFrame([{"date": p.date, "close": p.close} for p in spy_prices])
+        if len(spy_df) == 0:
+            return pd.Series(dtype=float)
+        spy_df = spy_df.sort_values("date")
+        spy_df["return"] = spy_df["close"].pct_change(fill_method=None)
+        return spy_df.set_index("date")["return"]
+
     def calculate_price_metrics(self, theme_cluster_id: int, as_of_date: Optional[datetime] = None) -> dict:
         """
         Calculate price-based metrics for theme basket
@@ -410,23 +432,12 @@ class ThemeDiscoveryService:
         # Calculate basket returns (equal-weight)
         basket_returns = returns_df.mean(axis=1)
 
-        # Get SPY returns for comparison. Theme discovery is scoped to the
-        # US universe today (English-language content sources); see
-        # app.domain.analytics.scope. When the feature becomes market-aware,
-        # resolve the benchmark symbol via BenchmarkCacheService.
-        spy_prices = self.db.query(StockPrice).filter(
-            StockPrice.symbol == "SPY",
-            StockPrice.date >= date_lookback.date(),
-            StockPrice.date <= as_of_date.date(),
-        ).order_by(StockPrice.date).all()
-
-        spy_df = pd.DataFrame([{"date": p.date, "close": p.close} for p in spy_prices])
-        if len(spy_df) > 0:
-            spy_df = spy_df.sort_values("date")
-            spy_df["return"] = spy_df["close"].pct_change(fill_method=None)
-            spy_returns = spy_df.set_index("date")["return"]
+        # SPY is identical for every theme in a run; reuse the run's series (#419).
+        cached_spy = getattr(self, "_cached_spy_returns", None)
+        if cached_spy is not None and cached_spy[0] == as_of_date.date():
+            spy_returns = cached_spy[1]
         else:
-            spy_returns = pd.Series(dtype=float)
+            spy_returns = self._load_spy_returns(as_of_date)
 
         def _compound_return(series: pd.Series, periods: int) -> float:
             window = series.tail(periods).dropna()
@@ -776,18 +787,23 @@ class ThemeDiscoveryService:
     ) -> dict:
         from .theme_group_coordination import publication_scope
 
-        with self._fenced_legacy_mutation(
-            operation="metrics_refresh",
-            expected_authority_epoch=expected_authority_epoch,
-            auto_commit=True,
-        ) as (_write, payload):
-            with publication_scope(self.db):
-                self.__dict__.pop("groups", None)
-                result = self._update_all_theme_metrics(
-                    as_of_date, auto_commit=False
-                )
-            payload.update(result)
-        return result
+        try:
+            with self._fenced_legacy_mutation(
+                operation="metrics_refresh",
+                expected_authority_epoch=expected_authority_epoch,
+                auto_commit=True,
+            ) as (_write, payload):
+                with publication_scope(self.db):
+                    self.__dict__.pop("groups", None)
+                    result = self._update_all_theme_metrics(
+                        as_of_date, auto_commit=False
+                    )
+                payload.update(result)
+            return result
+        finally:
+            # The run's SPY series must not outlive the run: later calls on a
+            # reused instance have to see SPY rows written after it.
+            self.__dict__.pop("_cached_spy_returns", None)
 
     def _update_all_theme_metrics(
         self,
@@ -828,6 +844,8 @@ class ThemeDiscoveryService:
         date_30d = as_of_date - timedelta(days=30)
         self._cached_active_days_7d = self._count_active_ingestion_days(date_7d, as_of_date)
         self._cached_active_days_30d = self._count_active_ingestion_days(date_30d, as_of_date)
+        # The SPY benchmark series is the same for every theme (1 query, not N).
+        self._cached_spy_returns = (as_of_date.date(), self._load_spy_returns(as_of_date))
         mention_metrics_by_cluster = self._calculate_mention_metrics_batch(
             [cluster.id for cluster in clusters if cluster.id is not None],
             as_of_date=as_of_date,
