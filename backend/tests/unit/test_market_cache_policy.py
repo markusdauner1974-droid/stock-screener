@@ -225,9 +225,7 @@ def test_price_cache_batch_pipeline_fallback_preserves_market(monkeypatch):
     assert calls == [("0700.HK", "HK")]
 
 
-def test_price_cache_freshness_scans_new_and_legacy_fetch_meta_keys(monkeypatch):
-    import app.services.cache.price_cache_freshness as module
-
+def test_price_cache_freshness_scans_new_and_legacy_fetch_meta_keys():
     redis = _ScanningRedis(
         {
             "price:HK:0700.HK:fetch_meta": json.dumps({"needs_refresh_after_close": True}),
@@ -238,12 +236,12 @@ def test_price_cache_freshness_scans_new_and_legacy_fetch_meta_keys(monkeypatch)
         logger=type("Logger", (), {"info": lambda *args, **kwargs: None, "error": lambda *args, **kwargs: None})(),
         redis_client=redis,
         fetch_meta_key_template=("price:*:*:fetch_meta", "price:*:fetch_meta"),
-        get_expected_data_date=lambda: None,
-        get_fetch_metadata=lambda symbol: None,
+        get_expected_data_date=lambda market: None,
+        get_market_calendar=lambda: None,
+        resolve_calendar_markets=dict,
     )
-    monkeypatch.setattr(module, "get_eastern_now", lambda: datetime(2026, 5, 4, 17, 0, 0))
-    monkeypatch.setattr(module, "is_market_open", lambda now=None: False)
 
+    # Metadata without fetch_timestamp falls back to the stored flag.
     assert policy.get_stale_intraday_symbols() == ["0700.HK", "AAPL"]
     assert redis.matches == ["price:*:*:fetch_meta", "price:*:fetch_meta"]
 

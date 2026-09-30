@@ -177,7 +177,7 @@ def test_get_many_falls_back_to_db_when_redis_payload_normalizes_away():
     db_frame = _price_frame([100.0, 101.0], [date(2026, 6, 23), date(2026, 6, 24)])
     fallback_calls = []
 
-    service._get_expected_data_date = lambda: date(2026, 6, 24)  # type: ignore[assignment]
+    service._get_expected_data_date = lambda market=None: date(2026, 6, 24)  # type: ignore[assignment]
     service._get_many_from_database = lambda symbols, period: {  # type: ignore[assignment]
         symbol: (db_frame, date(2026, 6, 24)) for symbol in symbols
     }

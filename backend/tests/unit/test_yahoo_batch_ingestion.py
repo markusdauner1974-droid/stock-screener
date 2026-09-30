@@ -845,7 +845,8 @@ def test_price_cache_bulk_fallback_passes_market_to_batch_fetcher(monkeypatch):
     result = service._resolve_bulk_fallback(
         ["005930.KS"],
         period="7d",
-        expected_date=date(2026, 4, 29),
+        calendar_markets={"005930.KS": "KR"},
+        expected_by_market={"KR": date(2026, 4, 29)},
         now_et=datetime(2026, 4, 29, 16, 0),
     )
 
@@ -901,7 +902,8 @@ def test_price_cache_bulk_fallback_does_not_retry_without_market_on_type_error(m
         service._resolve_bulk_fallback(
             ["005930.KS"],
             period="7d",
-            expected_date=date(2026, 4, 29),
+            calendar_markets={"005930.KS": "KR"},
+        expected_by_market={"KR": date(2026, 4, 29)},
             now_et=datetime(2026, 4, 29, 16, 0),
         )
 
@@ -1044,7 +1046,7 @@ def test_get_many_reloads_after_close_if_redis_meta_marks_intraday_stale(monkeyp
     monkeypatch.setattr(module, "get_bulk_redis_client", lambda: None)
     monkeypatch.setattr(module, "get_eastern_now", lambda: datetime(2026, 3, 18, 17, 0, 0))
     monkeypatch.setattr(module, "is_market_open", lambda now=None: False)
-    monkeypatch.setattr(service, "_get_expected_data_date", lambda: date(2026, 3, 18))
+    monkeypatch.setattr(service, "_get_expected_data_date", lambda market=None: date(2026, 3, 18))
     monkeypatch.setattr(service, "_get_many_from_database", lambda symbols, period: {"AAPL": (None, None)})
     monkeypatch.setattr(service, "store_batch_in_cache", lambda batch_data, also_store_db=True: None)
 
@@ -1123,7 +1125,7 @@ def test_get_many_without_redis_uses_bulk_database_fallback(monkeypatch):
     bulk_db_lookup = MagicMock(return_value={"AAPL": (expected_df, date(2026, 3, 18))})
     monkeypatch.setattr(service, "_get_many_from_database", bulk_db_lookup)
     monkeypatch.setattr(service, "get_historical_data", MagicMock(side_effect=AssertionError("per-symbol fallback should not run")))
-    monkeypatch.setattr(service, "_get_expected_data_date", lambda: date(2026, 3, 18))
+    monkeypatch.setattr(service, "_get_expected_data_date", lambda market=None: date(2026, 3, 18))
     monkeypatch.setattr("app.services.price_cache_service.get_eastern_now", lambda: datetime(2026, 3, 18, 17, 0, 0))
 
     result = service.get_many(["AAPL"], period="2y")
@@ -1152,7 +1154,7 @@ def test_get_many_reads_market_scoped_redis_keys(monkeypatch):
 
     monkeypatch.setattr(module, "get_bulk_redis_client", lambda: None)
     monkeypatch.setattr(module, "get_eastern_now", lambda: datetime(2026, 3, 18, 17, 0, 0))
-    monkeypatch.setattr(service, "_get_expected_data_date", lambda: date(2026, 3, 18))
+    monkeypatch.setattr(service, "_get_expected_data_date", lambda market=None: date(2026, 3, 18))
 
     result = service.get_many(["0700.HK"], period="2y", market_by_symbol={"0700.HK": "HK"})
 
@@ -1210,7 +1212,8 @@ def test_bulk_fallback_writes_fetched_prices_to_symbol_market_scope(monkeypatch)
     result = service._resolve_bulk_fallback(
         ["0700.HK"],
         period="2y",
-        expected_date=date(2026, 3, 18),
+        calendar_markets={"0700.HK": "HK"},
+        expected_by_market={"HK": date(2026, 3, 18)},
         now_et=datetime(2026, 3, 18, 17, 0, 0),
         market_by_symbol={"0700.HK": "HK"},
     )
@@ -1252,7 +1255,8 @@ def test_bulk_fallback_warms_fresh_db_hits_to_inferred_symbol_market(monkeypatch
     result = service._resolve_bulk_fallback(
         ["0700.HK"],
         period="2y",
-        expected_date=date(2026, 3, 18),
+        calendar_markets={"0700.HK": "HK"},
+        expected_by_market={"HK": date(2026, 3, 18)},
         now_et=datetime(2026, 3, 18, 17, 0, 0),
     )
 
@@ -1271,11 +1275,11 @@ def test_get_cached_only_fresh_requires_requested_session(monkeypatch):
         "_get_from_database",
         lambda symbol, period: (frame, date(2026, 3, 20)),
     )
-    monkeypatch.setattr(service, "_is_data_fresh", lambda _last: True)
+    monkeypatch.setattr(service, "_is_data_fresh", lambda _last, **_: True)
     monkeypatch.setattr(
         service,
         "_is_intraday_data_stale",
-        lambda _symbol: False,
+        lambda _symbol, **_: False,
     )
 
     assert service.get_cached_only_fresh(
@@ -1299,11 +1303,11 @@ def test_get_cached_only_fresh_required_session_bypasses_global_freshness(monkey
         "_get_from_database",
         lambda symbol, period: (frame, date(2026, 3, 20)),
     )
-    monkeypatch.setattr(service, "_is_data_fresh", lambda _last: False)
+    monkeypatch.setattr(service, "_is_data_fresh", lambda _last, **_: False)
     monkeypatch.setattr(
         service,
         "_is_intraday_data_stale",
-        lambda _symbol: False,
+        lambda _symbol, **_: False,
     )
 
     assert service.get_cached_only_fresh(
@@ -1332,11 +1336,11 @@ def test_get_many_cached_only_fresh_requires_requested_session(monkeypatch):
             "MSFT": (missing_target, date(2026, 3, 20)),
         },
     )
-    monkeypatch.setattr(service, "_is_data_fresh", lambda _last: True)
+    monkeypatch.setattr(service, "_is_data_fresh", lambda _last, **_: True)
     monkeypatch.setattr(
         service,
         "_is_intraday_data_stale",
-        lambda _symbol: False,
+        lambda _symbol, **_: False,
     )
 
     result = service.get_many_cached_only_fresh(
@@ -1363,11 +1367,11 @@ def test_get_many_cached_only_fresh_required_session_bypasses_global_freshness(m
             "6758.T": (missing_target, date(2026, 3, 19)),
         },
     )
-    monkeypatch.setattr(service, "_is_data_fresh", lambda _last: False)
+    monkeypatch.setattr(service, "_is_data_fresh", lambda _last, **_: False)
     monkeypatch.setattr(
         service,
         "_is_intraday_data_stale",
-        lambda _symbol: False,
+        lambda _symbol, **_: False,
     )
 
     result = service.get_many_cached_only_fresh(
@@ -1393,7 +1397,7 @@ def test_get_many_cached_only_fresh_filters_stale_database_rows(monkeypatch):
             "NVDA": (None, None),
         },
     )
-    monkeypatch.setattr(service, "_is_data_fresh", lambda last_date: last_date == date(2026, 3, 18))
+    monkeypatch.setattr(service, "_is_data_fresh", lambda last_date, **_: last_date == date(2026, 3, 18))
 
     result = service.get_many_cached_only_fresh(["AAPL", "MSFT", "NVDA"], period="2y")
 

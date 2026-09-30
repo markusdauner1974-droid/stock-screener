@@ -1,12 +1,40 @@
-"""Freshness and staleness policy for price cache hot paths."""
+"""Freshness and staleness policy for price cache hot paths.
+
+Decisions follow each symbol's own market calendar (``MarketCalendarService``).
+A cached bar is partial when it was fetched while its market's session was
+open; it becomes stale once that session has completed. The verdict is derived
+from ``fetch_timestamp`` rather than the stored ``needs_refresh_after_close``
+flag, so metadata written by the old US-clock writer is re-judged correctly.
+"""
 
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, time
-from typing import Callable, Dict, Optional, Sequence
+from datetime import date, datetime, time, timedelta
+from time import monotonic
+from typing import Callable, Dict, Mapping, Optional, Sequence
 
-from ...utils.market_hours import get_eastern_now, is_market_open
+from ...utils.market_hours import EASTERN, get_eastern_now, is_market_open
+
+US_MARKET = "US"
+# Matches MarketCalendarService.last_completed_trading_day: a session's bar is
+# final 30 minutes after its close.
+SESSION_SETTLEMENT_BUFFER = timedelta(minutes=30)
+# How long a clock-based "last completed session" answer is reused. It only
+# changes at session boundaries, so a few seconds of reuse is invisible.
+LAST_COMPLETED_REUSE_SECONDS = 5.0
+
+
+def fetched_at(meta: Mapping) -> Optional[datetime]:
+    """Aware fetch time from metadata; legacy naive timestamps were written in ET."""
+    raw = meta.get("fetch_timestamp")
+    if not raw:
+        return None
+    try:
+        value = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    return value if value.tzinfo is not None else EASTERN.localize(value)
 
 
 class PriceCacheFreshnessPolicy:
@@ -18,8 +46,9 @@ class PriceCacheFreshnessPolicy:
         logger,
         redis_client,
         fetch_meta_key_template: str | Sequence[str],
-        get_expected_data_date: Callable[[], Optional[date]],
-        get_fetch_metadata: Callable[[str], Optional[Dict]],
+        get_expected_data_date: Callable[[str], Optional[date]],
+        get_market_calendar: Callable[[], object],
+        resolve_calendar_markets: Callable[[Mapping[str, str]], Dict[str, str]],
     ) -> None:
         self._logger = logger
         self._redis_client = redis_client
@@ -28,58 +57,109 @@ class PriceCacheFreshnessPolicy:
         else:
             self._fetch_meta_key_templates = tuple(fetch_meta_key_template)
         self._get_expected_data_date = get_expected_data_date
-        self._get_fetch_metadata = get_fetch_metadata
+        self._get_market_calendar = get_market_calendar
+        self._resolve_calendar_markets = resolve_calendar_markets
+        # Calendar calls cost ~1-2 ms and bulk paths judge thousands of symbols.
+        # A session's settlement cutoff never changes once known; the last
+        # completed session only moves at session boundaries.
+        self._settlement_cutoffs: Dict[tuple[str, date], Optional[datetime]] = {}
+        self._last_completed_memo: Dict[str, tuple[Optional[datetime], float, date]] = {}
 
-    def is_data_fresh(self, last_date: date | None) -> bool:
-        """Return True when cached data is fresh according to trading-day policy."""
+    def last_completed_trading_day(self, market: str, now: Optional[datetime] = None) -> date:
+        """Calendar's last completed session, reused for the same ``now`` or briefly for the clock."""
+        tick = monotonic()
+        memo = self._last_completed_memo.get(market)
+        if memo is not None:
+            memo_now, memo_tick, value = memo
+            if now is not None and memo_now == now:
+                return value
+            if now is None and memo_now is None and tick - memo_tick < LAST_COMPLETED_REUSE_SECONDS:
+                return value
+        value = self._get_market_calendar().last_completed_trading_day(market, now)
+        self._last_completed_memo[market] = (now, tick, value)
+        return value
+
+    def is_data_fresh(self, last_date: date | None, market: str = US_MARKET) -> bool:
+        """Return True when cached data covers the market's last completed session."""
         if last_date is None:
             return False
-        expected = self._get_expected_data_date()
+        expected = self._get_expected_data_date(market)
         if expected is None:
             return False
         is_fresh = last_date >= expected
         if not is_fresh:
-            self._logger.debug("Data is stale (last: %s, expected: %s)", last_date, expected)
+            self._logger.debug(
+                "Data is stale for %s (last: %s, expected: %s)", market, last_date, expected
+            )
         return is_fresh
+
+    def partial_session_day(self, fetch_time: datetime, market: str) -> Optional[date]:
+        """Trading day whose bar a fetch at ``fetch_time`` may hold only partially, else None.
+
+        A fetch on trading day D before D's close plus the settlement buffer can
+        hold an in-progress bar for D (including during a lunch break). Calendar
+        errors propagate to the caller.
+        """
+        calendar = self._get_market_calendar()
+        session_day = calendar.market_now(market, fetch_time).date()
+        key = (market, session_day)
+        if key not in self._settlement_cutoffs:
+            self._settlement_cutoffs[key] = (
+                calendar.session_close(market, session_day) + SESSION_SETTLEMENT_BUFFER
+                if calendar.is_trading_day(market, session_day)
+                else None
+            )
+        final_after = self._settlement_cutoffs[key]
+        return session_day if final_after is not None and fetch_time < final_after else None
 
     def is_fetch_metadata_stale(
         self,
-        meta: Optional[Dict],
+        meta: Optional[Mapping],
         *,
-        now_et: Optional[datetime] = None,
+        market: str = US_MARKET,
+        now: Optional[datetime] = None,
     ) -> bool:
-        """Return True when same-day intraday fetch metadata is stale after close."""
-        if not meta or not meta.get("needs_refresh_after_close", False):
+        """Return True when the cached bar was fetched mid-session and that session has closed."""
+        if not meta:
             return False
-        now_et = now_et or get_eastern_now()
+        fetch_time = fetched_at(meta)
+        if fetch_time is None:
+            return bool(meta.get("needs_refresh_after_close", False))
+        try:
+            session_day = self.partial_session_day(fetch_time, market)
+            if session_day is None:
+                return False
+            return self.last_completed_trading_day(market, now) >= session_day
+        except Exception as exc:
+            if market == US_MARKET:
+                return self._legacy_us_metadata_stale(meta, now)
+            self._logger.warning(
+                "Calendar unavailable for %s freshness; treating fetch metadata as stale: %s",
+                market,
+                exc,
+            )
+            return True
+
+    @staticmethod
+    def _legacy_us_metadata_stale(meta: Mapping, now: Optional[datetime]) -> bool:
+        """Pre-calendar US rule, kept as the fallback when the US calendar is unavailable."""
+        if not meta.get("needs_refresh_after_close", False):
+            return False
+        if now is None:
+            now_et = get_eastern_now()
+        else:
+            now_et = now.astimezone(EASTERN) if now.tzinfo else now
         if is_market_open(now_et):
             return False
         return now_et.time() >= time(16, 30)
 
-    def is_intraday_data_stale(self, symbol: str) -> bool:
-        """Return True when symbol was fetched intraday and now requires refresh."""
-        meta = self._get_fetch_metadata(symbol)
-        is_stale = self.is_fetch_metadata_stale(meta)
-        if is_stale:
-            self._logger.debug(
-                "%s: intraday data is stale (fetched during market, now after close)",
-                symbol,
-            )
-        return is_stale
-
-    def get_stale_intraday_symbols(self) -> list[str]:
-        """Return all symbols with post-close stale intraday metadata."""
+    def get_stale_intraday_symbols(self, *, now: Optional[datetime] = None) -> list[str]:
+        """Return all symbols whose cached bar was fetched mid-session in a now-closed session."""
         if not self._redis_client:
             return []
         try:
-            now_et = get_eastern_now()
-            if is_market_open(now_et):
-                return []
-            if now_et.time() < time(16, 30):
-                return []
-
             all_keys = []
-            all_symbols = []
+            key_market_by_symbol: Dict[str, str] = {}
             seen_key_strings = set()
 
             for template in self._fetch_meta_key_templates:
@@ -94,11 +174,13 @@ class PriceCacheFreshnessPolicy:
                         seen_key_strings.add(key_str)
                         parts = key_str.split(":")
                         if len(parts) == 3:
-                            all_keys.append(key)
-                            all_symbols.append(parts[1])
+                            symbol, key_market = parts[1], US_MARKET
                         elif len(parts) == 4:
-                            all_keys.append(key)
-                            all_symbols.append(parts[2])
+                            symbol, key_market = parts[2], parts[1]
+                        else:
+                            continue
+                        all_keys.append((key, symbol))
+                        key_market_by_symbol.setdefault(symbol, key_market)
                     if cursor == 0:
                         break
 
@@ -106,20 +188,25 @@ class PriceCacheFreshnessPolicy:
                 return []
 
             pipeline = self._redis_client.pipeline()
-            for key in all_keys:
+            for key, _symbol in all_keys:
                 pipeline.get(key)
             meta_values = pipeline.execute()
+            calendar_markets = self._resolve_calendar_markets(key_market_by_symbol)
 
             stale_symbols: list[str] = []
-            for symbol, meta_json in zip(all_symbols, meta_values):
-                if not meta_json:
+            for (_key, symbol), meta_json in zip(all_keys, meta_values):
+                if not meta_json or symbol in stale_symbols:
                     continue
                 try:
                     meta = json.loads(meta_json)
-                    if meta.get("needs_refresh_after_close", False):
-                        stale_symbols.append(symbol)
                 except (json.JSONDecodeError, ValueError, TypeError):
                     continue
+                if self.is_fetch_metadata_stale(
+                    meta,
+                    market=calendar_markets.get(symbol, US_MARKET),
+                    now=now,
+                ):
+                    stale_symbols.append(symbol)
 
             self._logger.info(
                 "Found %s symbols with stale intraday data",
