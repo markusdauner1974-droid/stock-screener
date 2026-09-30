@@ -92,6 +92,9 @@ def test_store_batch_in_cache_skips_non_finite_close_rows():
         def bulk_update_mappings(self, _model, _rows):
             raise AssertionError("No existing rows should be updated")
 
+        def flush(self):
+            pass
+
         def commit(self):
             pass
 
@@ -124,7 +127,7 @@ def test_fetch_full_and_cache_uses_cleaned_price_frame_for_redis_db_and_return()
 
     service._fetch_direct_historical_data = lambda symbol, period: raw  # type: ignore[assignment]
     service._store_recent_in_redis = lambda symbol, data, market=None, **_: captured.setdefault("redis", data)  # type: ignore[assignment]
-    service._store_in_database = lambda symbol, data: captured.setdefault("db", data)  # type: ignore[assignment]
+    service._store_in_database = lambda symbol, data: captured.setdefault("db", data) is not None  # type: ignore[assignment]
 
     result = service._fetch_full_and_cache("SPY", "2y")
 
@@ -145,7 +148,7 @@ def test_incremental_merge_uses_cleaned_price_frame_for_redis_db_and_return():
 
     service._fetch_direct_historical_data = lambda symbol, period: raw_incremental  # type: ignore[assignment]
     service._store_recent_in_redis = lambda symbol, data, market=None, **_: captured.setdefault("redis", data)  # type: ignore[assignment]
-    service._store_in_database = lambda symbol, data: captured.setdefault("db", data)  # type: ignore[assignment]
+    service._store_in_database = lambda symbol, data: captured.setdefault("db", data) is not None  # type: ignore[assignment]
 
     result = service._fetch_incremental_and_merge(
         "SPY",

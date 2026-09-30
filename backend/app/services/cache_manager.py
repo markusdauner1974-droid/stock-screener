@@ -161,6 +161,7 @@ class CacheManager:
 
             logger.info(f"Batch {batch_num + 1}/{total_batches}: Bulk fetching {len(batch)} symbols...")
 
+            fetch_failures: set[str] = set()
             try:
                 bulk_data = bulk_fetcher.fetch_prices_in_batches(
                     batch,
@@ -174,16 +175,17 @@ class CacheManager:
                         price_df = data['price_data']
                         if price_df is not None and not price_df.empty:
                             batch_to_store[symbol] = price_df
-                            stats['successful'] += 1
-                            logger.debug(f"✓ {symbol}: Cached {len(price_df)} rows")
+                            logger.debug(f"✓ {symbol}: Fetched {len(price_df)} rows")
                         else:
                             stats['failed'] += 1
                             batch_failed += 1
+                            fetch_failures.add(symbol)
                             stats['errors'].append(f"{symbol}: Empty data")
                             logger.debug(f"✗ {symbol}: Empty data")
                     else:
                         stats['failed'] += 1
                         batch_failed += 1
+                        fetch_failures.add(symbol)
                         error_msg = data.get('error', 'No data')
                         stats['errors'].append(f"{symbol}: {error_msg}")
                         logger.debug(f"✗ {symbol}: {error_msg}")
@@ -194,6 +196,8 @@ class CacheManager:
                         also_store_db=True,
                         period=period,
                     )
+                # Count only once stored: a store that raises persisted nothing.
+                stats['successful'] += len(batch_to_store)
 
                 # Progress logging
                 logger.info(
@@ -221,8 +225,10 @@ class CacheManager:
 
             except Exception as e:
                 logger.error(f"Error warming batch {batch_num + 1}: {e}", exc_info=True)
-                # Mark all symbols in this batch as failed
+                # Mark the rest of this batch failed (fetch failures are counted)
                 for symbol in batch:
+                    if symbol in fetch_failures:
+                        continue
                     stats['failed'] += 1
                     stats['errors'].append(f"{symbol}: Batch error - {str(e)}")
 

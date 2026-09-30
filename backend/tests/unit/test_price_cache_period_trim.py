@@ -162,7 +162,7 @@ def test_young_stock_cut_for_five_years_is_served_from_redis():
 def _store_provider_frame(service: PriceCacheService, writer: str, frame: pd.DataFrame, period: str) -> None:
     if writer == "single_fetch":
         service._fetch_direct_historical_data = lambda symbol, period: frame  # type: ignore[assignment]
-        service._store_in_database = lambda symbol, data: None  # type: ignore[assignment]
+        service._store_in_database = lambda symbol, data: True  # type: ignore[assignment]
         service._fetch_full_and_cache("AAPL", period)
     elif writer == "batch":
         service.store_batch_in_cache({"AAPL": frame}, also_store_db=False, period=period)
@@ -217,7 +217,7 @@ def test_incremental_merge_of_a_five_year_database_frame_keeps_its_coverage():
     db_frame = _five_year_frame(None)
     service, db_reads = _db_backed_service(db_frame)
     service._fetch_direct_historical_data = lambda symbol, period: db_frame.iloc[-3:]  # type: ignore[assignment]
-    service._store_in_database = lambda symbol, data: None  # type: ignore[assignment]
+    service._store_in_database = lambda symbol, data: True  # type: ignore[assignment]
     cached = db_frame.iloc[:-1]
 
     service._fetch_incremental_and_merge("AAPL", "5y", cached, cached.index[-1].date())
