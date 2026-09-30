@@ -337,6 +337,33 @@ def test_unscoped_bulk_get_consults_symbol_market_metadata(session_factory, monk
     assert fetched == ["0700.HK"]
 
 
+def test_scoped_bulk_get_consults_unscoped_metadata(session_factory, monkeypatch):
+    """The daily refresh writes US-key metadata; a scoped HK read must still see it."""
+    import app.services.bulk_data_fetcher as bulk_module
+    import app.services.price_cache_service as module
+
+    _store_hk_prices(session_factory, "0700.HK", date(2026, 7, 3))
+    redis = _DictRedis({
+        "price:US:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 3, 0), legacy_flag=False),  # 11:00 HKT
+    })
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+    monkeypatch.setattr(module, "get_bulk_redis_client", lambda: None)
+    monkeypatch.setattr(service, "_store_batch_in_cache_for_market", lambda *args, **kwargs: 0)
+    fetched: list[str] = []
+
+    class _FakeFetcher:
+        def fetch_prices_in_batches(self, symbols, **kwargs):
+            fetched.extend(symbols)
+            return {symbol: {"has_error": True, "error": "stub"} for symbol in symbols}
+
+    monkeypatch.setattr(bulk_module, "BulkDataFetcher", _FakeFetcher)
+
+    service.get_many(["0700.HK"], period="2y", market_by_symbol={"0700.HK": "HK"})
+
+    assert fetched == ["0700.HK"]
+    assert service.get_cached_only_fresh("0700.HK", period="2y", market="HK") is None
+
+
 def test_redis_payload_is_judged_by_its_own_namespace_metadata(session_factory, monkeypatch):
     """A partial US-key frame must not borrow freshness from newer HK-key metadata."""
     import pickle

@@ -965,7 +965,7 @@ class PriceCacheService:
         # own market key; judge the most recent write.
         meta = latest_fetch_metadata(
             self._get_fetch_metadata(symbol, market=key_market)
-            for key_market in dict.fromkeys((str(market or "US").upper(), calendar_market))
+            for key_market in self._metadata_key_markets(market, calendar_market)
         )
         if not meta:
             return False
@@ -1859,6 +1859,16 @@ class PriceCacheService:
             return market_by_symbol[symbol]
         return market
 
+    @staticmethod
+    def _metadata_key_markets(key_market: str | None, calendar_market: str) -> tuple[str, ...]:
+        """Key namespaces that may hold a symbol's fetch metadata, the caller's key first.
+
+        Writers use either no market (the US key, e.g. the daily refresh) or the
+        symbol's own market (bulk fallback), so DB-freshness checks read all of
+        them; the first entry is the one paired with the caller's Redis frame.
+        """
+        return tuple(dict.fromkeys((str(key_market or "US").upper(), calendar_market, "US")))
+
     def _calendar(self) -> "MarketCalendarService":
         if self._market_calendar is None:
             from ..wiring.bootstrap import get_market_calendar_service
@@ -2028,15 +2038,13 @@ class PriceCacheService:
                         )
                         redis_key = self._redis_recent_key(symbol, market=symbol_market)
                         pipeline.get(redis_key)
-                        pipeline.get(self._redis_fetch_meta_key(symbol, market=symbol_market))
-                        # Writers split metadata between the caller's key and the
-                        # symbol's own market key; read both when they differ.
-                        calendar_market = calendar_markets[symbol]
-                        if calendar_market != str(symbol_market or "US").upper():
-                            pipeline.get(self._redis_fetch_meta_key(symbol, market=calendar_market))
-                            meta_key_counts.append(2)
-                        else:
-                            meta_key_counts.append(1)
+                        # Every namespace a writer may have used; the caller's key first.
+                        meta_key_markets = self._metadata_key_markets(
+                            symbol_market, calendar_markets[symbol]
+                        )
+                        for meta_key_market in meta_key_markets:
+                            pipeline.get(self._redis_fetch_meta_key(symbol, market=meta_key_market))
+                        meta_key_counts.append(len(meta_key_markets))
                     chunk_results = pipeline.execute()
                 except (redis.exceptions.TimeoutError, redis.exceptions.ConnectionError, OSError) as pipe_err:
                     logger.warning(

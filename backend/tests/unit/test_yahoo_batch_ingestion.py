@@ -1149,7 +1149,7 @@ def test_get_many_reads_market_scoped_redis_keys(monkeypatch):
         },
         index=pd.date_range(end="2026-03-18", periods=200),
     )
-    fake_redis = _FakeRedis([pickle.dumps(data), json.dumps({"needs_refresh_after_close": False})])
+    fake_redis = _FakeRedis([pickle.dumps(data), json.dumps({"needs_refresh_after_close": False}), None])
     service = PriceCacheService(redis_client=fake_redis, session_factory=lambda: MagicMock())
 
     monkeypatch.setattr(module, "get_bulk_redis_client", lambda: None)
@@ -1162,6 +1162,8 @@ def test_get_many_reads_market_scoped_redis_keys(monkeypatch):
     assert fake_redis.pipeline_instance.keys == [
         "price:HK:0700.HK:recent",
         "price:HK:0700.HK:fetch_meta",
+        # Unscoped writers (e.g. the daily refresh) stamp the US key.
+        "price:US:0700.HK:fetch_meta",
     ]
 
 
