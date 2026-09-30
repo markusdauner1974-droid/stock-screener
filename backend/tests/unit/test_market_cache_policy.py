@@ -217,7 +217,7 @@ def test_price_cache_batch_pipeline_fallback_preserves_market(monkeypatch):
     monkeypatch.setattr(
         service,
         "_store_recent_in_redis",
-        lambda symbol, payload, market=None: calls.append((symbol, market)),
+        lambda symbol, payload, market=None, **_: calls.append((symbol, market)),
     )
 
     service.store_batch_in_cache({"0700.HK": data}, also_store_db=False, market="HK")

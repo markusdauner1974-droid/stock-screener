@@ -192,6 +192,7 @@ class CacheManager:
                     self.price_cache.store_batch_in_cache(
                         batch_to_store,
                         also_store_db=True,
+                        period=period,
                     )
 
                 # Progress logging

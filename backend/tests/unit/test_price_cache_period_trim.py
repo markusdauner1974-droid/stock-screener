@@ -159,6 +159,60 @@ def test_young_stock_cut_for_five_years_is_served_from_redis():
     pd.testing.assert_frame_equal(result, db_frame)
 
 
+def _store_provider_frame(service: PriceCacheService, writer: str, frame: pd.DataFrame, period: str) -> None:
+    if writer == "single_fetch":
+        service._fetch_direct_historical_data = lambda symbol, period: frame  # type: ignore[assignment]
+        service._store_in_database = lambda symbol, data: None  # type: ignore[assignment]
+        service._fetch_full_and_cache("AAPL", period)
+    elif writer == "batch":
+        service.store_batch_in_cache({"AAPL": frame}, also_store_db=False, period=period)
+    else:
+        service._store_batch_in_cache_for_market(
+            {"AAPL": frame}, also_store_db=False, market=None, period=period
+        )
+
+
+@pytest.mark.parametrize("writer", ["single_fetch", "batch", "fallback_batch"])
+def test_two_year_request_is_not_served_a_one_year_provider_frame(writer):
+    db_frame = _five_year_frame(None)
+    service, db_reads = _db_backed_service(db_frame)
+    one_year = PriceCacheService._trim_to_period(db_frame, "1y")
+    assert len(one_year) >= 200
+
+    _store_provider_frame(service, writer, one_year, "1y")
+    result = service.get_many(["AAPL"], period="2y")["AAPL"]
+
+    assert db_reads == ["2y"]
+    pd.testing.assert_frame_equal(result, PriceCacheService._trim_to_period(db_frame, "2y"))
+
+
+@pytest.mark.parametrize("writer", ["single_fetch", "batch", "fallback_batch"])
+def test_provider_frame_serves_requests_up_to_its_own_period(writer):
+    db_frame = _five_year_frame(None)
+    service, db_reads = _db_backed_service(db_frame)
+    one_year = PriceCacheService._trim_to_period(db_frame, "1y")
+
+    _store_provider_frame(service, writer, one_year, "1y")
+    result = service.get_many(["AAPL"], period="1y")["AAPL"]
+
+    assert db_reads == []
+    pd.testing.assert_frame_equal(result, one_year)
+
+
+@pytest.mark.parametrize("writer", ["single_fetch", "batch", "fallback_batch"])
+def test_five_year_provider_fetch_does_not_claim_five_years(writer):
+    # A provider can return less than it was asked for; only a database read
+    # vouches for a window longer than the 2y default.
+    db_frame = _five_year_frame(None)
+    service, db_reads = _db_backed_service(db_frame)
+    short = PriceCacheService._trim_to_period(db_frame, "2y")
+
+    _store_provider_frame(service, writer, short, "5y")
+    service.get_many(["AAPL"], period="5y")
+
+    assert db_reads == ["5y"]
+
+
 @pytest.mark.parametrize("writer", ["store_in_cache", "store_batch_in_cache"])
 def test_restoring_a_cache_read_frame_does_not_keep_its_five_year_claim(writer):
     db_frame = _five_year_frame(None)

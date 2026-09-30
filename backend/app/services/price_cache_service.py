@@ -630,7 +630,7 @@ class PriceCacheService:
             logger.info(f"Fetched {symbol}: {len(data)} rows")
 
             # Cache in Redis (recent data only)
-            self._store_recent_in_redis(symbol, data, market=market)
+            self._store_recent_in_redis(symbol, data, market=market, period=period)
 
             # Persist to database (full data)
             self._store_in_database(symbol, data)
@@ -850,8 +850,9 @@ class PriceCacheService:
         Stores full 5-year data to support volume breakthrough analysis
         and Minervini 200-day MA calculations without requiring database fallback.
 
-        ``period`` is the database window ``data`` was read with, when it was;
-        ``get_many`` only serves the frame to requests no longer than that.
+        ``period`` is the window ``data`` was read or fetched with, when known;
+        ``get_many`` only serves the frame to requests it covers (see
+        ``_mark_coverage``).
 
         Also stores fetch metadata for intraday staleness detection, unless the
         frame is a warm copy of DB rows (``stamp_fetch_metadata=False``): that is
@@ -873,7 +874,12 @@ class PriceCacheService:
             else:
                 cutoff_date = pd.Timestamp(cutoff_datetime)
 
-            recent_data = self._mark_coverage(data[data.index >= cutoff_date], period)
+            # stamp_fetch_metadata=False marks a warm copy of database rows.
+            recent_data = self._mark_coverage(
+                data[data.index >= cutoff_date],
+                period,
+                from_database=not stamp_fetch_metadata,
+            )
 
             if recent_data.empty:
                 return
@@ -1721,6 +1727,7 @@ class PriceCacheService:
         batch_data: Dict[str, pd.DataFrame],
         also_store_db: bool = True,
         market: str | None = None,
+        period: str | None = None,
     ) -> int:
         """
         Store multiple symbols' price data in cache using Redis pipeline.
@@ -1731,6 +1738,9 @@ class PriceCacheService:
         Args:
             batch_data: Dict mapping symbol to price DataFrame
             also_store_db: Whether to also store in database (default True)
+            period: Period the frames were fetched with. Pass it when it can be
+                shorter than 2y, so ``get_many`` does not serve them to longer
+                requests.
 
         Returns:
             Number of symbols successfully cached
@@ -1766,7 +1776,7 @@ class PriceCacheService:
                             cutoff_date = pd.Timestamp(cutoff_datetime, tz=data.index.tz)
                         else:
                             cutoff_date = pd.Timestamp(cutoff_datetime)
-                        recent_data = self._mark_coverage(data[data.index >= cutoff_date], None)
+                        recent_data = self._mark_coverage(data[data.index >= cutoff_date], period)
                         if recent_data.empty:
                             continue
 
@@ -1805,7 +1815,7 @@ class PriceCacheService:
                 # Fall back to individual writes
                 for symbol, data in batch_data.items():
                     if data is not None and not data.empty:
-                        self._store_recent_in_redis(symbol, data, market=market)
+                        self._store_recent_in_redis(symbol, data, market=market, period=period)
 
         # Batch DB writes
         if also_store_db:
@@ -1998,15 +2008,21 @@ class PriceCacheService:
         *,
         also_store_db: bool,
         market: str | None,
+        period: str | None = None,
     ) -> int:
+        # Only a sub-2y fetch needs its period recorded; omitting the keyword
+        # otherwise keeps two-argument test doubles working, as with ``market``.
+        kwargs: Dict[str, Any] = {"also_store_db": also_store_db}
+        if PERIOD_DAYS.get(period, DEFAULT_PERIOD_DAYS) < DEFAULT_PERIOD_DAYS:
+            kwargs["period"] = period
         if market is None:
-            return self.store_batch_in_cache(batch_data, also_store_db=also_store_db)
+            return self.store_batch_in_cache(batch_data, **kwargs)
         try:
-            return self.store_batch_in_cache(batch_data, also_store_db=also_store_db, market=market)
+            return self.store_batch_in_cache(batch_data, market=market, **kwargs)
         except TypeError as exc:
             if "market" not in str(exc):
                 raise
-            return self.store_batch_in_cache(batch_data, also_store_db=also_store_db)
+            return self.store_batch_in_cache(batch_data, **kwargs)
 
     @classmethod
     def _trim_to_period(cls, df: pd.DataFrame, period: str) -> pd.DataFrame:
@@ -2029,24 +2045,32 @@ class PriceCacheService:
         return df.iloc[start:].copy()
 
     @classmethod
-    def _mark_coverage(cls, frame: pd.DataFrame, period: str | None) -> pd.DataFrame:
-        """Stamp a frame about to be cached with the database window it was read with.
+    def _mark_coverage(
+        cls,
+        frame: pd.DataFrame,
+        period: str | None,
+        *,
+        from_database: bool = False,
+    ) -> pd.DataFrame:
+        """Stamp a frame about to be cached with the window it was cut from.
 
-        Provider fetches and batch writes pass ``None``, which also drops a stamp
-        inherited from a frame that was itself read from the cache.
+        A database read vouches for its whole window. A provider fetch can return
+        less than it was asked for, so it may lower the claim below the 2y that
+        unstamped frames get (a 1y fetch) but never raise it (a 5y fetch).
+        An unknown period drops any stamp inherited from a cache-read frame.
         """
         attrs = {key: value for key, value in frame.attrs.items() if key != _COVERAGE_ATTR}
         if period in PERIOD_DAYS:
-            attrs[_COVERAGE_ATTR] = min(PERIOD_DAYS[period], cls.RECENT_DAYS)
+            limit = cls.RECENT_DAYS if from_database else DEFAULT_PERIOD_DAYS
+            attrs[_COVERAGE_ATTR] = min(PERIOD_DAYS[period], limit)
         frame.attrs = attrs
         return frame
 
     @staticmethod
     def _covers_period(df: pd.DataFrame, period: str) -> bool:
         """Whether a Redis frame was cut from a window at least as long as ``period``."""
-        # ponytail: provider and batch writers do not stamp; an unstamped frame is
-        # trusted up to 2y, as before. Thread the period through those writers if
-        # one ever stores a shorter window with 200+ rows.
+        # Unstamped frames (writers that do not know their period, and frames
+        # stored before stamping existed) are trusted up to 2y, as before.
         return df.attrs.get(_COVERAGE_ATTR, DEFAULT_PERIOD_DAYS) >= _period_days(period)
 
     def get_many(
@@ -2415,6 +2439,7 @@ class PriceCacheService:
                     batch_to_store,
                     also_store_db=True,
                     market=group_market,
+                    period=period,
                 )
 
         logger.info("yfinance batch fetch complete: %d success, %d failed", yfinance_success, yfinance_failed)
