@@ -14,7 +14,8 @@ from .base_screener import (
     BaseStockScreener,
     DataRequirements,
     ScreenerResult,
-    StockData
+    StockData,
+    fifty_two_week_range,
 )
 from .screener_registry import register_screener
 from .criteria.relative_strength import RelativeStrengthCalculator
@@ -313,12 +314,12 @@ class MinerviniScanner(BaseStockScreener):
             high_52w = (
                 float(precomputed.high_52w)
                 if precomputed is not None and precomputed.high_52w is not None
-                else float(prices.max())
+                else fifty_two_week_range(prices)[0]
             )
             low_52w = (
                 float(precomputed.low_52w)
                 if precomputed is not None and precomputed.low_52w is not None
-                else float(prices.min())
+                else fifty_two_week_range(prices)[1]
             )
 
             # 1. Calculate RS Ratings (weighted + individual periods)

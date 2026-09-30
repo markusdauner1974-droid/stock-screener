@@ -96,6 +96,16 @@ class ScreenerResult:
             raise ValueError(f"Score must be between 0 and 100, got {self.score}")
 
 
+# Scans load 2y-5y of history, so 52-week values must be windowed explicitly.
+FIFTY_TWO_WEEK_BARS = 252
+
+
+def fifty_two_week_range(close_rev: pd.Series) -> tuple[float, float]:
+    """Return (high, low) close over the newest 52 weeks; ``close_rev`` is newest-first."""
+    window = close_rev.iloc[:FIFTY_TWO_WEEK_BARS]
+    return float(window.max()), float(window.min())
+
+
 @dataclass
 class PrecomputedScanContext:
     """Shared derived series and indicators for multi-screener scans."""

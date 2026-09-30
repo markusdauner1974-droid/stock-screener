@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from ...database import get_db
 from ...domain.scanning.ports import CanonicalStockRsSource, MarketRsReader
+from ...scanners.base_screener import fifty_two_week_range
 from ...services.benchmark_registry_service import benchmark_registry
 from ...wiring.bootstrap import get_market_rs_reader, get_yfinance_service
 from ._price_history import resolve_symbol_market
@@ -334,8 +335,7 @@ async def get_52w_position(symbol: str):
 
     prices = data["Close"][::-1].reset_index(drop=True)
     current_price = prices.iloc[0]
-    high_52w = prices.max()
-    low_52w = prices.min()
+    high_52w, low_52w = fifty_two_week_range(prices)
 
     above_low_pct = ((current_price - low_52w) / low_52w) * 100 if low_52w > 0 else None
     from_high_pct = ((high_52w - current_price) / high_52w) * 100 if high_52w > 0 else None
