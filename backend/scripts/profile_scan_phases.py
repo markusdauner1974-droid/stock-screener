@@ -14,15 +14,18 @@ The scan row is created with status "failed" and its status is never changed.
 That status is not active, so the run does not take the single-active-scan
 slot or block user scans, and it is not "completed" or "cancelled", so nothing
 that reads the latest finished scan can pick up its partial results. The row
-and its results are deleted afterwards unless --keep is passed; if the process
-is killed first, the leftover is an inert failed scan whose universe_key starts
-with "profile-scan-phases:".
+and its results are deleted afterwards, including after Ctrl-C or SIGTERM.
+Two cases leave the row behind, and it then shows as a failed scan in scan
+history: --keep (on purpose, to inspect the results) and SIGKILL or an
+out-of-memory kill. Remove it from the UI, or with DELETE /api/v1/scans/<id>;
+its universe_key starts with "profile-scan-phases:".
 
 Provider access is blocked. ``cache_only`` alone is not enough: the price
 cache's bulk read still batch-fetches from the provider for symbols with no
 usable database frame (stale rows, or fewer than 50 bars), and stores what it
-gets. Here that fetch returns nothing and is counted instead, and HTTP(S) is
-pointed at a dead proxy so anything else fails fast. Two consequences:
+gets. Here that fetch, the benchmark fetch and the single-symbol price fetch
+return nothing and are counted instead, and HTTP(S) is pointed at a dead
+proxy, with any proxy bypass cleared, so anything else fails fast. Two consequences:
 symbols that depend on that fetch end up without a result, and the prefetch
 time reported here excludes the provider round-trips a real scan would make
 for them.
@@ -39,6 +42,7 @@ import argparse
 import json
 import logging
 import os
+import signal
 import statistics
 import sys
 import time
@@ -90,8 +94,9 @@ class PhaseClock:
         self.current = {}
         self._chunk_started = now
 
-    def start_first_chunk(self) -> None:
-        """Drop one-off setup (scan load, compute pool start-up) from chunk 1."""
+    def restart(self) -> None:
+        """Start timing the next chunk from now, so time spent in between
+        (setup before chunk 1, the profiler's own output) is not charged to it."""
         self.current = {}
         self._chunk_started = time.perf_counter()
 
@@ -132,7 +137,7 @@ class _TimedCancel:
     def is_cancelled(self) -> bool:
         if not self._started:
             self._started = True
-            self._clock.start_first_chunk()
+            self._clock.restart()
         with self._clock.phase("cancel_check"):
             return self._cancel.is_cancelled()
 
@@ -180,6 +185,7 @@ class _ChunkBoundary(ProgressSink):
     def emit(self, event) -> None:
         self._clock.end_chunk()
         print(f"  {event.current}/{event.total} symbols", flush=True)
+        self._clock.restart()
 
 
 class _CacheTierCounter(logging.Handler):
@@ -199,21 +205,39 @@ class _CacheTierCounter(logging.Handler):
 
 
 def block_provider_fetches() -> dict[str, int]:
-    """Replace the price cache's bulk provider fetch with a counter."""
-    from app.services.bulk_data_fetcher import BulkDataFetcher
+    """Replace the price paths' provider fetches with counters.
 
+    Covers the bulk price fetch (reached in cache-only scans, #451), the
+    benchmark fetch and the single-symbol price fetch. The dead proxy is a
+    backstop for anything else; it only works if nothing bypasses it.
+    """
+    from app.services.benchmark_cache_service import BenchmarkCacheService
+    from app.services.bulk_data_fetcher import BulkDataFetcher
+    from app.services.price_cache_service import PriceCacheService
+
+    for variable in ("NO_PROXY", "no_proxy"):
+        os.environ.pop(variable, None)
     # Nothing listens on this port, so any other HTTP(S) provider call fails fast.
     for variable in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
         os.environ[variable] = os.environ[variable.lower()] = "http://127.0.0.1:9"
 
     blocked = {"calls": 0, "symbols": 0}
 
-    def fetch_nothing(self, symbols, *args, **kwargs):
+    def count(symbols: int) -> None:
         blocked["calls"] += 1
-        blocked["symbols"] += len(symbols)
+        blocked["symbols"] += symbols
+
+    def fetch_no_prices(self, symbols, *args, **kwargs):
+        count(len(symbols))
         return {}
 
-    BulkDataFetcher.fetch_prices_in_batches = fetch_nothing
+    def fetch_no_frame(self, *args, **kwargs):
+        count(1)
+        return None
+
+    BulkDataFetcher.fetch_prices_in_batches = fetch_no_prices
+    BenchmarkCacheService._fetch_normalized_benchmark = fetch_no_frame
+    PriceCacheService._fetch_direct_historical_data = fetch_no_frame
     return blocked
 
 
@@ -340,7 +364,11 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=1000, help="symbols to scan; 0 = whole universe")
     parser.add_argument("--screeners", default=DEFAULT_SCREENERS)
     parser.add_argument("--processes", type=int, default=0, help="0 = the deployment's setting")
-    parser.add_argument("--keep", action="store_true", help="keep the scan and its results")
+    parser.add_argument(
+        "--keep",
+        action="store_true",
+        help="keep the scan and its results (it then shows as a failed scan in scan history)",
+    )
     args = parser.parse_args()
 
     # ERROR keeps per-symbol scanner warnings out of the report.
@@ -381,6 +409,8 @@ def main() -> int:
         scan_batch_runner_factory=_timed_runner_factory(clock),
     )
 
+    # SIGTERM (docker stop, a timeout) would otherwise skip the cleanup below.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(128 + signal.SIGTERM))
     scan_id = str(uuid.uuid4())
     _create_scan(scan_id, market, symbols, screeners)
     cancel = DbCancellationToken(SessionLocal, scan_id)
