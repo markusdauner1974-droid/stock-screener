@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import pickle
 from datetime import datetime, timedelta
 
 import pandas as pd
 import pytest
 
+from app.services.cache.redis_codec import encode_frame
 from app.services.price_cache_service import PERIOD_DAYS, PriceCacheService
 
 
@@ -15,7 +15,7 @@ def _redis_hit_service(frame: pd.DataFrame) -> PriceCacheService:
             return self
 
         def execute(self, raise_on_error=True):
-            return [pickle.dumps(frame), None]
+            return [encode_frame(frame), None]
 
     class FakeRedis:
         def pipeline(self):

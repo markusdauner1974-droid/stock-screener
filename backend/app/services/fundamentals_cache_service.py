@@ -7,7 +7,6 @@ Uses Redis for hot cache and database for persistence.
 """
 import logging
 import math
-import pickle
 import inspect
 from typing import Any, Optional, Dict, Callable
 from datetime import datetime, date
@@ -37,6 +36,7 @@ from .fx_service import FXQuote, FXService, get_fx_service
 from .institutional_ownership_service import InstitutionalOwnershipService
 from .redis_pool import get_redis_client, is_redis_enabled
 from .cache.market_cache_policy import MarketAwareCachePolicy, market_cache_policy
+from .cache.redis_codec import decode_dict, encode_dict
 from .universe_row_facts import (
     UniverseRowFactsResolver,
     normalize_universe_text,
@@ -230,10 +230,10 @@ class FundamentalsCacheService:
         if self._redis_client:
             try:
                 redis_key = self._redis_data_key(symbol, market)
-                cached_data = self._redis_client.get(redis_key)
+                # A legacy (pickled) payload decodes to None: a miss.
+                fundamentals = decode_dict(self._redis_client.get(redis_key))
 
-                if cached_data:
-                    fundamentals = pickle.loads(cached_data)
+                if fundamentals:
                     if self._needs_db_enrichment(fundamentals):
                         db_data, last_update = self._get_from_database(symbol)
                         if db_data is not None and self._is_data_fresh(last_update):
@@ -251,7 +251,7 @@ class FundamentalsCacheService:
                         self._store_in_redis_for_market(symbol, fundamentals, market=market)
                     logger.debug(f"Cache HIT for {symbol} (Redis)")
                     return fundamentals
-            except (pickle.PickleError, TypeError, ValueError, RuntimeError, OSError) as exc:
+            except (TypeError, ValueError, RuntimeError, OSError) as exc:
                 logger.warning(
                     "Redis read error for %s fundamentals: %s",
                     symbol,
@@ -790,12 +790,11 @@ class FundamentalsCacheService:
 
         try:
             redis_key = self._redis_data_key(symbol, market)
-            pickled_data = pickle.dumps(data)
 
             self._redis_client.setex(
                 redis_key,
                 self._cache_policy.ttl_seconds("fundamentals", market=market),
-                pickled_data
+                encode_dict(data),
             )
 
             logger.debug(f"Cached {symbol} fundamental data in Redis (TTL: 7 days)")
@@ -1488,7 +1487,11 @@ class FundamentalsCacheService:
             for symbol, raw_data in zip(symbols, results):
                 if raw_data:
                     try:
-                        fundamentals = pickle.loads(raw_data)
+                        fundamentals = decode_dict(raw_data)
+                        if fundamentals is None:  # legacy (pickled) payload: a miss
+                            cached_data[symbol] = None
+                            redis_misses.append(symbol)
+                            continue
                         cached_data[symbol] = fundamentals
                         if self._needs_db_enrichment(fundamentals):
                             redis_needs_enrichment.append(symbol)

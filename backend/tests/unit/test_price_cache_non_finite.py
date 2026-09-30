@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import pickle
 from datetime import date
 from types import SimpleNamespace
 
 import pandas as pd
 
+from app.services.cache.redis_codec import encode_frame
 from app.services.price_cache_service import PriceCacheService
 
 
@@ -172,7 +172,7 @@ def test_get_many_falls_back_to_db_when_redis_payload_normalizes_away():
 
         def execute(self, raise_on_error=True):
             poisoned = _price_frame([float("nan")], [date(2026, 6, 24)])
-            return [pickle.dumps(poisoned), None]
+            return [encode_frame(poisoned), None]
 
     class FakeRedis:
         def pipeline(self):

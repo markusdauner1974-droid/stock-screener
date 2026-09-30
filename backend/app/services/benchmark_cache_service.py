@@ -5,7 +5,6 @@ Provides singleton-style caching of benchmark data to eliminate redundant API ca
 during bulk scans. Uses Redis for hot cache with database persistence.
 """
 import logging
-import pickle
 import time
 from typing import Any, Optional, Callable
 from datetime import date, datetime, timedelta
@@ -34,6 +33,7 @@ from .benchmark_resolution import (
     benchmark_data_meets_required_date,
 )
 from .cache.market_cache_policy import MarketAwareCachePolicy, market_cache_policy
+from .cache.redis_codec import decode_frame, encode_frame
 from .price_row_normalization import normalize_price_frame, stock_price_row_from_ohlcv
 from ..utils.market_hours import get_eastern_now, get_last_trading_day, is_market_open, is_trading_day
 
@@ -276,8 +276,8 @@ class BenchmarkCacheService:
             cached_bytes = self._redis_client.get(redis_key)
 
             if cached_bytes:
-                df = pickle.loads(cached_bytes)
-                df = normalize_price_frame(df)
+                # A legacy (pickled) payload decodes to None: a miss.
+                df = normalize_price_frame(decode_frame(cached_bytes))
                 if df is None:
                     return None
                 logger.debug("Retrieved benchmark %s %s from Redis (%s rows)", benchmark_symbol, period, len(df))
@@ -579,12 +579,11 @@ class BenchmarkCacheService:
                 return
 
             redis_key = self._redis_data_key(benchmark_symbol, period, market=market)
-            pickled_data = pickle.dumps(data)
 
             self._redis_client.setex(
                 redis_key,
                 self._cache_policy.ttl_seconds("benchmark", market=market),
-                pickled_data
+                encode_frame(data),
             )
 
             logger.info(

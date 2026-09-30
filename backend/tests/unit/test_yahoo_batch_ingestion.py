@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import pickle
 from datetime import date, datetime, timedelta
 import sqlite3
 from unittest.mock import MagicMock
@@ -10,6 +9,7 @@ import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
+from app.services.cache.redis_codec import encode_frame
 from app.domain.providers.data_plan import (
     DATASET_PRICES,
     PLAN_VERSION,
@@ -1036,7 +1036,7 @@ def test_get_many_reloads_after_close_if_redis_meta_marks_intraday_stale(monkeyp
     stale_df = _price_df(date(2026, 3, 18), 100.0)
     fake_redis = _FakeRedis(
         [
-            pickle.dumps(stale_df),
+            encode_frame(stale_df),
             json.dumps({"needs_refresh_after_close": True}),
         ]
     )
@@ -1149,7 +1149,7 @@ def test_get_many_reads_market_scoped_redis_keys(monkeypatch):
         },
         index=pd.date_range(end="2026-03-18", periods=200),
     )
-    fake_redis = _FakeRedis([pickle.dumps(data), json.dumps({"needs_refresh_after_close": False}), None])
+    fake_redis = _FakeRedis([encode_frame(data), json.dumps({"needs_refresh_after_close": False}), None])
     service = PriceCacheService(redis_client=fake_redis, session_factory=lambda: MagicMock())
 
     monkeypatch.setattr(module, "get_bulk_redis_client", lambda: None)
