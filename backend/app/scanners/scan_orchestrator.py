@@ -42,6 +42,7 @@ from .base_screener import (
     PrecomputedScanContext,
     ScreenerResult,
     StockData,
+    fifty_two_week_range,
 )
 from .criteria.relative_strength import RelativeStrengthCalculator
 from .criteria.rs_resolution import CanonicalStockRsUnavailable, resolve_stock_rs
@@ -127,6 +128,10 @@ def _build_precomputed_scan_context(
     if ma_200_month_ago is None:
         ma_200_month_ago = _series_last_float(ma_200_series)
 
+    high_52w, low_52w = (
+        fifty_two_week_range(close_rev) if not close_rev.empty else (None, None)
+    )
+
     rs_ratings = None
     if isinstance(stock_data.rs_source, CanonicalStockRsSource) or (
         benchmark_close_rev is not None and not benchmark_close_rev.empty
@@ -165,8 +170,8 @@ def _build_precomputed_scan_context(
         ema_10=_series_last_float(ema_10_series),
         ema_20=_series_last_float(ema_20_series),
         ema_50=_series_last_float(ema_50_series),
-        high_52w=float(close_rev.max()) if not close_rev.empty else None,
-        low_52w=float(close_rev.min()) if not close_rev.empty else None,
+        high_52w=high_52w,
+        low_52w=low_52w,
         rs_ratings=rs_ratings,
         rs_line_leadership=rs_leadership,
     )

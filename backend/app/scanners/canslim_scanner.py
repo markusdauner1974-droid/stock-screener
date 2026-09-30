@@ -18,7 +18,8 @@ from .base_screener import (
     BaseStockScreener,
     DataRequirements,
     ScreenerResult,
-    StockData
+    StockData,
+    fifty_two_week_range,
 )
 from .screener_registry import register_screener
 from .criteria.relative_strength import RelativeStrengthCalculator
@@ -331,7 +332,7 @@ class CANSLIMScanner(BaseStockScreener):
         - 10-15% from high: 8 points
         - >15% from high: proportional (0-5 points)
         """
-        high_52w = float(prices.max())
+        high_52w, _ = fifty_two_week_range(prices)
         from_high_pct = ((high_52w - current_price) / high_52w) * 100
 
         # Calculate points

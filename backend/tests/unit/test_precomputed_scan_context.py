@@ -7,7 +7,13 @@ import pandas as pd
 import pytest
 
 from app.analysis.patterns.rs_line import RsLineLeadershipSnapshot
-from app.scanners.base_screener import BaseStockScreener, DataRequirements, ScreenerResult, StockData
+from app.scanners.base_screener import (
+    BaseStockScreener,
+    DataRequirements,
+    ScreenerResult,
+    StockData,
+    fifty_two_week_range,
+)
 from app.scanners.canslim_scanner import CANSLIMScanner
 from app.scanners.criteria.relative_strength import RelativeStrengthCalculator
 from app.scanners.minervini_scanner import MinerviniScanner
@@ -77,8 +83,8 @@ def _manual_precomputed_context(data: StockData) -> SimpleNamespace:
         ema_10=float(close_chrono.ewm(span=10, adjust=False).mean().iloc[-1]),
         ema_20=float(close_chrono.ewm(span=20, adjust=False).mean().iloc[-1]),
         ema_50=float(close_chrono.ewm(span=50, adjust=False).mean().iloc[-1]),
-        high_52w=float(close_rev.max()),
-        low_52w=float(close_rev.min()),
+        high_52w=fifty_two_week_range(close_rev)[0],
+        low_52w=fifty_two_week_range(close_rev)[1],
         rs_ratings=rs_ratings,
         rs_line_leadership=RsLineLeadershipSnapshot.empty(),
     )
