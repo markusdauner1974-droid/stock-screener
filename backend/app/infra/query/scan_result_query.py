@@ -7,7 +7,6 @@ from sqlalchemy.orm import Query
 from app.domain.common.query import (
     FilterSpec,
     PageSpec,
-    SortOrder,
     SortSpec,
 )
 from app.domain.scanning.filter_expression_model import (
@@ -149,23 +148,6 @@ _FILTER_FIELD_RESOLVER = SqlFilterFieldResolver(
     range_predicates={"listing_aware_volume": listing_aware_volume_predicate},
 )
 
-# Sort fields that must be fetched and sorted in Python (not in SQL).
-_PYTHON_SORT_FIELDS = frozenset({
-    "stage_name",
-    "ma_alignment",
-    "vcp_detected",
-    "passes_template",
-})
-
-# Cap for Python-sorted queries to prevent memory issues.
-_PYTHON_SORT_LIMIT = 1000
-
-
-def requires_python_sort(field: str) -> bool:
-    """Return True when a sort field needs in-Python sorting."""
-    return field in _PYTHON_SORT_FIELDS
-
-
 # ── Public API ──────────────────────────────────────────────────────────
 
 
@@ -190,33 +172,19 @@ def supported_filter_fields() -> frozenset[str]:
 
 
 def supported_sort_fields() -> frozenset[str]:
-    return _FILTER_FIELD_RESOLVER.supported_sort_fields | _PYTHON_SORT_FIELDS
+    return _FILTER_FIELD_RESOLVER.supported_sort_fields
 
 
 def apply_sort_and_paginate(
     query: Query,
     sort: SortSpec,
     page: PageSpec,
-) -> tuple[list, int, bool]:
-    """Apply sort + pagination.  Returns (rows, total_count, was_python_sorted).
-
-    If the sort field is a SQL column, sorting and pagination happen in SQL.
-    If it's a JSON details field, we fetch up to _PYTHON_SORT_LIMIT rows,
-    sort in Python, and slice for the requested page.
-    """
+) -> tuple[list, int]:
+    """Apply SQL sort + pagination.  Returns (rows, total_count)."""
     total = lean_count(query)
-    python_sorted = sort.field in _PYTHON_SORT_FIELDS
-
-    if python_sorted:
-        rows = query.limit(_PYTHON_SORT_LIMIT).all()
-        rows = _sort_in_python(rows, sort)
-        rows = rows[page.offset : page.offset + page.limit]
-    else:
-        query = apply_sql_sort(query, sort, _FILTER_FIELD_RESOLVER)
-        query = query.offset(page.offset).limit(page.limit)
-        rows = query.all()
-
-    return rows, total, python_sorted
+    query = apply_sql_sort(query, sort, _FILTER_FIELD_RESOLVER)
+    rows = query.offset(page.offset).limit(page.limit).all()
+    return rows, total
 
 
 def apply_sort_all(query: Query, sort: SortSpec) -> list:
@@ -224,26 +192,4 @@ def apply_sort_all(query: Query, sort: SortSpec) -> list:
 
     Used by export-style queries that need every row.
     """
-    if sort.field in _PYTHON_SORT_FIELDS:
-        rows = query.all()
-        return _sort_in_python(rows, sort)
-
     return apply_sql_sort(query, sort, _FILTER_FIELD_RESOLVER).all()
-
-
-def _sort_in_python(
-    rows: list,
-    sort: SortSpec,
-) -> list:
-    """Sort ScanResult rows (or (ScanResult, ...) tuples) by details JSON field."""
-
-    def get_sort_key(row_obj):
-        result = row_obj[0] if isinstance(row_obj, tuple) else row_obj
-        detail_value = (
-            result.details.get(sort.field) if result.details else None
-        )
-        if detail_value is None:
-            return float("-inf") if sort.order == SortOrder.DESC else float("inf")
-        return detail_value
-
-    return sorted(rows, key=get_sort_key, reverse=(sort.order == SortOrder.DESC))
