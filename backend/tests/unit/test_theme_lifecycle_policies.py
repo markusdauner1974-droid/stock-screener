@@ -1140,10 +1140,12 @@ def test_update_all_theme_metrics_loads_spy_once_per_run(db_session):
             theme_cluster_id=theme.id, symbol=symbol, source="manual", confidence=1.0, is_active=True,
         ))
         themes.append(theme)
-    for index in range(10):
-        day = now - timedelta(days=9 - index)
-        _add_stock_price(db_session, symbol="AAPL", trade_date=day, close=100.0 + index)
-        _add_stock_price(db_session, symbol="MSFT", trade_date=day, close=200.0 - index)
+    # 30 sessions so the 21-period (1-month) RS vs SPY is actually computed.
+    for index in range(30):
+        day = now - timedelta(days=29 - index)
+        # Small moves keep the RS score off its 0/100 clamps, so SPY changes show.
+        _add_stock_price(db_session, symbol="AAPL", trade_date=day, close=100.0 + index * 0.1)
+        _add_stock_price(db_session, symbol="MSFT", trade_date=day, close=200.0 - index * 0.1)
         _add_stock_price(db_session, symbol="SPY", trade_date=day, close=400.0 + index * 0.5)
     db_session.commit()
 
@@ -1175,3 +1177,16 @@ def test_update_all_theme_metrics_loads_spy_once_per_run(db_session):
         ).one()
         expected = standalone.calculate_price_metrics(theme.id, as_of_date=now)
         assert stored.basket_rs_vs_spy == pytest.approx(expected["basket_rs_vs_spy"])
+
+    # The run's SPY cache must not outlive the run: a later same-date call on
+    # the same instance has to see SPY rows written after the run.
+    latest_spy = db_session.query(StockPrice).filter(
+        StockPrice.symbol == "SPY", StockPrice.date == now.date(),
+    ).one()
+    latest_spy.close = 380.0
+    db_session.commit()
+    reused = service.calculate_price_metrics(themes[0].id, as_of_date=now)
+    fresh = ThemeDiscoveryService(db_session, pipeline="technical").calculate_price_metrics(
+        themes[0].id, as_of_date=now,
+    )
+    assert reused["basket_rs_vs_spy"] == pytest.approx(fresh["basket_rs_vs_spy"])

@@ -787,18 +787,23 @@ class ThemeDiscoveryService:
     ) -> dict:
         from .theme_group_coordination import publication_scope
 
-        with self._fenced_legacy_mutation(
-            operation="metrics_refresh",
-            expected_authority_epoch=expected_authority_epoch,
-            auto_commit=True,
-        ) as (_write, payload):
-            with publication_scope(self.db):
-                self.__dict__.pop("groups", None)
-                result = self._update_all_theme_metrics(
-                    as_of_date, auto_commit=False
-                )
-            payload.update(result)
-        return result
+        try:
+            with self._fenced_legacy_mutation(
+                operation="metrics_refresh",
+                expected_authority_epoch=expected_authority_epoch,
+                auto_commit=True,
+            ) as (_write, payload):
+                with publication_scope(self.db):
+                    self.__dict__.pop("groups", None)
+                    result = self._update_all_theme_metrics(
+                        as_of_date, auto_commit=False
+                    )
+                payload.update(result)
+            return result
+        finally:
+            # The run's SPY series must not outlive the run: later calls on a
+            # reused instance have to see SPY rows written after it.
+            self.__dict__.pop("_cached_spy_returns", None)
 
     def _update_all_theme_metrics(
         self,
