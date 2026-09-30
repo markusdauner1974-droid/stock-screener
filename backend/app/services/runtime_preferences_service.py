@@ -244,6 +244,17 @@ def is_market_enabled(db: Session, market: str | None) -> bool:
     )
 
 
+def runtime_preferences_now() -> RuntimePreferences:
+    """Process-safe read of runtime preferences for task code without a session."""
+    from ..database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        return get_runtime_preferences(db)
+    finally:
+        db.close()
+
+
 def is_market_enabled_now(market: str | None) -> bool:
     """Process-safe helper for task code that only has a market label."""
     if market is None:

@@ -134,14 +134,93 @@ def _maybe_publish_fundamentals_progress(
     progress_state["last_time"] = now
 
 
+def _runtime_market_scope() -> tuple[str, frozenset[str]] | None:
+    """(primary market, enabled markets) from runtime preferences, or None if unreadable.
+
+    None fails open (no market filter, the behaviour before #414) rather than
+    silently stopping fundamentals refreshes when preferences can't be read.
+    """
+    from ..services.runtime_preferences_service import runtime_preferences_now
+
+    try:
+        prefs = runtime_preferences_now()
+    except Exception:
+        logger.warning(
+            "Runtime preferences unreadable; fundamentals refresh is not market-filtered",
+            exc_info=True,
+        )
+        return None
+    return prefs.primary_market, frozenset(prefs.enabled_markets)
+
+
+def _market_enabled(market: str, enabled_markets: frozenset[str] | None) -> bool:
+    """Whether a scoped refresh may run; unreadable preferences (None) fail open."""
+    return enabled_markets is None or market in enabled_markets
+
+
+def _sync_weekly_bundles(
+    db,
+    *,
+    effective_market: str,
+    scoped_market: str | None,
+    enabled_markets: frozenset[str] | None,
+) -> tuple[dict, frozenset[str]]:
+    """Sync the GitHub weekly bundle for every market in the refresh scope.
+
+    Returns the primary (``effective_market``) sync result and the markets whose
+    bundle did not sync. The GitHub fast path may complete the refresh only
+    when nothing is pending; otherwise the run continues for the pending ones.
+    """
+    if scoped_market is not None or enabled_markets is None:
+        markets = [effective_market]
+    else:
+        markets = [effective_market, *sorted(enabled_markets - {effective_market})]
+    service = get_provider_snapshot_service()
+    results = {
+        sync_market: service.sync_weekly_reference_from_github(
+            db,
+            market=sync_market,
+            hydrate_cache=True,
+            hydrate_mode="static",
+        )
+        for sync_market in markets
+    }
+    pending = frozenset(
+        sync_market
+        for sync_market, result in results.items()
+        if result.get("status") not in _GITHUB_SYNC_SUCCESS_STATUSES
+    )
+    return results[effective_market], pending
+
+
+def _us_only_refresh_scope(
+    scoped_market: str | None,
+    enabled_markets: frozenset[str] | None,
+) -> bool:
+    """Whether a refresh covers US alone, so the US-only snapshot pipeline may complete it.
+
+    The snapshot pipeline builds and hydrates only the US Finviz universe and
+    snapshot, so it must never stand in for a scope that includes another
+    market. Scoped runs use their market; unscoped runs use the enabled set.
+    Unreadable preferences (None) keep the pre-#414 behaviour.
+    """
+    if scoped_market is not None:
+        return scoped_market == "US"
+    return enabled_markets is None or enabled_markets == frozenset({"US"})
+
+
 def _load_active_universe_stocks(
     db,
     *,
     market: str | None = None,
+    enabled_markets: frozenset[str] | None = None,
 ) -> list[StockUniverse]:
+    """Active universe rows for ``market``, or for every enabled market when unscoped."""
     query = db.query(StockUniverse).filter(StockUniverse.is_active)
     if market is not None:
         query = query.filter(StockUniverse.market == market)
+    elif enabled_markets is not None:
+        query = query.filter(StockUniverse.market.in_(sorted(enabled_markets)))
     return query.all()
 
 
@@ -228,16 +307,22 @@ def refresh_all_fundamentals(
         }
     """
     from .market_queues import market_tag, log_extra, normalize_market
-    from ..services.runtime_preferences_service import is_market_enabled_now
     _log_extra = log_extra(market)
     logger.info("=" * 60)
     logger.info("TASK: Weekly Fundamental Data Refresh %s", market_tag(market), extra=_log_extra)
     logger.info("Timestamp: %s", datetime.now().strftime('%Y-%m-%d %H:%M:%S'), extra=_log_extra)
     logger.info("=" * 60)
 
-    effective_market = normalize_market(market) if market is not None else "US"
+    scope = _runtime_market_scope()
+    enabled_markets = scope[1] if scope is not None else None
+    # Unscoped runs cover every enabled market; activity and the GitHub bundle
+    # use the primary market (US unless the install runs non-US markets only).
+    effective_market = (
+        normalize_market(market) if market is not None
+        else scope[0] if scope is not None else "US"
+    )
     activity_lifecycle = activity_lifecycle or "weekly_refresh"
-    if market is not None and not is_market_enabled_now(effective_market):
+    if market is not None and not _market_enabled(effective_market, enabled_markets):
         logger.info("Skipping fundamentals refresh for disabled market %s", market, extra=_log_extra)
         return {
             'status': 'skipped',
@@ -269,14 +354,16 @@ def refresh_all_fundamentals(
             task_id=task_id,
             message="Refreshing fundamentals",
         )
-        github_sync = get_provider_snapshot_service().sync_weekly_reference_from_github(
+        github_sync, pending_markets = _sync_weekly_bundles(
             db,
-            market=effective_market,
-            hydrate_cache=True,
-            hydrate_mode="static",
+            effective_market=effective_market,
+            scoped_market=scoped_market,
+            enabled_markets=enabled_markets,
         )
-        if github_sync.get("status") in _GITHUB_SYNC_SUCCESS_STATUSES:
-            total_stocks = len(_load_active_universe_stocks(db, market=scoped_market))
+        if not pending_markets:
+            total_stocks = len(_load_active_universe_stocks(
+                db, market=scoped_market, enabled_markets=enabled_markets
+            ))
             if total_stocks > 0:
                 _maybe_publish_fundamentals_progress(
                     db,
@@ -314,8 +401,13 @@ def refresh_all_fundamentals(
                 "duration_seconds": round(duration, 2),
                 "timestamp": datetime.now().isoformat(),
             }
-        if settings.provider_snapshot_cutover_enabled:
-            total_stocks = len(_load_active_universe_stocks(db, market=scoped_market))
+        if scoped_market is None and enabled_markets is not None:
+            # Markets refreshed from their GitHub bundle are done; continue with the rest.
+            enabled_markets = pending_markets
+        if settings.provider_snapshot_cutover_enabled and _us_only_refresh_scope(scoped_market, enabled_markets):
+            total_stocks = len(_load_active_universe_stocks(
+                db, market=scoped_market, enabled_markets=enabled_markets
+            ))
             _maybe_publish_fundamentals_progress(
                 db,
                 market=effective_market,
@@ -369,7 +461,9 @@ def refresh_all_fundamentals(
             return response
 
         # Get all active stocks from universe (market-filtered when scoped)
-        universe_stocks = _load_active_universe_stocks(db, market=scoped_market)
+        universe_stocks = _load_active_universe_stocks(
+                db, market=scoped_market, enabled_markets=enabled_markets
+            )
 
         if not universe_stocks:
             logger.warning("No active stocks found in universe", extra=_log_extra)
@@ -673,8 +767,11 @@ def populate_initial_cache(self, limit: Optional[int] = None):
     ticker_validation_service = get_ticker_validation_service()
 
     try:
-        # Get all active stocks from universe
+        # Get all active stocks in runtime-enabled markets
         query = db.query(StockUniverse).filter(StockUniverse.is_active)
+        scope = _runtime_market_scope()
+        if scope is not None:
+            query = query.filter(StockUniverse.market.in_(sorted(scope[1])))
 
         if limit:
             query = query.limit(limit)
@@ -917,10 +1014,27 @@ def refresh_all_fundamentals_hybrid(
     logger.info("yfinance batch size: %s", yfinance_batch_size, extra=_log_extra)
     logger.info("=" * 60)
 
+
+    scope = _runtime_market_scope()
+    enabled_markets = scope[1] if scope is not None else None
+    # Unscoped runs cover every enabled market; activity and the GitHub bundle
+    # use the primary market (US unless the install runs non-US markets only).
+    effective_market = (
+        normalize_market(market) if market is not None
+        else scope[0] if scope is not None else "US"
+    )
+    if market is not None and not _market_enabled(effective_market, enabled_markets):
+        logger.info("Skipping hybrid fundamentals refresh for disabled market %s", market, extra=_log_extra)
+        return {
+            'status': 'skipped',
+            'reason': f'market {effective_market} is disabled in local runtime preferences',
+            'market': effective_market,
+            'timestamp': datetime.now().isoformat(),
+        }
+
     db = SessionLocal()
     start_time = time.time()
     ticker_validation_service = get_ticker_validation_service()
-    effective_market = normalize_market(market) if market is not None else "US"
     activity_lifecycle = activity_lifecycle or "weekly_refresh"
     task_name = getattr(self, "name", "refresh_all_fundamentals_hybrid")
     task_id = getattr(getattr(self, "request", None), "id", None)
@@ -941,14 +1055,16 @@ def refresh_all_fundamentals_hybrid(
             task_id=task_id,
             message="Refreshing fundamentals",
         )
-        github_sync = get_provider_snapshot_service().sync_weekly_reference_from_github(
+        github_sync, pending_markets = _sync_weekly_bundles(
             db,
-            market=effective_market,
-            hydrate_cache=True,
-            hydrate_mode="static",
+            effective_market=effective_market,
+            scoped_market=scoped_market,
+            enabled_markets=enabled_markets,
         )
-        if github_sync.get("status") in _GITHUB_SYNC_SUCCESS_STATUSES:
-            total_stocks = len(_load_active_universe_stocks(db, market=scoped_market))
+        if not pending_markets:
+            total_stocks = len(_load_active_universe_stocks(
+                db, market=scoped_market, enabled_markets=enabled_markets
+            ))
             if total_stocks > 0:
                 _maybe_publish_fundamentals_progress(
                     db,
@@ -988,9 +1104,17 @@ def refresh_all_fundamentals_hybrid(
                 "duration_minutes": round(duration / 60, 1),
                 "timestamp": datetime.now().isoformat(),
             }
-        if settings.provider_snapshot_cutover_enabled or settings.provider_snapshot_ingestion_enabled:
+        if scoped_market is None and enabled_markets is not None:
+            # Markets refreshed from their GitHub bundle are done; continue with the rest.
+            enabled_markets = pending_markets
+        if (
+            settings.provider_snapshot_cutover_enabled
+            or settings.provider_snapshot_ingestion_enabled
+        ) and _us_only_refresh_scope(scoped_market, enabled_markets):
             publish = settings.provider_snapshot_cutover_enabled
-            total_stocks = len(_load_active_universe_stocks(db, market=scoped_market))
+            total_stocks = len(_load_active_universe_stocks(
+                db, market=scoped_market, enabled_markets=enabled_markets
+            ))
             _maybe_publish_fundamentals_progress(
                 db,
                 market=effective_market,
@@ -1046,7 +1170,9 @@ def refresh_all_fundamentals_hybrid(
             return response
 
         # Get all active stocks from universe (market-filtered when scoped)
-        universe_stocks = _load_active_universe_stocks(db, market=scoped_market)
+        universe_stocks = _load_active_universe_stocks(
+                db, market=scoped_market, enabled_markets=enabled_markets
+            )
 
         if not universe_stocks:
             logger.warning("No active stocks found in universe", extra=_log_extra)
