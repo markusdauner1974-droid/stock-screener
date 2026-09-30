@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any, Mapping
 
+import numpy as np
 import pandas as pd
 
 from app.infra.serialization import finite_float_or_none
@@ -38,12 +39,24 @@ def drop_non_finite_close_rows(data: pd.DataFrame | None) -> pd.DataFrame | None
         return data
     if any(column not in data.columns for column in OHLC_COLUMNS):
         return data.iloc[0:0].copy()
-    keep_mask = pd.Series(True, index=data.index)
+    keep_mask = np.ones(len(data), dtype=bool)
     for column in OHLC_COLUMNS:
-        keep_mask &= data[column].map(finite_float_or_none).notna()
-    if bool(keep_mask.all()):
+        keep_mask &= _finite_mask(data[column])
+    if keep_mask.all():
         return data
     return data.loc[keep_mask].copy()
+
+
+def _finite_mask(values: pd.Series) -> np.ndarray:
+    """Per-cell ``finite_float_or_none(...) is not None``, vectorized for numpy numbers."""
+    dtype = getattr(values, "dtype", None)
+    # Wider floats (x86 longdouble) can be finite yet overflow Python float, so they
+    # stay on the per-cell path with object and nullable-extension columns.
+    if isinstance(dtype, np.dtype) and (
+        dtype.kind in "iu" or (dtype.kind == "f" and dtype.itemsize <= 8)
+    ):
+        return np.isfinite(values.to_numpy())
+    return values.map(finite_float_or_none).notna().to_numpy()
 
 
 def normalize_price_frame(

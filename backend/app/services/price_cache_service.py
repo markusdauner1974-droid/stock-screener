@@ -63,17 +63,22 @@ def _registered_instrument_markets() -> Dict[str, str]:
         for instrument in instruments
     }
 
-PERIOD_DAYS = {"5y": 1825, "2y": 730, "1y": 365, "max": 3650}
-
-
-def period_days(period: str) -> int:
-    """Calendar days covered by a yfinance-style period; unknown periods mean 2y."""
-    return PERIOD_DAYS.get(period, 730)
-
-
 # Redis keys for warmup metadata
 WARMUP_METADATA_KEY = "cache:warmup:metadata"
 WARMUP_HEARTBEAT_KEY = "cache:warmup:heartbeat"
+
+# Calendar days of history per requested period, shared by every cache tier.
+PERIOD_DAYS: Dict[str, int] = {
+    "5y": 1825,  # 5 years
+    "2y": 730,   # 2 years
+    "1y": 365,   # 1 year
+    "max": 3650  # 10 years for max
+}
+DEFAULT_PERIOD_DAYS = 730  # Unknown periods read as 2y for backward compat
+
+
+def _period_days(period: str) -> int:
+    return PERIOD_DAYS.get(period, DEFAULT_PERIOD_DAYS)
 
 
 class PriceCacheService:
@@ -432,7 +437,7 @@ class PriceCacheService:
             # Calculate date range
             end_date = datetime.now().date()
 
-            start_date = end_date - timedelta(days=period_days(period))
+            start_date = end_date - timedelta(days=_period_days(period))
 
             # Query StockPrice table
             prices = db.query(StockPrice).filter(
@@ -510,7 +515,7 @@ class PriceCacheService:
         try:
             # Calculate date range
             end_date = datetime.now().date()
-            start_date = end_date - timedelta(days=period_days(period))
+            start_date = end_date - timedelta(days=_period_days(period))
 
             chunk_size = max(1, int(getattr(settings, "price_cache_db_chunk_size", 250) or 250))
             total_chunks = (len(symbols) + chunk_size - 1) // chunk_size
@@ -785,7 +790,7 @@ class PriceCacheService:
             merged_data = merged_data.sort_index()
 
             # Trim to requested period
-            cutoff_date = today - timedelta(days=period_days(period))
+            cutoff_date = today - timedelta(days=_period_days(period))
 
             merged_data = merged_data[merged_data.index >= pd.Timestamp(cutoff_date)]
             merged_data = normalize_price_frame(merged_data)
@@ -1990,6 +1995,26 @@ class PriceCacheService:
                 raise
             return self.store_batch_in_cache(batch_data, also_store_db=also_store_db)
 
+    @classmethod
+    def _trim_to_period(cls, df: pd.DataFrame, period: str) -> pd.DataFrame:
+        """Cut a Redis frame (up to RECENT_DAYS) to the window the DB tier returns.
+
+        Relies on the ascending index the freshness check (``df.index[-1]``)
+        already assumes; a binary search is several times cheaper than a mask.
+        """
+        days = _period_days(period)
+        if days >= cls.RECENT_DAYS:
+            return df
+        cutoff = pd.Timestamp(
+            datetime.now().date() - timedelta(days=days),
+            tz=getattr(df.index, "tz", None),
+        )
+        start = df.index.searchsorted(cutoff)
+        if start == 0:
+            return df
+        # .copy() releases the 5y block and keeps later column writes warning-free.
+        return df.iloc[start:].copy()
+
     def get_many(
         self,
         symbols: list[str],
@@ -2010,7 +2035,9 @@ class PriceCacheService:
 
         Args:
             symbols: List of stock ticker symbols
-            period: Time period needed ("1y" or "2y") - used for database fallback
+            period: Time period needed ("1y", "2y", "5y") - Redis hits are trimmed
+                to it and the database fallback queries it, so both tiers return
+                the same window
             market: Optional market for homogeneous batches.
             market_by_symbol: Optional per-symbol market map for mixed batches.
 
@@ -2128,7 +2155,7 @@ class PriceCacheService:
                                 if meta_is_stale:
                                     is_fresh = False
                                 if is_fresh:
-                                    cached_data[symbol] = df
+                                    cached_data[symbol] = self._trim_to_period(df, period)
                                     redis_hits.append(symbol)
                                     chunk_hits += 1
                                     logger.debug(f"Bulk cache HIT for {symbol} (Redis, {len(df)} days, fresh)")

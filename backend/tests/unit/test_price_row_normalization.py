@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 
+import numpy as np
 import pandas as pd
+import pytest
 
+from app.infra.serialization import finite_float_or_none
 from app.services.price_row_normalization import (
     drop_non_finite_close_rows,
     normalize_price_batch,
@@ -49,6 +53,75 @@ def test_drop_non_finite_close_rows_treats_missing_close_as_empty_price_frame():
     assert cleaned is not None
     assert cleaned.empty
     assert list(cleaned.columns) == ["Open", "Volume"]
+
+
+@pytest.mark.parametrize(
+    "columns",
+    [
+        pytest.param(
+            {
+                "Open": [100.0, float("nan"), 102.0, 103.0, 104.0],
+                "High": [101.0, 102.0, float("inf"), 104.0, 105.0],
+                "Low": [99.0, 100.0, 101.0, float("-inf"), 103.0],
+                "Close": [100.5, 101.5, 102.5, 103.5, 104.5],
+            },
+            id="float-columns",
+        ),
+        pytest.param(
+            {
+                "Open": [100, 101, 102, 103, 104],
+                "High": np.array([101, 102, 103, 104, 105], dtype="uint32"),
+                "Low": np.array([99.0, np.nan, 101.0, 102.0, 103.0], dtype="float32"),
+                "Close": [100, 101, 102, 103, 104],
+            },
+            id="integer-and-float32-columns",
+        ),
+        pytest.param(
+            {
+                "Open": [100.0, None, "102.5", "n/a", Decimal("104.25")],
+                "High": [Decimal("101"), 102.0, 103.0, 104.0, float("inf")],
+                "Low": [True, 100.0, 101.0, 102.0, 103.0],
+                "Close": pd.array([100.5, 101.5, pd.NA, 103.5, 104.5], dtype="Float64"),
+            },
+            id="object-and-nullable-columns",
+        ),
+    ],
+)
+def test_drop_non_finite_close_rows_matches_the_per_cell_finite_check(columns):
+    payload = pd.DataFrame(
+        {**columns, "Volume": [1_000_000] * 5},
+        index=pd.to_datetime([date(2026, 6, day) for day in range(22, 27)]),
+    )
+    expected_keep = pd.Series(True, index=payload.index)
+    for column in ("Open", "High", "Low", "Close"):
+        expected_keep &= payload[column].map(finite_float_or_none).notna()
+
+    cleaned = drop_non_finite_close_rows(payload)
+
+    assert not expected_keep.all()
+    pd.testing.assert_frame_equal(cleaned, payload.loc[expected_keep])
+
+
+def test_drop_non_finite_close_rows_drops_longdouble_values_that_overflow_float():
+    # Finite as an x86 longdouble, infinite once converted to a Python float.
+    closes = np.array(["100.5", "1e400", "102.5"], dtype=np.longdouble)
+    payload = pd.DataFrame(
+        {"Open": closes, "High": closes, "Low": closes, "Close": closes},
+        index=pd.to_datetime([date(2026, 6, 24), date(2026, 6, 25), date(2026, 6, 26)]),
+    )
+
+    cleaned = drop_non_finite_close_rows(payload)
+
+    assert cleaned.index.tolist() == [
+        pd.Timestamp(date(2026, 6, 24)),
+        pd.Timestamp(date(2026, 6, 26)),
+    ]
+
+
+def test_drop_non_finite_close_rows_returns_a_clean_frame_unchanged():
+    payload = _ohlcv_frame([101.0, 102.0], [date(2026, 6, 24), date(2026, 6, 25)])
+
+    assert drop_non_finite_close_rows(payload) is payload
 
 
 def test_stock_price_row_from_ohlcv_skips_rows_without_finite_close():
