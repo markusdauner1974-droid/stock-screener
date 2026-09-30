@@ -1616,14 +1616,16 @@ def test_force_refresh_stale_intraday_skips_inactive_symbols(monkeypatch):
     db.commit()
     db.close()
 
+    refreshed_batches = []
+
     class _StubPriceCache:
         @staticmethod
         def get_stale_intraday_symbols():
             return ["AAPL", "DEAD"]
 
         @staticmethod
-        def store_batch_in_cache(batch_data, also_store_db=True):
-            return None
+        def store_refreshed_batch(batch_data):
+            refreshed_batches.append(set(batch_data))
 
     fetched_batches = []
 
@@ -1651,5 +1653,6 @@ def test_force_refresh_stale_intraday_skips_inactive_symbols(monkeypatch):
     result = _force_refresh_stale_intraday_impl(task=None, symbols=None)
 
     assert fetched_batches == [["AAPL"]]
+    assert refreshed_batches == [{"AAPL"}]
     assert result["total"] == 1
     assert result["refreshed"] == 1

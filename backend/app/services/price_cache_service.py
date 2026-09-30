@@ -33,7 +33,7 @@ from ..utils.market_hours import (
     is_trading_day, get_last_trading_day
 )
 from .cache.price_cache_failure_telemetry import PriceCacheFailureTelemetry
-from .cache.price_cache_freshness import PriceCacheFreshnessPolicy
+from .cache.price_cache_freshness import PriceCacheFreshnessPolicy, latest_fetch_metadata
 from .cache.market_cache_policy import MarketAwareCachePolicy, market_cache_policy
 from .cache.price_cache_warmup import PriceCacheWarmupStore
 from .errors import CacheRefreshError
@@ -931,10 +931,15 @@ class PriceCacheService:
         This catches data fetched mid-session (e.g. 2 PM) whose "today" bar is
         incomplete once that market's session has closed.
         """
-        meta = self._get_fetch_metadata(symbol, market=market)
+        calendar_market = calendar_market or self._calendar_markets([symbol], market=market)[symbol]
+        # Writers split between the caller's key (None -> US) and the symbol's
+        # own market key; judge the most recent write.
+        meta = latest_fetch_metadata(
+            self._get_fetch_metadata(symbol, market=key_market)
+            for key_market in dict.fromkeys((str(market or "US").upper(), calendar_market))
+        )
         if not meta:
             return False
-        calendar_market = calendar_market or self._calendar_markets([symbol], market=market)[symbol]
         is_stale = self._is_fetch_metadata_stale(meta, market=calendar_market)
         if is_stale:
             logger.debug(
@@ -1725,6 +1730,25 @@ class PriceCacheService:
         if also_store_db:
             self._store_batch_in_database(batch_data)
 
+        return stored
+
+    def store_refreshed_batch(self, batch_data: Dict[str, pd.DataFrame]) -> int:
+        """Store a stale-intraday refresh under every key namespace readers use.
+
+        Writers split symbols between the US key (callers that omit the market)
+        and the symbol's own market key, and a stale partial bar may sit under
+        either. Overwrite both so neither keeps serving it; write the DB once.
+        """
+        if not batch_data:
+            return 0
+        stored = self.store_batch_in_cache(batch_data, also_store_db=False)
+        non_us: Dict[str, Dict[str, pd.DataFrame]] = {}
+        for symbol, calendar_market in self._calendar_markets(list(batch_data)).items():
+            if calendar_market != "US":
+                non_us.setdefault(calendar_market, {})[symbol] = batch_data[symbol]
+        for calendar_market, group in non_us.items():
+            self.store_batch_in_cache(group, also_store_db=False, market=calendar_market)
+        self._store_batch_in_database(batch_data)
         return stored
 
     def _store_batch_in_database(self, batch_data: Dict[str, pd.DataFrame]) -> None:

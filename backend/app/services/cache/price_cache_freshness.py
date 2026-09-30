@@ -10,9 +10,9 @@ flag, so metadata written by the old US-clock writer is re-judged correctly.
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from time import monotonic
-from typing import Callable, Dict, Mapping, Optional, Sequence
+from typing import Callable, Dict, Iterable, Mapping, Optional, Sequence
 
 from ...utils.market_hours import EASTERN, get_eastern_now, is_market_open
 
@@ -35,6 +35,21 @@ def fetched_at(meta: Mapping) -> Optional[datetime]:
     except ValueError:
         return None
     return value if value.tzinfo is not None else EASTERN.localize(value)
+
+
+_UNKNOWN_FETCH_TIME = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def latest_fetch_metadata(metas: Iterable[Optional[Mapping]]) -> Optional[Mapping]:
+    """The most recently written record among a symbol's metadata keys.
+
+    Writers split a symbol between the US key (callers that omit the market)
+    and its own market key, so the newest ``fetch_timestamp`` is the last write.
+    """
+    present = [meta for meta in metas if meta]
+    if not present:
+        return None
+    return max(present, key=lambda meta: fetched_at(meta) or _UNKNOWN_FETCH_TIME)
 
 
 class PriceCacheFreshnessPolicy:
@@ -193,14 +208,18 @@ class PriceCacheFreshnessPolicy:
             meta_values = pipeline.execute()
             calendar_markets = self._resolve_calendar_markets(key_market_by_symbol)
 
-            stale_symbols: list[str] = []
+            metas_by_symbol: Dict[str, list] = {}
             for (_key, symbol), meta_json in zip(all_keys, meta_values):
-                if not meta_json or symbol in stale_symbols:
+                if not meta_json:
                     continue
                 try:
-                    meta = json.loads(meta_json)
+                    metas_by_symbol.setdefault(symbol, []).append(json.loads(meta_json))
                 except (json.JSONDecodeError, ValueError, TypeError):
                     continue
+
+            stale_symbols: list[str] = []
+            for symbol, metas in metas_by_symbol.items():
+                meta = latest_fetch_metadata(metas)
                 if self.is_fetch_metadata_stale(
                     meta,
                     market=calendar_markets.get(symbol, US_MARKET),

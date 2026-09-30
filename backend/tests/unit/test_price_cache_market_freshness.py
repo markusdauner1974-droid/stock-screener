@@ -79,11 +79,22 @@ class _DictRedis:
                 self.calls = []
 
             def get(self, key):
-                self.calls.append(key)
+                self.calls.append(("get", key, None))
+                return self
+
+            def setex(self, key, ttl, value):
+                self.calls.append(("set", key, value))
                 return self
 
             def execute(self):
-                return [redis.values.get(key) for key in self.calls]
+                results = []
+                for op, key, value in self.calls:
+                    if op == "set":
+                        redis.values[key] = value
+                        results.append(True)
+                    else:
+                        results.append(redis.values.get(key))
+                return results
 
         return _Pipeline()
 
@@ -274,6 +285,51 @@ def test_many_cached_only_fresh_rejects_hk_bar_fetched_mid_session(session_facto
 
     assert result["0700.HK"] is None          # partial bar from 11:00 HKT
     assert result["9988.HK"] is not None      # fetched at 17:00 HKT, final
+
+
+def test_many_cached_only_fresh_reads_market_scoped_metadata(session_factory):
+    # Bulk-fallback fetches store metadata under the symbol's own market key.
+    _store_hk_prices(session_factory, "0700.HK", date(2026, 7, 3))
+    redis = _DictRedis({
+        "price:HK:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 3, 0), legacy_flag=False),
+    })
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+
+    assert service.get_many_cached_only_fresh(["0700.HK"], period="2y")["0700.HK"] is None
+
+
+def test_latest_fetch_metadata_wins_across_key_namespaces(session_factory):
+    # Partial HK-key fetch at 11:00 HKT, then a final US-key refresh at 17:00 HKT.
+    _store_hk_prices(session_factory, "0700.HK", date(2026, 7, 3))
+    redis = _DictRedis({
+        "price:HK:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 3, 0), legacy_flag=False),
+        "price:US:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 9, 0), legacy_flag=False),
+    })
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+
+    assert service.get_many_cached_only_fresh(["0700.HK"], period="2y")["0700.HK"] is not None
+    assert service.get_stale_intraday_symbols() == []
+
+
+def test_refreshed_batch_overwrites_both_key_namespaces(session_factory, monkeypatch):
+    import app.services.price_cache_service as module
+
+    monkeypatch.setattr(module, "get_eastern_now", lambda: _utc(2026, 7, 3, 9, 0).astimezone(module.EASTERN))
+    redis = _DictRedis()
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 9, 0)), redis)
+    db_writes = []
+    monkeypatch.setattr(service, "_store_batch_in_database", lambda batch: db_writes.append(set(batch)))
+    days = pd.bdate_range(end=pd.Timestamp("2026-07-03"), periods=5)
+    frame = pd.DataFrame(
+        {"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Adj Close": 1.0, "Volume": 1},
+        index=days,
+    )
+
+    service.store_refreshed_batch({"0700.HK": frame, "AAPL": frame})
+
+    assert {"price:US:0700.HK:recent", "price:HK:0700.HK:recent", "price:US:AAPL:recent"} <= set(redis.values)
+    assert "price:HK:AAPL:recent" not in redis.values
+    assert db_writes == [{"0700.HK", "AAPL"}]
 
 
 # ── After-close stale scan covers every market ─────────────────────────

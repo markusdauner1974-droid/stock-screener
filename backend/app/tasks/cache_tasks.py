@@ -1475,9 +1475,9 @@ def _force_refresh_stale_intraday_impl(task, symbols: Optional[List[str]] = None
                         error_msg = data.get('error', 'Unknown error')
                         logger.warning(f"✗ {symbol}: {error_msg}")
 
-                # Batch store in Redis (pipeline) + DB (single transaction)
+                # Batch store in Redis (pipeline, every key namespace) + DB (single transaction)
                 if batch_to_store:
-                    price_cache.store_batch_in_cache(batch_to_store, also_store_db=True)
+                    price_cache.store_refreshed_batch(batch_to_store)
 
             except Exception as e:
                 raise_if_transient_database_error(e)
