@@ -81,6 +81,19 @@ def _period_days(period: str) -> int:
     return PERIOD_DAYS.get(period, DEFAULT_PERIOD_DAYS)
 
 
+def _rejected_latest_date(
+    raw: Optional[pd.DataFrame],
+    normalized: Optional[pd.DataFrame],
+) -> Optional[date]:
+    """Date of the latest fetched bar when normalization dropped it, else None."""
+    if raw is None or raw.empty:
+        return None
+    latest = raw.index.max()
+    if normalized is not None and not normalized.empty and normalized.index.max() >= latest:
+        return None
+    return pd.Timestamp(latest).date()
+
+
 # DataFrame.attrs key on a Redis frame: the window (calendar days) it was cut from.
 # A 5y read that returns 250 bars is complete for 5y; a 2y read of 500 bars is not,
 # and row counts cannot tell the two apart.
@@ -622,9 +635,9 @@ class PriceCacheService:
         Fetch full historical data from the market provider and cache it.
         """
         try:
-            data = self._fetch_direct_historical_data(symbol, period=period)
+            raw = self._fetch_direct_historical_data(symbol, period=period)
 
-            data = normalize_price_frame(data)
+            data = normalize_price_frame(raw)
             if data is None:
                 logger.warning("Failed to fetch finite price data for %s", symbol)
                 return None
@@ -632,7 +645,9 @@ class PriceCacheService:
             logger.info(f"Fetched {symbol}: {len(data)} rows")
 
             # Persist first: fetch metadata must only vouch for committed rows.
-            if self._store_in_database(symbol, data):
+            if self._store_in_database(symbol, data) and not self._unreplaced_rejected_rows(
+                {symbol: raw}, {symbol: data}
+            ):
                 self._store_recent_in_redis(symbol, data, market=market, period=period)
 
             return data
@@ -757,9 +772,9 @@ class PriceCacheService:
                 logger.info(f"{symbol} is {days_missing} days old - fetching incremental update")
 
             # Fetch only recent data (last 7 days to ensure overlap)
-            new_data = self._fetch_direct_historical_data(symbol, period="7d")
+            raw_new_data = self._fetch_direct_historical_data(symbol, period="7d")
 
-            new_data = normalize_price_frame(new_data)
+            new_data = normalize_price_frame(raw_new_data)
             if new_data is None:
                 logger.warning(f"Failed to fetch finite incremental data for {symbol}")
                 return cached_data  # Return stale cache as fallback
@@ -812,7 +827,9 @@ class PriceCacheService:
             # Persist only new/updated rows first; fetch metadata must only
             # vouch for committed rows, so Redis is updated after the DB.
             # The merged history is the database window for ``period`` plus the top-up.
-            if self._store_in_database(symbol, new_data_filtered):
+            if self._store_in_database(symbol, new_data_filtered) and not self._unreplaced_rejected_rows(
+                {symbol: raw_new_data}, {symbol: new_data}
+            ):
                 self._store_recent_in_redis(
                     symbol, merged_data, market=market, period=period, from_database=True
                 )
@@ -1578,6 +1595,42 @@ class PriceCacheService:
             logger.error(f"Error scanning for cached symbols: {e}", exc_info=True)
             return []
 
+    def _unreplaced_rejected_rows(
+        self,
+        raw_by_symbol: Mapping[str, Optional[pd.DataFrame]],
+        normalized_by_symbol: Mapping[str, Optional[pd.DataFrame]],
+    ) -> set[str]:
+        """Symbols whose dropped latest bar left a stored row for that date in place.
+
+        Normalization drops non-finite bars (a provider returns today's bar with
+        a NaN close while data is delayed). If the DB already holds a row for
+        that date, usually a partial mid-session bar, this fetch did not replace
+        it, so its metadata must not vouch for it. Without a stored row (an
+        illiquid ticker's no-trade day) there is nothing to vouch for.
+        """
+        rejected = {
+            symbol: day
+            for symbol, raw in raw_by_symbol.items()
+            if (day := _rejected_latest_date(raw, normalized_by_symbol.get(symbol))) is not None
+        }
+        if not rejected:
+            return set()
+        db = None
+        try:
+            db = self._session_factory()
+            rows = db.query(StockPrice.symbol, StockPrice.date).filter(
+                StockPrice.symbol.in_(list(rejected)),
+                StockPrice.date.in_(set(rejected.values())),
+            ).all()
+            return {symbol for symbol, day in rows if rejected.get(symbol) == day}
+        except Exception as exc:
+            # Cannot tell whether a partial row is stored: do not vouch for it.
+            logger.warning("Could not check stored rows for dropped latest bars: %s", exc)
+            return set(rejected)
+        finally:
+            if db is not None:
+                db.close()
+
     def _store_in_database(self, symbol: str, data: pd.DataFrame) -> bool:
         """
         Store price data in database (StockPrice table).
@@ -1716,7 +1769,8 @@ class PriceCacheService:
         if data is None or data.empty:
             logger.warning(f"Cannot cache {symbol}: data is empty")
             return
-        data = normalize_price_frame(data)
+        raw = data
+        data = normalize_price_frame(raw)
         if data is None:
             logger.warning(f"Cannot cache {symbol}: no finite close rows")
             return
@@ -1728,6 +1782,8 @@ class PriceCacheService:
                     return
                 logger.debug(f"Stored {symbol} in database ({len(data)} rows)")
 
+            if self._unreplaced_rejected_rows({symbol: raw}, {symbol: data}):
+                return
             self._store_recent_in_redis(symbol, data, market=market)
             logger.debug(f"Stored {symbol} in Redis cache ({len(data)} rows)")
 
@@ -1761,7 +1817,8 @@ class PriceCacheService:
         """
         if not batch_data:
             return 0
-        batch_data = normalize_price_batch(batch_data)
+        raw_batch = batch_data
+        batch_data = normalize_price_batch(raw_batch)
         if not batch_data:
             return 0
 
@@ -1770,6 +1827,14 @@ class PriceCacheService:
         # the older frame + metadata pair stays in place for every symbol.
         if also_store_db:
             self._store_batch_in_database(batch_data)
+
+        # Keep the older pair for symbols whose dropped latest bar left a stored
+        # (partial) row in place; everything else is cached as usual.
+        unreplaced = self._unreplaced_rejected_rows(raw_batch, batch_data)
+        if unreplaced:
+            batch_data = {s: d for s, d in batch_data.items() if s not in unreplaced}
+            if not batch_data:
+                return 0
 
         stored = 0
 

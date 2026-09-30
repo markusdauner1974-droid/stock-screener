@@ -688,9 +688,10 @@ def _full_fetch(service, frame):
 
 
 def _incremental_fetch(service, frame):
+    # Two uncached bars, so a rejected latest bar still leaves one row to write.
     service._fetch_direct_historical_data = lambda symbol, period: frame
     service._fetch_incremental_and_merge(
-        "AAPL", "2y", cached_data=frame.iloc[:-1], last_cached_date=frame.index[-2].date()
+        "AAPL", "2y", cached_data=frame.iloc[:-2], last_cached_date=frame.index[-3].date()
     )
 
 
@@ -756,3 +757,53 @@ def test_successful_db_write_stamps_fetch_metadata(session_factory, write):
 
     assert "price:US:AAPL:fetch_meta" in redis.values
     assert "price:US:AAPL:recent" in redis.values
+
+
+# ── A dropped latest bar must not certify the row it failed to replace (#449) ──
+
+
+def _frame_with_nan_latest_close() -> pd.DataFrame:
+    frame = _recent_frame()
+    frame.loc[frame.index[-1], "Close"] = float("nan")
+    return frame
+
+
+def _store_partial_row(session_factory, day) -> None:
+    db = session_factory()
+    db.add(StockPrice(symbol="AAPL", date=day, open=0.5, high=0.5, low=0.5, close=0.5, volume=1))
+    db.commit()
+    db.close()
+
+
+@pytest.mark.parametrize("write", _PRICE_WRITERS.values(), ids=_PRICE_WRITERS.keys())
+def test_dropped_latest_bar_does_not_vouch_for_the_stored_partial_row(session_factory, write):
+    frame = _frame_with_nan_latest_close()
+    _store_partial_row(session_factory, frame.index[-1].date())
+    redis = _DictRedis()
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+
+    write(service, frame)
+
+    assert redis.values == {}
+
+
+@pytest.mark.parametrize("write", _PRICE_WRITERS.values(), ids=_PRICE_WRITERS.keys())
+def test_dropped_latest_bar_without_a_stored_row_is_still_stamped(session_factory, write):
+    # Illiquid tickers get NaN rows on no-trade days; they must keep caching.
+    redis = _DictRedis()
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+
+    write(service, _frame_with_nan_latest_close())
+
+    assert "price:US:AAPL:fetch_meta" in redis.values
+    assert "price:US:AAPL:recent" in redis.values
+
+
+def test_unavailable_stored_row_check_does_not_vouch_for_the_dropped_bar():
+    def no_session():
+        raise RuntimeError("database unavailable")
+
+    service = _service(no_session, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), _DictRedis())
+    raw = _frame_with_nan_latest_close()
+
+    assert service._unreplaced_rejected_rows({"AAPL": raw}, {"AAPL": raw.iloc[:-1]}) == {"AAPL"}
