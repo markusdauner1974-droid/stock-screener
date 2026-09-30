@@ -412,15 +412,18 @@ def main() -> int:
     # SIGTERM (docker stop, a timeout) would otherwise skip the cleanup below.
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(128 + signal.SIGTERM))
     scan_id = str(uuid.uuid4())
-    _create_scan(scan_id, market, symbols, screeners)
-    cancel = DbCancellationToken(SessionLocal, scan_id)
-    session_at_start = _session_state(market)
-    print(
-        f"Profiling scan {scan_id}: {len(symbols)} {market} symbols, {processes} processes, "
-        f"session {session_at_start}",
-        flush=True,
-    )
+    cancel = None
+    # From here on every exit path, including one during setup, reaches cleanup.
+    # Deleting a scan that was never created is a no-op.
     try:
+        _create_scan(scan_id, market, symbols, screeners)
+        cancel = DbCancellationToken(SessionLocal, scan_id)
+        session_at_start = _session_state(market)
+        print(
+            f"Profiling scan {scan_id}: {len(symbols)} {market} symbols, {processes} processes, "
+            f"session {session_at_start}",
+            flush=True,
+        )
         result = use_case.execute(
             _ProfilingUow(SessionLocal, clock),
             RunBulkScanCommand(
@@ -434,7 +437,8 @@ def main() -> int:
             _TimedCancel(cancel, clock),
         )
     finally:
-        cancel.close()
+        if cancel is not None:
+            cancel.close()
         if not args.keep:
             _delete_scan(scan_id)
 
