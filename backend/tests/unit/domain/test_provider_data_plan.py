@@ -9,6 +9,7 @@ from app.domain.providers.data_plan import (
     PROVIDER_AKSHARE,
     PROVIDER_BAOSTOCK,
     PROVIDER_KRX,
+    PROVIDER_YAHOO_QUOTE,
     provider_data_plan_registry,
 )
 from app.services.provider_routing_policy import (
@@ -93,7 +94,7 @@ def test_price_plans_record_provider_order_batching_and_provenance() -> None:
     kr = provider_data_plan_registry.plan_for("KR", DATASET_PRICES)
     cn = provider_data_plan_registry.plan_for("CN", DATASET_PRICES)
 
-    assert us.providers == (PROVIDER_YFINANCE,)
+    assert us.providers == (PROVIDER_YFINANCE, PROVIDER_YAHOO_QUOTE)
     assert us.step_for(PROVIDER_YFINANCE).batch_size == 150
     assert kr.providers == (PROVIDER_KRX, PROVIDER_YFINANCE)
     assert kr.step_for(PROVIDER_KRX).batch_size == 200

@@ -738,6 +738,25 @@ def test_fetch_prices_in_batches_attaches_price_plan_provenance(monkeypatch):
     }
 
 
+def test_default_market_price_plan_repairs_latest_session_as_us(monkeypatch):
+    fetcher = BulkDataFetcher()
+    monkeypatch.setattr(
+        fetcher,
+        "_fetch_yfinance_prices_in_batches",
+        lambda symbols, **kwargs: {symbol: _success_result(symbol) for symbol in symbols},
+    )
+    repaired_markets = []
+    monkeypatch.setattr(
+        PriceProviderPlanExecutor,
+        "_repair_latest_sessions_from_yahoo_quote",
+        lambda self, results, *, market: repaired_markets.append(market),
+    )
+
+    fetcher.fetch_prices_in_batches(["SPY"], period="7d", market=None)
+
+    assert repaired_markets == ["US"]
+
+
 def test_cn_bjse_price_plan_disables_yahoo_fallback(monkeypatch):
     fetcher = BulkDataFetcher()
     monkeypatch.setattr(
