@@ -362,19 +362,11 @@ class ScanOrchestrator:
         criteria: Optional[Dict] = None,
     ) -> DataRequirements:
         """Merge data requirements once for a screener set (batch optimization)."""
-        if not settings.setup_engine_enabled:
-            screener_names = [n for n in screener_names if n != "setup_engine"]
+        screener_names = self._enabled_screener_names(screener_names)
         if not screener_names:
             return DataRequirements()
-
-        screeners = self._registry.get_multiple(screener_names)
-        return _requirements_with_opportunity_state_fields(
-            DataRequirements.merge_all(
-                [
-                    screener.get_data_requirements(criteria)
-                    for screener in screeners.values()
-                ]
-            )
+        return self._merge_requirements(
+            self._registry.get_multiple(screener_names), criteria
         )
 
     def scan_stock_multi(
@@ -531,7 +523,16 @@ class ScanOrchestrator:
         if pre_merged_requirements is not None:
             logger.debug("Using pre-merged requirements for %s", symbol)
             return _requirements_with_opportunity_state_fields(pre_merged_requirements)
-        requirements = _requirements_with_opportunity_state_fields(
+        requirements = ScanOrchestrator._merge_requirements(screeners, criteria)
+        logger.info("Merged data requirements for %s: %s", symbol, requirements)
+        return requirements
+
+    @staticmethod
+    def _merge_requirements(
+        screeners: dict[str, BaseStockScreener],
+        criteria: Optional[Dict],
+    ) -> DataRequirements:
+        return _requirements_with_opportunity_state_fields(
             DataRequirements.merge_all(
                 [
                     screener.get_data_requirements(criteria)
@@ -539,8 +540,6 @@ class ScanOrchestrator:
                 ]
             )
         )
-        logger.info("Merged data requirements for %s: %s", symbol, requirements)
-        return requirements
 
     def _apply_market_rs(
         self,
