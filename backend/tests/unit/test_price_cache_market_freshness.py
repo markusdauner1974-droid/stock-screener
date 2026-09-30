@@ -298,6 +298,73 @@ def test_many_cached_only_fresh_reads_market_scoped_metadata(session_factory):
     assert service.get_many_cached_only_fresh(["0700.HK"], period="2y")["0700.HK"] is None
 
 
+class _CountingRedis(_DictRedis):
+    """Counts direct GETs and pipeline executions to pin Redis round-trips."""
+
+    def __init__(self, values=None, *, fail_pipeline=False):
+        super().__init__(values)
+        self.direct_gets = 0
+        self.pipeline_executes = 0
+        self.fail_pipeline = fail_pipeline
+
+    def get(self, key):
+        self.direct_gets += 1
+        return super().get(key)
+
+    def pipeline(self):
+        inner = super().pipeline()
+        redis = self
+
+        class _CountingPipeline:
+            def get(self, key):
+                inner.get(key)
+                return self
+
+            def execute(self):
+                redis.pipeline_executes += 1
+                if redis.fail_pipeline:
+                    raise ConnectionError("redis down")
+                return inner.execute()
+
+        return _CountingPipeline()
+
+
+def _store_bulk_prices(session_factory):
+    _store_hk_prices(session_factory, "0700.HK", date(2026, 7, 3))
+    _store_hk_prices(session_factory, "9988.HK", date(2026, 7, 3))
+    _store_hk_prices(session_factory, "AAPL", date(2026, 7, 2))  # US holiday on 07-03
+
+
+def test_many_cached_only_fresh_reads_metadata_in_one_pipeline(session_factory):
+    _store_bulk_prices(session_factory)
+    redis = _CountingRedis({
+        "price:HK:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 3, 0), legacy_flag=False),  # partial
+        "price:US:9988.HK:fetch_meta": _meta(_utc(2026, 7, 3, 9, 0), legacy_flag=False),  # final
+    })
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+
+    result = service.get_many_cached_only_fresh(["0700.HK", "9988.HK", "AAPL"], period="2y")
+
+    assert result["0700.HK"] is None
+    assert result["9988.HK"] is not None
+    assert result["AAPL"] is not None
+    assert redis.direct_gets == 0
+    assert redis.pipeline_executes == 1
+
+
+def test_many_cached_only_fresh_keeps_redis_failure_behaviour(session_factory):
+    """A Redis error means no metadata, as the per-symbol reads did: rows stay fresh by date."""
+    _store_bulk_prices(session_factory)
+    redis = _CountingRedis({
+        "price:HK:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 3, 0), legacy_flag=False),
+    }, fail_pipeline=True)
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+
+    result = service.get_many_cached_only_fresh(["0700.HK", "9988.HK", "AAPL"], period="2y")
+
+    assert all(result[symbol] is not None for symbol in ("0700.HK", "9988.HK", "AAPL"))
+
+
 def test_latest_fetch_metadata_wins_across_key_namespaces(session_factory):
     # Partial HK-key fetch at 11:00 HKT, then a final US-key refresh at 17:00 HKT.
     _store_hk_prices(session_factory, "0700.HK", date(2026, 7, 3))

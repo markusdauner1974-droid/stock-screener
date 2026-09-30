@@ -345,26 +345,64 @@ class PriceCacheService:
         fresh_results: Dict[str, Optional[pd.DataFrame]] = {}
         calendar_markets = self._calendar_markets(list(results))
 
-        for symbol, (data, last_date) in results.items():
-            calendar_market = calendar_markets[symbol]
-            if (
-                data is not None
-                and not data.empty
-                and (
-                    required_as_of_date is not None
-                    or self._is_data_fresh(last_date, market=calendar_market)
-                )
-                and not self._is_intraday_data_stale(symbol, calendar_market=calendar_market)
-                and self._contains_required_as_of_date(
-                    data,
-                    required_as_of_date,
-                )
+        # Date checks first; only survivors need their fetch metadata.
+        candidates = {
+            symbol: calendar_markets[symbol]
+            for symbol, (data, last_date) in results.items()
+            if data is not None
+            and not data.empty
+            and (
+                required_as_of_date is not None
+                or self._is_data_fresh(last_date, market=calendar_markets[symbol])
+            )
+            and self._contains_required_as_of_date(data, required_as_of_date)
+        }
+        meta_by_symbol = self._latest_fetch_metadata_many(candidates)
+
+        for symbol, (data, _last_date) in results.items():
+            calendar_market = candidates.get(symbol)
+            if calendar_market is not None and not self._is_fetch_metadata_stale(
+                meta_by_symbol.get(symbol), market=calendar_market
             ):
                 fresh_results[symbol] = data
             else:
                 fresh_results[symbol] = None
 
         return fresh_results
+
+    def _latest_fetch_metadata_many(
+        self,
+        calendar_market_by_symbol: Mapping[str, str],
+    ) -> Dict[str, Optional[Dict]]:
+        """Newest fetch metadata per symbol across its key namespaces, in one pipeline.
+
+        Reads the same keys as ``_is_intraday_data_stale`` (unscoped caller key),
+        so a Redis error means "no metadata" exactly as the per-key reads did.
+        """
+        if not self._redis_client or not calendar_market_by_symbol:
+            return {}
+        keys_by_symbol = {
+            symbol: [
+                self._redis_fetch_meta_key(symbol, market=key_market)
+                for key_market in self._metadata_key_markets(None, calendar_market)
+            ]
+            for symbol, calendar_market in calendar_market_by_symbol.items()
+        }
+        try:
+            pipeline = self._redis_client.pipeline()
+            for keys in keys_by_symbol.values():
+                for key in keys:
+                    pipeline.get(key)
+            raw_results = iter(pipeline.execute())
+        except Exception as exc:
+            logger.error("Error batch-reading fetch metadata: %s", exc, exc_info=True)
+            return {}
+        return {
+            symbol: latest_fetch_metadata(
+                self._parse_fetch_metadata(next(raw_results)) for _ in keys
+            )
+            for symbol, keys in keys_by_symbol.items()
+        }
 
     def _get_from_database(self, symbol: str, period: str) -> tuple[Optional[pd.DataFrame], Optional[date]]:
         """
