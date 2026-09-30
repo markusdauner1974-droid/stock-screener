@@ -2028,10 +2028,11 @@ class PriceCacheService:
                 results = iter(chunk_results)
                 for symbol, meta_key_count in zip(chunk_symbols, meta_key_counts):
                     raw_data = next(results)
-                    meta = latest_fetch_metadata(
-                        self._parse_fetch_metadata(next(results)) for _ in range(meta_key_count)
-                    )
-                    fetch_meta_by_symbol[symbol] = meta
+                    metas = [self._parse_fetch_metadata(next(results)) for _ in range(meta_key_count)]
+                    # The Redis frame is judged by the metadata written with it
+                    # (same key); the shared DB row by the latest write anywhere.
+                    meta = metas[0]
+                    fetch_meta_by_symbol[symbol] = latest_fetch_metadata(metas)
                     if raw_data:
                         try:
                             df = pickle.loads(raw_data)

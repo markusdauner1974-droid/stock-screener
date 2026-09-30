@@ -337,6 +337,31 @@ def test_unscoped_bulk_get_consults_symbol_market_metadata(session_factory, monk
     assert fetched == ["0700.HK"]
 
 
+def test_redis_payload_is_judged_by_its_own_namespace_metadata(session_factory, monkeypatch):
+    """A partial US-key frame must not borrow freshness from newer HK-key metadata."""
+    import pickle
+
+    import app.services.price_cache_service as module
+
+    _store_hk_prices(session_factory, "0700.HK", date(2026, 7, 3))  # final DB rows, last close 359
+    days = pd.bdate_range(end=pd.Timestamp("2026-07-03"), periods=250)
+    partial = pd.DataFrame(
+        {"Open": 999.0, "High": 999.0, "Low": 999.0, "Close": 999.0, "Adj Close": 999.0, "Volume": 1},
+        index=days,
+    )
+    redis = _DictRedis({
+        "price:US:0700.HK:recent": pickle.dumps(partial),
+        "price:US:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 3, 0), legacy_flag=False),  # 11:00 HKT
+        "price:HK:0700.HK:fetch_meta": _meta(_utc(2026, 7, 3, 9, 0), legacy_flag=False),  # 17:00 HKT
+    })
+    service = _service(session_factory, _FrozenCalendar(_utc(2026, 7, 3, 10, 0)), redis)
+    monkeypatch.setattr(module, "get_bulk_redis_client", lambda: None)
+
+    frame = service.get_many(["0700.HK"], period="2y")["0700.HK"]
+
+    assert float(frame["Close"].iloc[-1]) == 359.0
+
+
 def test_refreshed_batch_overwrites_both_key_namespaces(session_factory, monkeypatch):
     import app.services.price_cache_service as module
 
