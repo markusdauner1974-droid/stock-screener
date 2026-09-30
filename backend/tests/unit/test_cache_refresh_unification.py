@@ -1029,6 +1029,55 @@ def test_weekly_full_refresh_reraises_nested_soft_time_limit(monkeypatch):
     fake_db.close.assert_called_once()
 
 
+def test_weekly_full_refresh_counts_a_failed_batch_store_as_failures_only(monkeypatch):
+    """A store that raises persisted nothing: its fetched frames are not refreshed."""
+    import app.tasks.cache_tasks as module
+
+    _patch_serialized_coordination(monkeypatch)
+
+    rows = [SimpleNamespace(symbol="AAPL"), SimpleNamespace(symbol="MSFT")]
+    first_query = MagicMock()
+    first_query.filter.return_value.all.return_value = rows
+    second_query = MagicMock()
+    second_query.filter.return_value.order_by.return_value.all.return_value = rows
+    fake_db = MagicMock()
+    fake_db.query.side_effect = [first_query, second_query]
+
+    fake_price_cache = MagicMock()
+    fake_price_cache.store_batch_in_cache.side_effect = RuntimeError("commit failed")
+    fake_cache_manager = MagicMock()
+    fake_cache_manager.cleanup_orphaned_cache_keys.return_value = 0
+    tracked = []
+
+    monkeypatch.setattr(module, "SessionLocal", lambda: fake_db)
+    monkeypatch.setattr(module, "CacheManager", lambda db: fake_cache_manager)
+    monkeypatch.setattr(module, "warm_spy_cache", MagicMock(return_value={"status": "ok"}))
+    monkeypatch.setattr(
+        module,
+        "_fetch_with_backoff",
+        MagicMock(return_value={
+            "AAPL": _success_result("AAPL"),
+            "MSFT": {"has_error": True, "error": "not found"},
+        }),
+    )
+    monkeypatch.setattr(
+        module,
+        "_track_symbol_failures",
+        lambda _cache, successes, failures, _db, failure_details=None: tracked.append(
+            (sorted(successes), sorted(failures))
+        ),
+    )
+    monkeypatch.setattr(module.weekly_full_refresh, "update_state", MagicMock(), raising=False)
+    monkeypatch.setattr("app.wiring.bootstrap.get_price_cache", lambda: fake_price_cache)
+    monkeypatch.setattr("app.services.bulk_data_fetcher.BulkDataFetcher", lambda: MagicMock())
+
+    result = module.weekly_full_refresh.run()
+
+    assert result["refreshed"] == 0
+    assert tracked == [([], ["AAPL", "MSFT"])]
+    fake_price_cache.save_warmup_metadata.assert_called_once_with("partial", 0, 2, market=None)
+
+
 def test_warm_price_cache_uses_batch_store(monkeypatch):
     import app.services.cache_manager as module
 
@@ -1082,6 +1131,31 @@ def test_warm_price_cache_uses_batch_store(monkeypatch):
         "also_store_db": True,
         "period": "2y",
     }
+
+
+def test_warm_price_cache_counts_a_failed_batch_store_as_failures_only(monkeypatch):
+    """A store that raises persisted nothing: count each symbol failed once, none successful."""
+    import app.services.cache_manager as module
+
+    price_cache = MagicMock()
+    price_cache.store_batch_in_cache.side_effect = RuntimeError("commit failed")
+    bulk_fetcher = MagicMock()
+    bulk_fetcher.fetch_prices_in_batches.return_value = {
+        "AAPL": _success_result("AAPL", close=120.0),
+        "BAD": {"symbol": "BAD", "price_data": None, "has_error": True, "error": "No data"},
+    }
+
+    monkeypatch.setattr(module, "get_redis_client", lambda: None)
+    monkeypatch.setattr(module, "BenchmarkCacheService", lambda redis_client, session_factory: MagicMock())
+    monkeypatch.setattr(module, "PriceCacheService", lambda redis_client, session_factory: price_cache)
+    monkeypatch.setattr("app.services.bulk_data_fetcher.BulkDataFetcher", lambda: bulk_fetcher)
+
+    result = module.CacheManager().warm_price_cache(
+        ["AAPL", "BAD"], batch_size=100, rate_limit=0, force_refresh=True
+    )
+
+    assert result["successful"] == 0
+    assert result["failed"] == 2
 
 
 def test_task_registry_lists_daily_market_pipelines_only():

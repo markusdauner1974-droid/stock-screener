@@ -623,7 +623,6 @@ def weekly_full_refresh(self, market: str | None = None):
                         price_df = data['price_data']
                         if not price_df.empty:
                             batch_to_store[symbol] = price_df
-                            refreshed += 1
                             batch_successes.append(symbol)
                         else:
                             failed += 1
@@ -638,15 +637,20 @@ def weekly_full_refresh(self, market: str | None = None):
                 # Batch store in Redis (pipeline) + DB (single transaction)
                 if batch_to_store:
                     price_cache.store_batch_in_cache(batch_to_store, also_store_db=True)
+                # Count only once stored: a store that raises persisted nothing.
+                refreshed += len(batch_successes)
             except SoftTimeLimitExceeded:
                 raise
             except Exception as e:
                 raise_if_transient_database_error(e)
                 logger.error(f"Batch {batch_num} error: {e}")
-                failed += len(batch_symbols)
-                failed_symbols.extend(batch_symbols)
-                batch_failures.extend(batch_symbols)
-                failure_details.update({symbol: str(e) for symbol in batch_symbols})
+                # Fetch failures in this batch are already counted.
+                newly_failed = [s for s in batch_symbols if s not in batch_failures]
+                batch_successes.clear()
+                failed += len(newly_failed)
+                failed_symbols.extend(newly_failed)
+                batch_failures.extend(newly_failed)
+                failure_details.update({symbol: str(e) for symbol in newly_failed})
 
             # Track symbol failures for auto-deactivation
             _track_symbol_failures(
@@ -1501,8 +1505,7 @@ def _force_refresh_stale_intraday_impl(task, symbols: Optional[List[str]] = None
                         price_df = data['price_data']
                         if not price_df.empty:
                             batch_to_store[symbol] = price_df
-                            refreshed += 1
-                            logger.debug(f"✓ {symbol}: {len(price_df)} rows refreshed")
+                            logger.debug(f"✓ {symbol}: {len(price_df)} rows fetched")
                         else:
                             failed += 1
                             failed_symbols.append(symbol)
@@ -1516,12 +1519,16 @@ def _force_refresh_stale_intraday_impl(task, symbols: Optional[List[str]] = None
                 # Batch store in Redis (pipeline, every key namespace) + DB (single transaction)
                 if batch_to_store:
                     price_cache.store_refreshed_batch(batch_to_store)
+                # Count only once stored: a store that raises persisted nothing.
+                refreshed += len(batch_to_store)
 
             except Exception as e:
                 raise_if_transient_database_error(e)
                 logger.error(f"Batch {batch_num} error: {e}")
-                failed += len(batch_symbols)
-                failed_symbols.extend(batch_symbols)
+                # Fetch failures in this batch are already counted.
+                newly_failed = [s for s in batch_symbols if s not in failed_symbols]
+                failed += len(newly_failed)
+                failed_symbols.extend(newly_failed)
 
             # Update task state for progress tracking
             processed += len(batch_symbols)

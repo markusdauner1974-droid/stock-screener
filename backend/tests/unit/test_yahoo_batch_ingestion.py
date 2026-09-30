@@ -1666,6 +1666,62 @@ def test_force_refresh_stale_intraday_fetches_each_market_with_its_provider_plan
     assert result["refreshed"] == 3
 
 
+def test_force_refresh_stale_intraday_counts_a_failed_store_as_failures_only(monkeypatch):
+    """A store that raises persisted nothing: count each symbol failed once, none refreshed."""
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    TestingSessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
+
+    import app.tasks.cache_tasks as module
+
+    _patch_cache_tasks_session_factory(monkeypatch, module, TestingSessionLocal)
+
+    db = TestingSessionLocal()
+    db.add_all(
+        [
+            StockUniverse(
+                symbol=symbol,
+                market="US",
+                exchange="XNAS",
+                is_active=True,
+                status=UNIVERSE_STATUS_ACTIVE,
+                status_reason="active",
+            )
+            for symbol in ("AAPL", "MSFT")
+        ]
+    )
+    db.commit()
+    db.close()
+
+    class _FailingStoreCache:
+        @staticmethod
+        def get_stale_intraday_symbols():
+            return ["AAPL", "MSFT"]
+
+        @staticmethod
+        def store_refreshed_batch(batch_data):
+            raise RuntimeError("commit failed")
+
+    def fake_fetch(self, symbols, **_kwargs):
+        del self
+        return {
+            symbol: _success_result(symbol) if symbol == "AAPL" else {"has_error": True, "error": "not found"}
+            for symbol in symbols
+        }
+
+    monkeypatch.setattr("app.wiring.bootstrap.get_price_cache", lambda: _FailingStoreCache())
+    monkeypatch.setattr(
+        "app.services.bulk_data_fetcher.BulkDataFetcher.fetch_prices_in_batches",
+        fake_fetch,
+    )
+
+    result = _force_refresh_stale_intraday_impl(task=None, symbols=None)
+
+    assert result["refreshed"] == 0
+    assert result["failed"] == 2
+    assert sorted(result["failed_symbols"]) == ["AAPL", "MSFT"]
+
+
 def test_force_refresh_stale_intraday_skips_inactive_symbols(monkeypatch):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
