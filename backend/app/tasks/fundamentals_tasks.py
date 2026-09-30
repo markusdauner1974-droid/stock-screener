@@ -153,6 +153,11 @@ def _runtime_market_scope() -> tuple[str, frozenset[str]] | None:
     return prefs.primary_market, frozenset(prefs.enabled_markets)
 
 
+def _market_enabled(market: str, enabled_markets: frozenset[str] | None) -> bool:
+    """Whether a scoped refresh may run; unreadable preferences (None) fail open."""
+    return enabled_markets is None or market in enabled_markets
+
+
 def _us_snapshot_allowed(enabled_markets: frozenset[str] | None) -> bool:
     """The snapshot pipeline builds the US Finviz universe and snapshot; skip it when US is disabled."""
     return enabled_markets is None or "US" in enabled_markets
@@ -256,7 +261,6 @@ def refresh_all_fundamentals(
         }
     """
     from .market_queues import market_tag, log_extra, normalize_market
-    from ..services.runtime_preferences_service import is_market_enabled_now
     _log_extra = log_extra(market)
     logger.info("=" * 60)
     logger.info("TASK: Weekly Fundamental Data Refresh %s", market_tag(market), extra=_log_extra)
@@ -272,7 +276,7 @@ def refresh_all_fundamentals(
         else scope[0] if scope is not None else "US"
     )
     activity_lifecycle = activity_lifecycle or "weekly_refresh"
-    if market is not None and not is_market_enabled_now(effective_market):
+    if market is not None and not _market_enabled(effective_market, enabled_markets):
         logger.info("Skipping fundamentals refresh for disabled market %s", market, extra=_log_extra)
         return {
             'status': 'skipped',
@@ -961,7 +965,6 @@ def refresh_all_fundamentals_hybrid(
     logger.info("yfinance batch size: %s", yfinance_batch_size, extra=_log_extra)
     logger.info("=" * 60)
 
-    from ..services.runtime_preferences_service import is_market_enabled_now
 
     scope = _runtime_market_scope()
     enabled_markets = scope[1] if scope is not None else None
@@ -971,7 +974,7 @@ def refresh_all_fundamentals_hybrid(
         normalize_market(market) if market is not None
         else scope[0] if scope is not None else "US"
     )
-    if market is not None and not is_market_enabled_now(effective_market):
+    if market is not None and not _market_enabled(effective_market, enabled_markets):
         logger.info("Skipping hybrid fundamentals refresh for disabled market %s", market, extra=_log_extra)
         return {
             'status': 'skipped',

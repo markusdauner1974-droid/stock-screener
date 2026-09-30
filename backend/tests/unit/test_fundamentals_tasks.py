@@ -810,6 +810,43 @@ def test_hybrid_refresh_skips_disabled_market(monkeypatch):
     assert result["market"] == "JP"
 
 
+@pytest.mark.parametrize("task_name", ["refresh_all_fundamentals", "refresh_all_fundamentals_hybrid"])
+def test_scoped_refresh_fails_open_when_preferences_unreadable(monkeypatch, task_name):
+    """An unreadable preference must not abort a scoped refresh (documented fail-open)."""
+    import app.services.runtime_preferences_service as prefs
+    import app.tasks.fundamentals_tasks as module
+
+    def _unreadable(*args, **kwargs):
+        raise ValueError("Unsupported market 'XX'")
+
+    monkeypatch.setattr(prefs, "runtime_preferences_now", _unreadable)
+    monkeypatch.setattr(prefs, "is_market_enabled_now", _unreadable)
+    _prepare_refresh(monkeypatch, module)
+    fetched: list[str] = []
+    monkeypatch.setattr(module, "get_fundamentals_cache", lambda: _recording_cache(fetched))
+
+    class _HybridStub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        @staticmethod
+        def fetch_fundamentals_batch(symbols, *args, **kwargs):
+            fetched.extend(symbols)
+            return {symbol: {"symbol": symbol} for symbol in symbols}
+
+        @staticmethod
+        def store_all_caches(*args, **kwargs):
+            return {"fundamentals_stored": 1, "quarterly_stored": 1, "failed": 0}
+
+    monkeypatch.setattr(module, "HybridFundamentalsService", _HybridStub)
+    task = getattr(module, task_name)
+    kwargs = {"include_finviz": False} if task_name.endswith("hybrid") else {}
+
+    task.run(market="HK", **kwargs)
+
+    assert fetched == ["0700.HK"]
+
+
 def test_populate_initial_cache_skips_disabled_markets(monkeypatch):
     import app.tasks.fundamentals_tasks as module
 
