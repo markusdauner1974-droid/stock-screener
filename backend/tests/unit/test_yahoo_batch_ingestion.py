@@ -1047,7 +1047,7 @@ def test_get_many_reloads_after_close_if_redis_meta_marks_intraday_stale(monkeyp
     monkeypatch.setattr(module, "get_eastern_now", lambda: datetime(2026, 3, 18, 17, 0, 0))
     monkeypatch.setattr(module, "is_market_open", lambda now=None: False)
     monkeypatch.setattr(service, "_get_expected_data_date", lambda market=None: date(2026, 3, 18))
-    monkeypatch.setattr(service, "_get_many_from_database", lambda symbols, period: {"AAPL": (None, None)})
+    monkeypatch.setattr(service, "_get_many_from_database", lambda symbols, period, **_kwargs: {"AAPL": (None, None)})
     monkeypatch.setattr(service, "store_batch_in_cache", lambda batch_data, also_store_db=True: None)
 
     fetched_symbols = []
@@ -1188,7 +1188,7 @@ def test_bulk_fallback_writes_fetched_prices_to_symbol_market_scope(monkeypatch)
     db.commit()
     db.close()
 
-    monkeypatch.setattr(service, "_get_many_from_database", lambda symbols, period: {"0700.HK": (None, None)})
+    monkeypatch.setattr(service, "_get_many_from_database", lambda symbols, period, **_kwargs: {"0700.HK": (None, None)})
 
     def fake_fetch(self, symbols, period="2y", start_batch_size=None, market=None):
         assert market == "HK"
@@ -1246,7 +1246,7 @@ def test_bulk_fallback_warms_fresh_db_hits_to_inferred_symbol_market(monkeypatch
     db.close()
 
     fresh_df = _price_df(date(2026, 3, 18), 200.0)
-    monkeypatch.setattr(service, "_get_many_from_database", lambda symbols, period: {"0700.HK": (fresh_df, date(2026, 3, 18))})
+    monkeypatch.setattr(service, "_get_many_from_database", lambda symbols, period, **_kwargs: {"0700.HK": (fresh_df, date(2026, 3, 18))})
     stored = []
     monkeypatch.setattr(
         service,
@@ -1333,7 +1333,7 @@ def test_get_many_cached_only_fresh_requires_requested_session(monkeypatch):
     monkeypatch.setattr(
         service,
         "_get_many_from_database",
-        lambda symbols, period: {
+        lambda symbols, period, **_kwargs: {
             "AAPL": (complete, date(2026, 3, 20)),
             "MSFT": (missing_target, date(2026, 3, 20)),
         },
@@ -1364,7 +1364,7 @@ def test_get_many_cached_only_fresh_required_session_bypasses_global_freshness(m
     monkeypatch.setattr(
         service,
         "_get_many_from_database",
-        lambda symbols, period: {
+        lambda symbols, period, **_kwargs: {
             "7203.T": (frame, date(2026, 3, 20)),
             "6758.T": (missing_target, date(2026, 3, 19)),
         },
@@ -1393,7 +1393,7 @@ def test_get_many_cached_only_fresh_filters_stale_database_rows(monkeypatch):
     monkeypatch.setattr(
         service,
         "_get_many_from_database",
-        lambda symbols, period: {
+        lambda symbols, period, **_kwargs: {
             "AAPL": (fresh_df, date(2026, 3, 18)),
             "MSFT": (stale_df, date(2026, 3, 17)),
             "NVDA": (None, None),
@@ -1406,6 +1406,16 @@ def test_get_many_cached_only_fresh_filters_stale_database_rows(monkeypatch):
     assert result["AAPL"] is fresh_df
     assert result["MSFT"] is None
     assert result["NVDA"] is None
+
+
+def test_get_many_cached_only_fresh_always_forwards_minimum_rows(monkeypatch):
+    service = PriceCacheService(redis_client=None, session_factory=lambda: MagicMock())
+    bulk_db_lookup = MagicMock(return_value={})
+    monkeypatch.setattr(service, "_get_many_from_database", bulk_db_lookup)
+
+    service.get_many_cached_only_fresh(["AAPL"])
+
+    bulk_db_lookup.assert_called_once_with(["AAPL"], "2y", minimum_rows=50)
 
 
 def test_get_many_from_database_chunks_large_symbol_sets(monkeypatch):
