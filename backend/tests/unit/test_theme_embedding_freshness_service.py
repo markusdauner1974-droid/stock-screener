@@ -245,6 +245,50 @@ def test_find_similar_themes_refreshes_stale_records_before_similarity(db_sessio
     assert refreshed_peer is not None and refreshed_peer.is_stale is False
 
 
+def test_find_similar_themes_loads_peer_embeddings_in_one_query(db_session):
+    """#420: one embedding query for all peers, not one per peer."""
+    from sqlalchemy import event
+
+    engine = _StubEmbeddingEngine()
+    service = _make_service(db_session, engine)
+    vectors = ["[1.0, 0.0]", "[0.8, 0.6]", "[0.6, 0.8]", "[0.0, 1.0]", "[-1.0, 0.0]"]
+    themes = [
+        _make_theme_with_embedding(
+            db_session,
+            canonical_key=f"theme_{index}",
+            name=f"Theme {index}",
+            category="technology",
+            vector=vector,
+        )
+        for index, vector in enumerate(vectors)
+    ]
+    # Make every stored embedding current, so nothing needs a refresh.
+    for theme in themes:
+        record = service.embedding_repo.get_for_cluster(theme.id)
+        record.content_hash = service.embedding_repo.build_theme_content_hash(theme)
+    db_session.commit()
+
+    embedding_queries = []
+
+    def count(conn, cursor, statement, *_args):
+        if "FROM theme_embeddings" in statement:
+            embedding_queries.append(statement)
+
+    bind = db_session.get_bind()
+    event.listen(bind, "before_cursor_execute", count)
+    try:
+        similar = service.find_similar_themes(themes[0].id, threshold=0.5)
+    finally:
+        event.remove(bind, "before_cursor_execute", count)
+
+    assert len(embedding_queries) == 2  # the source, then every peer at once
+    assert engine.calls == 0
+    assert [(item["theme_id"], item["similarity"]) for item in similar] == [
+        (themes[1].id, 0.8),
+        (themes[2].id, 0.6),
+    ]
+
+
 def test_cluster_identity_update_marks_embedding_stale_in_same_commit(db_session):
     theme = _make_theme(db_session)
     _make_embedding(db_session, theme.id, stale=False)
