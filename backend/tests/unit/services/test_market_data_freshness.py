@@ -6,7 +6,7 @@ Uses an in-memory session stub; no real DB required.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 import inspect
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -22,7 +22,7 @@ def _fresh_benchmarks(monkeypatch):
     monkeypatch.setattr(
         market_data_freshness,
         "_latest_benchmark_bar",
-        lambda _session, market: (("BENCH",), date.max),
+        lambda market: (("BENCH",), date.max),
     )
 
 
@@ -447,7 +447,7 @@ def _patch_benchmark(latest_by_market):
     """Benchmark candidates and newest cached bar per market (None = no rows)."""
     return patch(
         "app.services.market_data_freshness._latest_benchmark_bar",
-        side_effect=lambda _session, market: latest_by_market[market],
+        side_effect=lambda market: latest_by_market[market],
     )
 
 
@@ -536,24 +536,101 @@ def test_market_without_a_configured_benchmark_is_not_blocked():
         assert check_symbol_freshness(["AAPL"]) is None
 
 
-def test_latest_benchmark_bar_reads_the_registry_candidates(monkeypatch):
-    from app.services import market_data_freshness
-    from app.services.benchmark_registry_service import benchmark_registry
+def _benchmark_reader(bars_by_symbol):
+    """The real benchmark reader over fake ``stock_prices`` rows per symbol."""
+    from app.services.benchmark_cache_service import BenchmarkCacheService
 
-    monkeypatch.undo()  # the real helper, not the autouse stand-in
+    class _Session:
+        def __init__(self):
+            self._symbol = None
 
-    class _ScalarSession:
         def query(self, *args):
             return self
 
-        def filter(self, *args):
+        def filter(self, symbol_clause, *args):
+            self._symbol = symbol_clause.right.value
             return self
 
-        def scalar(self):
-            return date(2026, 6, 18)
+        def order_by(self, *args):
+            return self
 
-    candidates, latest = market_data_freshness._latest_benchmark_bar(_ScalarSession(), "US")
+        def all(self):
+            return bars_by_symbol.get(self._symbol, [])
 
-    assert candidates == tuple(benchmark_registry.get_candidate_symbols("US"))
-    assert latest == date(2026, 6, 18)
-    assert market_data_freshness._latest_benchmark_bar(_ScalarSession(), "ZZ") == ((), None)
+        def close(self):
+            pass
+
+    return BenchmarkCacheService(redis_client=object(), session_factory=_Session)
+
+
+def _bars(count, last, *, nan_last=False):
+    days =[last - timedelta(days=offset) for offset in range(count)][::-1]
+    return [
+        SimpleNamespace(
+            date=day,
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=float("nan") if nan_last and day == last else 100.5,
+            volume=1_000_000,
+        )
+        for day in days
+    ]
+
+
+def _real_latest_benchmark_bar(monkeypatch, bars_by_symbol):
+    from app.services import market_data_freshness
+
+    monkeypatch.undo()  # the real helper, not the autouse stand-in
+    monkeypatch.setattr(
+        market_data_freshness,
+        "get_benchmark_cache",
+        lambda: _benchmark_reader(bars_by_symbol),
+    )
+    return market_data_freshness._latest_benchmark_bar
+
+
+def test_latest_benchmark_bar_takes_the_newest_usable_candidate(monkeypatch):
+    from app.services.benchmark_registry_service import benchmark_registry
+
+    primary, fallback = benchmark_registry.get_candidate_symbols("US")
+    latest_bar = _real_latest_benchmark_bar(
+        monkeypatch,
+        {primary: _bars(200, date.today() - timedelta(days=3)), fallback: _bars(200, date.today())},
+    )
+
+    candidates, latest = latest_bar("US")
+
+    assert candidates == (primary, fallback)
+    assert latest == date.today()
+
+
+def test_latest_benchmark_bar_skips_a_latest_bar_the_reader_drops(monkeypatch):
+    """Codex review on #458: a current-dated row with a non-finite close is
+    dropped by the reader, so it must not count as fresh."""
+    from app.services.benchmark_registry_service import benchmark_registry
+
+    candidates = benchmark_registry.get_candidate_symbols("US")
+    latest_bar = _real_latest_benchmark_bar(
+        monkeypatch, {candidates[0]: _bars(200, date.today(), nan_last=True)}
+    )
+
+    assert latest_bar("US")[1] == date.today() - timedelta(days=1)
+
+
+def test_latest_benchmark_bar_ignores_a_candidate_the_reader_rejects(monkeypatch):
+    """Fewer than 100 rows: the reader returns nothing and the scan would fetch."""
+    from app.services.benchmark_registry_service import benchmark_registry
+
+    candidates = benchmark_registry.get_candidate_symbols("US")
+    latest_bar = _real_latest_benchmark_bar(
+        monkeypatch, {candidates[0]: _bars(99, date.today())}
+    )
+
+    assert latest_bar("US")[1] is None
+
+
+def test_latest_benchmark_bar_treats_an_unknown_market_as_unconfigured(monkeypatch):
+    latest_bar = _real_latest_benchmark_bar(monkeypatch, {})
+
+    assert latest_bar("ZZ") == ((), None)

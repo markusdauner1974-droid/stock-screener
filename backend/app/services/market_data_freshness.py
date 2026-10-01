@@ -28,7 +28,7 @@ from ..models.stock import StockPrice
 from ..models.stock_universe import StockUniverse
 from ..services.benchmark_registry_service import benchmark_registry
 from ..services.market_refresh_state_service import get_market_refresh_state
-from ..wiring.bootstrap import get_market_calendar_service
+from ..wiring.bootstrap import get_benchmark_cache, get_market_calendar_service
 
 logger = logging.getLogger(__name__)
 
@@ -51,26 +51,27 @@ class _MarketFreshnessAssessment:
         return bool(self.stale_symbols) or self.reason is not None
 
 
-def _latest_benchmark_bar(session: Any, market: str) -> tuple[tuple[str, ...], date | None]:
-    """The market's benchmark candidates and the newest cached bar among them.
+def _latest_benchmark_bar(market: str) -> tuple[tuple[str, ...], date | None]:
+    """The market's benchmark candidates and the newest bar the scan could use.
 
     Mirrors the scan's benchmark lookup, which serves any candidate (primary,
     then fallback) whose cached data reaches the last completed session. Both
-    of its cache tiers are written together, so the database decides. A market
-    without a configured benchmark returns no candidates.
+    of its cache tiers are written together, so the database decides, read
+    through the lookup's own database reader so its row-count and finite-close
+    rules apply. "1y" is that reader's smaller window, so it is the stricter
+    row count. A market without a configured benchmark returns no candidates.
     """
-    # ponytail: ignores the lookup's 100-row minimum; benchmarks are indices
-    # and broad ETFs with years of history.
     try:
         candidates = tuple(benchmark_registry.get_candidate_symbols(market))
     except (KeyError, ValueError):  # not a benchmark market: the scan cannot fetch one either
         return (), None
-    latest = (
-        session.query(func.max(StockPrice.date))
-        .filter(StockPrice.symbol.in_(candidates))
-        .scalar()
-    )
-    return candidates, latest
+    reader = get_benchmark_cache()
+    last_dates = []
+    for symbol in candidates:
+        frame = reader.load_benchmark_from_database(symbol, "1y", market)
+        if frame is not None and not frame.empty:
+            last_dates.append(frame.index[-1].date())
+    return candidates, max(last_dates, default=None)
 
 
 def _parse_state_date(value: object) -> date | None:
@@ -245,7 +246,7 @@ def _assess_market_freshness(
             hard_block=True,
         )
 
-    candidates, benchmark_last = _latest_benchmark_bar(session, market)
+    candidates, benchmark_last = _latest_benchmark_bar(market)
     if candidates and (benchmark_last is None or benchmark_last < expected_date):
         return _MarketFreshnessAssessment(
             market=market,
