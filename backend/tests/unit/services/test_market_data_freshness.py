@@ -11,6 +11,20 @@ import inspect
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _fresh_benchmarks(monkeypatch):
+    """Every market's benchmark is current unless a test says otherwise."""
+    from app.services import market_data_freshness
+
+    monkeypatch.setattr(
+        market_data_freshness,
+        "_latest_benchmark_bar",
+        lambda _session, market: (("BENCH",), date.max),
+    )
+
 
 @dataclass
 class _Row:
@@ -427,3 +441,119 @@ def test_degraded_policy_requires_completed_refresh_state():
     assert decision.blocking_detail["code"] == "market_data_stale"
     assert decision.blocking_detail["stale_markets"][0]["reason"] == "refresh_state_missing"
     assert decision.warnings == ()
+
+
+def _patch_benchmark(latest_by_market):
+    """Benchmark candidates and newest cached bar per market (None = no rows)."""
+    return patch(
+        "app.services.market_data_freshness._latest_benchmark_bar",
+        side_effect=lambda _session, market: latest_by_market[market],
+    )
+
+
+@pytest.mark.parametrize("stale_tail", [False, True])
+def test_stale_benchmark_blocks_a_market_whose_stocks_are_fresh(stale_tail):
+    """#455: the scan's benchmark lookup fetches from the provider when no cached
+    benchmark reaches the last completed session, so the gate must refuse."""
+    from app.services.market_data_freshness import (
+        ScanFreshnessPolicy,
+        evaluate_symbol_freshness,
+    )
+
+    symbols = [f"FRESH{i:03d}" for i in range(100)]
+    with (
+        _patch_session(_rows(symbols)),
+        _patch_calendar({"US": date(2026, 6, 18)}),
+        _patch_refresh_state({"US": date(2026, 6, 18)}),
+        _patch_benchmark({"US": (("SPY",), date(2026, 6, 17))}),
+    ):
+        decision = evaluate_symbol_freshness(
+            symbols,
+            policy=(
+                ScanFreshnessPolicy.allowing_stale_tail()
+                if stale_tail
+                else ScanFreshnessPolicy.strict()
+            ),
+        )
+
+    detail = decision.blocking_detail
+    assert detail is not None and decision.warnings == ()
+    us = detail["stale_markets"][0]
+    assert us["reason"] == "benchmark_stale"
+    assert us["benchmark"] == {
+        "symbols": ["SPY"],
+        "last_cached_date": "2026-06-17",
+        "expected_date": "2026-06-18",
+    }
+    assert "benchmark SPY last: 2026-06-17, expected: 2026-06-18" in detail["message"]
+    assert "oldest stock: 2026-06-18" in detail["message"]
+
+
+def test_missing_benchmark_rows_block_the_market():
+    from app.services.market_data_freshness import check_symbol_freshness
+
+    with (
+        _patch_session(_rows(["AAPL"])),
+        _patch_calendar({"US": date(2026, 6, 18)}),
+        _patch_refresh_state({"US": date(2026, 6, 18)}),
+        _patch_benchmark({"US": (("SPY", "VOO"), None)}),
+    ):
+        detail = check_symbol_freshness(["AAPL"])
+
+    us = detail["stale_markets"][0]
+    assert us["reason"] == "benchmark_stale"
+    assert us["benchmark"]["last_cached_date"] is None
+    assert "benchmark SPY/VOO" in detail["message"]
+
+
+def test_benchmark_check_only_blocks_its_own_market():
+    from app.services.market_data_freshness import check_symbol_freshness
+
+    rows = [*_rows(["AAPL"]), *_rows(["0700.HK"], market="HK", last_date=date(2026, 6, 18))]
+    with (
+        _patch_session(rows),
+        _patch_calendar({"US": date(2026, 6, 18), "HK": date(2026, 6, 18)}),
+        _patch_refresh_state({"US": date(2026, 6, 18), "HK": date(2026, 6, 18)}),
+        _patch_benchmark({
+            "US": (("SPY",), date(2026, 6, 18)),
+            "HK": (("^HSI",), date(2026, 6, 16)),
+        }),
+    ):
+        detail = check_symbol_freshness(["AAPL", "0700.HK"])
+
+    assert [m["market"] for m in detail["stale_markets"]] == ["HK"]
+
+
+def test_market_without_a_configured_benchmark_is_not_blocked():
+    from app.services.market_data_freshness import check_symbol_freshness
+
+    with (
+        _patch_session(_rows(["AAPL"])),
+        _patch_calendar({"US": date(2026, 6, 18)}),
+        _patch_refresh_state({"US": date(2026, 6, 18)}),
+        _patch_benchmark({"US": ((), None)}),
+    ):
+        assert check_symbol_freshness(["AAPL"]) is None
+
+
+def test_latest_benchmark_bar_reads_the_registry_candidates(monkeypatch):
+    from app.services import market_data_freshness
+    from app.services.benchmark_registry_service import benchmark_registry
+
+    monkeypatch.undo()  # the real helper, not the autouse stand-in
+
+    class _ScalarSession:
+        def query(self, *args):
+            return self
+
+        def filter(self, *args):
+            return self
+
+        def scalar(self):
+            return date(2026, 6, 18)
+
+    candidates, latest = market_data_freshness._latest_benchmark_bar(_ScalarSession(), "US")
+
+    assert candidates == tuple(benchmark_registry.get_candidate_symbols("US"))
+    assert latest == date(2026, 6, 18)
+    assert market_data_freshness._latest_benchmark_bar(_ScalarSession(), "ZZ") == ((), None)

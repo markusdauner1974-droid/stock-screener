@@ -592,7 +592,8 @@ class DataPreparationLayer:
                 fetch for symbols the bulk read did not return.
             cache_only: The bulk per-stock price read does not call a
                 provider either (see ``PriceCacheService.get_many``). The
-                benchmark lookup below still can (#455).
+                benchmark lookup below still can; manual scans are refused
+                up front when it would need to (#455).
 
         Returns:
             Dict mapping symbols to their StockData objects
