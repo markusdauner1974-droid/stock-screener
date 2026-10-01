@@ -1321,3 +1321,70 @@ def test_update_all_theme_metrics_loads_spy_once_per_run(db_session):
         themes[0].id, as_of_date=now,
     )
     assert reused["basket_rs_vs_spy"] == pytest.approx(fresh["basket_rs_vs_spy"])
+
+
+def test_update_all_theme_metrics_looks_up_latest_scan_once_per_run(db_session):
+    """#467: the latest completed scan is the same for every theme in a run; look it up once."""
+    from app.models.scan_result import Scan, ScanResult
+    from sqlalchemy import event
+
+    now = datetime(2026, 2, 24, 18, 0, 0)
+
+    def _add_scan(scan_id, completed_at, rows):
+        db_session.add(Scan(
+            scan_id=scan_id, status="completed", screener_types=["minervini"],
+            started_at=completed_at - timedelta(minutes=5), completed_at=completed_at,
+        ))
+        for symbol, minervini, stage, rs in rows:
+            db_session.add(ScanResult(
+                scan_id=scan_id, symbol=symbol, minervini_score=minervini, stage=stage, rs_rating=rs,
+            ))
+
+    themes = []
+    for name, key, symbol in (("Grid Demand", "grid_demand", "AAPL"), ("Chip Supply", "chip_supply", "MSFT")):
+        theme = _make_theme(db_session, name=name, canonical_key=key, state="active", now=now)
+        db_session.add(ThemeConstituent(
+            theme_cluster_id=theme.id, symbol=symbol, source="manual", confidence=1.0, is_active=True,
+        ))
+        themes.append(theme)
+    _add_scan("old-scan", now - timedelta(days=2), [("AAPL", 10.0, 1, 20.0), ("MSFT", 10.0, 1, 30.0)])
+    _add_scan("new-scan", now - timedelta(days=1), [("AAPL", 80.0, 2, 90.0), ("MSFT", 50.0, 2, 60.0)])
+    db_session.commit()
+
+    service = ThemeDiscoveryService(db_session, pipeline="technical")
+    service.promote_candidate_themes = lambda now=None, limit=None, auto_commit=True: {"promoted": 0}  # type: ignore[method-assign]
+    service.apply_dormancy_and_reactivation_policies = lambda now=None, limit=None, auto_commit=True: {}  # type: ignore[method-assign]
+
+    scan_queries = []
+
+    def _count_scans(conn, cursor, statement, parameters, context, executemany):
+        if "FROM scans" in statement:
+            scan_queries.append(statement)
+
+    engine = db_session.get_bind()
+    event.listen(engine, "before_cursor_execute", _count_scans)
+    try:
+        result = service.update_all_theme_metrics(as_of_date=now)
+    finally:
+        event.remove(engine, "before_cursor_execute", _count_scans)
+
+    assert result["themes_updated"] == 2
+    assert len(scan_queries) == 1
+
+    # Each theme still reads the newest scan's results.
+    stored = {
+        theme.id: db_session.query(ThemeMetrics).filter(
+            ThemeMetrics.theme_cluster_id == theme.id, ThemeMetrics.date == now.date(),
+        ).one()
+        for theme in themes
+    }
+    assert (stored[themes[0].id].num_passing_minervini, stored[themes[0].id].avg_rs_rating) == (1, 90.0)
+    assert (stored[themes[1].id].num_passing_minervini, stored[themes[1].id].avg_rs_rating) == (0, 60.0)
+    assert all(row.num_stage_2 == 1 for row in stored.values())
+
+    # The run's cache must not outlive the run: a reused instance sees a newer scan.
+    _add_scan("newest-scan", now, [("AAPL", 10.0, 3, 5.0)])
+    db_session.commit()
+    assert service.calculate_screener_metrics(themes[0].id) == {
+        "num_passing_minervini": 0, "num_stage_2": 0, "avg_rs_rating": 5.0,
+    }

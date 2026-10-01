@@ -491,6 +491,12 @@ class ThemeDiscoveryService:
             **us_only_tag(AnalyticsFeature.THEME_DISCOVERY),
         }
 
+    def _latest_completed_scan_id(self) -> Optional[str]:
+        from ..models.scan_result import Scan
+        return self.db.query(Scan.scan_id).filter(
+            Scan.status == "completed"
+        ).order_by(Scan.completed_at.desc()).limit(1).scalar()
+
     def calculate_screener_metrics(self, theme_cluster_id: int) -> dict:
         """
         Calculate metrics from your existing screeners
@@ -507,19 +513,17 @@ class ThemeDiscoveryService:
 
         symbols = sorted({c.symbol for c in constituents})
 
-        # Get most recent scan results for these symbols
-        # Find latest scan
-        from ..models.scan_result import Scan
-        latest_scan = self.db.query(Scan).filter(
-            Scan.status == "completed"
-        ).order_by(Scan.completed_at.desc()).first()
+        # The latest scan is the same for every theme in a run; reuse the run's
+        # id (#467). A 1-tuple, so "no completed scan" is cached too.
+        cached_scan = getattr(self, "_cached_latest_scan_id", None)
+        scan_id = cached_scan[0] if cached_scan is not None else self._latest_completed_scan_id()
 
-        if not latest_scan:
+        if scan_id is None:
             return {"num_passing_minervini": 0, "num_stage_2": 0, "avg_rs_rating": 0}
 
         # Get results for our symbols
         results = self.db.query(ScanResult).filter(
-            ScanResult.scan_id == latest_scan.scan_id,
+            ScanResult.scan_id == scan_id,
             ScanResult.symbol.in_(symbols),
         ).all()
 
@@ -785,9 +789,10 @@ class ThemeDiscoveryService:
                 payload.update(result)
             return result
         finally:
-            # The run's SPY series must not outlive the run: later calls on a
-            # reused instance have to see SPY rows written after it.
+            # The run's caches must not outlive the run: later calls on a
+            # reused instance have to see SPY rows and scans written after it.
             self.__dict__.pop("_cached_spy_returns", None)
+            self.__dict__.pop("_cached_latest_scan_id", None)
 
     def _update_all_theme_metrics(
         self,
@@ -830,6 +835,8 @@ class ThemeDiscoveryService:
         self._cached_active_days_30d = self._count_active_ingestion_days(date_30d, as_of_date)
         # The SPY benchmark series is the same for every theme (1 query, not N).
         self._cached_spy_returns = (as_of_date.date(), self._load_spy_returns(as_of_date))
+        # Likewise the latest completed scan (1 query, not N).
+        self._cached_latest_scan_id = (self._latest_completed_scan_id(),)
         mention_metrics_by_cluster = self._calculate_mention_metrics_batch(
             [cluster.id for cluster in clusters if cluster.id is not None],
             as_of_date=as_of_date,
