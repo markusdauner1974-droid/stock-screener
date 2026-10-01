@@ -191,6 +191,31 @@ def add_symbol(
     return WatchlistSymbolResponse.model_validate(new_symbol)
 
 
+# Declared before PUT /watchlist/{list_name}/{symbol_id}: FastAPI matches routes
+# in order, and that route would otherwise take "reorder" as an id and answer 422.
+@router.put("/watchlist/{list_name}/reorder")
+def reorder_symbols(
+    list_name: str,
+    reorder_data: ReorderRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Reorder symbols in a watchlist.
+    Accepts an array of symbol IDs in the desired order.
+    """
+    for idx, symbol_id in enumerate(reorder_data.symbol_ids):
+        symbol = db.query(ScanWatchlist).filter(
+            ScanWatchlist.id == symbol_id,
+            ScanWatchlist.list_name == list_name
+        ).first()
+        if symbol:
+            symbol.position = idx
+
+    db.commit()
+
+    return {"status": "reordered", "count": len(reorder_data.symbol_ids)}
+
+
 @router.put("/watchlist/{list_name}/{symbol_id}", response_model=WatchlistSymbolResponse)
 def update_symbol(
     list_name: str,
@@ -244,26 +269,3 @@ def remove_symbol(
     db.commit()
 
     return {"status": "deleted", "symbol": deleted_symbol}
-
-
-@router.put("/watchlist/{list_name}/reorder")
-def reorder_symbols(
-    list_name: str,
-    reorder_data: ReorderRequest,
-    db: Session = Depends(get_db)
-):
-    """
-    Reorder symbols in a watchlist.
-    Accepts an array of symbol IDs in the desired order.
-    """
-    for idx, symbol_id in enumerate(reorder_data.symbol_ids):
-        symbol = db.query(ScanWatchlist).filter(
-            ScanWatchlist.id == symbol_id,
-            ScanWatchlist.list_name == list_name
-        ).first()
-        if symbol:
-            symbol.position = idx
-
-    db.commit()
-
-    return {"status": "reordered", "count": len(reorder_data.symbol_ids)}

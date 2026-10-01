@@ -88,6 +88,22 @@ def create_preset(data: FilterPresetCreate, db: Session = Depends(get_db)):
     )
 
 
+# Declared before PUT /{preset_id}: FastAPI matches routes in order, and that
+# route would otherwise take "reorder" as an id and answer 422.
+@router.put("/reorder")
+def reorder_presets(
+    reorder_data: ReorderPresetsRequest,
+    db: Session = Depends(get_db)
+):
+    """Reorder presets by updating their position values."""
+    for idx, preset_id in enumerate(reorder_data.preset_ids):
+        preset = db.query(FilterPreset).filter(FilterPreset.id == preset_id).first()
+        if preset:
+            preset.position = idx
+    db.commit()
+    return {"status": "reordered"}
+
+
 @router.put("/{preset_id}", response_model=FilterPresetResponse)
 def update_preset(preset_id: int, updates: FilterPresetUpdate, db: Session = Depends(get_db)):
     """Update preset properties."""
@@ -144,17 +160,3 @@ def delete_preset(preset_id: int, db: Session = Depends(get_db)):
     db.delete(preset)
     db.commit()
     return {"status": "deleted", "preset_id": preset_id}
-
-
-@router.put("/reorder")
-def reorder_presets(
-    reorder_data: ReorderPresetsRequest,
-    db: Session = Depends(get_db)
-):
-    """Reorder presets by updating their position values."""
-    for idx, preset_id in enumerate(reorder_data.preset_ids):
-        preset = db.query(FilterPreset).filter(FilterPreset.id == preset_id).first()
-        if preset:
-            preset.position = idx
-    db.commit()
-    return {"status": "reordered"}

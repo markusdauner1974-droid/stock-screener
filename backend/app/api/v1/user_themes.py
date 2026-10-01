@@ -66,6 +66,22 @@ def create_theme(theme_data: UserThemeCreate, db: Session = Depends(get_db)):
     return UserThemeResponse.model_validate(theme)
 
 
+# Declared before PUT /{theme_id}: FastAPI matches routes in order, and that
+# route would otherwise take "reorder" as an id and answer 422.
+@router.put("/reorder")
+def reorder_themes(
+    reorder_data: ReorderThemesRequest,
+    db: Session = Depends(get_db)
+):
+    """Reorder themes by updating their position values."""
+    for idx, theme_id in enumerate(reorder_data.theme_ids):
+        theme = db.query(UserTheme).filter(UserTheme.id == theme_id).first()
+        if theme:
+            theme.position = idx
+    db.commit()
+    return {"status": "reordered"}
+
+
 @router.put("/{theme_id}", response_model=UserThemeResponse)
 def update_theme(theme_id: int, updates: UserThemeUpdate, db: Session = Depends(get_db)):
     """Update theme properties."""
@@ -97,20 +113,6 @@ def delete_theme(theme_id: int, db: Session = Depends(get_db)):
     db.delete(theme)
     db.commit()
     return {"status": "deleted", "theme_id": theme_id}
-
-
-@router.put("/reorder")
-def reorder_themes(
-    reorder_data: ReorderThemesRequest,
-    db: Session = Depends(get_db)
-):
-    """Reorder themes by updating their position values."""
-    for idx, theme_id in enumerate(reorder_data.theme_ids):
-        theme = db.query(UserTheme).filter(UserTheme.id == theme_id).first()
-        if theme:
-            theme.position = idx
-    db.commit()
-    return {"status": "reordered"}
 
 
 # ================= Theme Data (with sparklines and price changes) =================
