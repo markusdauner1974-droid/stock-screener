@@ -223,6 +223,30 @@ def test_frames_by_symbol_match_the_per_symbol_builder(include_adj_close):
         pd.testing.assert_frame_equal(frame, expected)  # values, dtypes and index
 
 
+def test_frames_by_symbol_keep_an_all_null_column_as_its_own_frame_would():
+    """Review on #460: a symbol whose Adj Close and Volume are all NULL must not
+    pick up its neighbours' dtype."""
+    from collections import namedtuple
+
+    Row = namedtuple("Row", STOCK_PRICE_ROW_COLUMNS)
+    rows = [
+        Row("BARE", date(2026, 6, 23), 10.0, 11.0, 9.0, 10.5, None, None),
+        Row("BARE", date(2026, 6, 24), 10.5, 11.5, 9.5, 11.0, None, None),
+        Row("FULL", date(2026, 6, 23), 20.0, 21.0, 19.0, 20.5, 20.5, 7_000),
+        Row("FULL", date(2026, 6, 24), 20.5, 21.5, 19.5, 21.0, 21.0, 8_000),
+    ]
+
+    frames = stock_price_frames_by_symbol(rows, include_adj_close=True)
+
+    for symbol in ("BARE", "FULL"):
+        pd.testing.assert_frame_equal(
+            frames[symbol],
+            stock_price_frame(
+                [row for row in rows if row.symbol == symbol], include_adj_close=True
+            ),
+        )
+
+
 def test_frames_by_symbol_are_independent_copies():
     frames = stock_price_frames_by_symbol(_price_rows(), include_adj_close=True)
 

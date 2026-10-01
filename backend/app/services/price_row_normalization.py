@@ -176,13 +176,23 @@ def stock_price_frames_by_symbol(
     # Sorted by symbol, so every symbol is one contiguous run of rows.
     starts = np.flatnonzero(np.r_[True, symbols[1:] != symbols[:-1]])
     ends = np.r_[starts[1:], len(symbols)]
-    # One missing volume anywhere makes the shared column float; a symbol
-    # without gaps keeps integer volume, as its own frame would have.
+    # A symbol's frame must not depend on the other symbols in the chunk, so
+    # NULLs are counted per symbol and column (one vectorized pass):
+    # - a column that is all NULL for a symbol becomes object None, as in
+    #   ``stock_price_frame``, not float NaN borrowed from the shared column;
+    # - one NULL volume elsewhere makes the shared column float, so a symbol
+    #   without gaps gets integer volume back.
+    present = np.add.reduceat(frame.notna().to_numpy(), starts, axis=0)
+    volume_column = frame.columns.get_loc("Volume")
     volume_widened = frame["Volume"].dtype.kind == "f"
     frames = {}
-    for start, end in zip(starts, ends):
+    for present_counts, start, end in zip(present, starts, ends):
         part = frame.iloc[start:end].copy()
-        if volume_widened and part["Volume"].notna().all():
+        for column in np.flatnonzero(present_counts == 0):
+            part[frame.columns[column]] = pd.Series(
+                [None] * (end - start), index=part.index, dtype=object
+            )
+        if volume_widened and present_counts[volume_column] == end - start:
             part["Volume"] = part["Volume"].astype("int64")
         frames[symbols[start]] = part
     return frames
