@@ -253,7 +253,9 @@ def _hold_cot_refresh_lock(factory, on_locked):
     [_hold_social_analysis_transaction, _hold_projection_registry_lock, _hold_cot_refresh_lock],
     ids=["social_analysis_transaction", "projection_lock_registry", "cot_refresh_advisory_lock"],
 )
-def test_lock_serializes_concurrent_sessions(db_session, hold_lock):
+def test_lock_serializes_concurrent_sessions(db_session, hold_lock, lock_timeout):
+    # lock_timeout: a leaked lock makes the contender error out in ~10s
+    # instead of blocking forever and hanging pytest at shutdown.
     db_session.add(SocialSourceRegistry(id=1))
     db_session.commit()
     factory = sessionmaker(bind=engine)
@@ -282,12 +284,15 @@ def test_lock_serializes_concurrent_sessions(db_session, hold_lock):
             raise TimeoutError("first transaction never took the lock")
         hold_lock(factory, lambda: events.append("second locked"))
 
-    threads = [threading.Thread(target=run, args=(body,)) for body in (first, second)]
+    threads = [
+        threading.Thread(target=run, args=(body,), daemon=True) for body in (first, second)
+    ]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join(60)
 
+    assert not any(thread.is_alive() for thread in threads), "a lock session never finished"
     assert errors == []
     assert events == ["first released", "second locked"]
 
