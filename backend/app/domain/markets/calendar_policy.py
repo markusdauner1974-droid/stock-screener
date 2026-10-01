@@ -34,6 +34,11 @@ DEFAULT_CALENDAR_SESSION_OVERRIDES: tuple[CalendarSessionOverride, ...] = (
     CalendarSessionOverride("JP", date(2026, 3, 20), False),
     CalendarSessionOverride("JP", date(2026, 9, 22), False),
     CalendarSessionOverride("JP", date(2026, 9, 23), False),
+    # Taiwan's May 2025 holiday law added these after the pinned XTAI schedule
+    # was cut; TW has no official 2025 manifest, so the provider still trades them.
+    CalendarSessionOverride("TW", date(2025, 9, 29), False),
+    CalendarSessionOverride("TW", date(2025, 10, 24), False),
+    CalendarSessionOverride("TW", date(2025, 12, 25), False),
 )
 
 
