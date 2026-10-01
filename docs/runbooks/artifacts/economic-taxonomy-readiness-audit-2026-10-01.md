@@ -112,11 +112,13 @@ legacy, shadow and dual, at `app/services/economic_taxonomy_runtime.py:872`):
 | `ThemeExtractionService` | beat `extract_themes` (:10, :40) and `reprocess_failed_themes` (:05); `POST /themes/extract`, `POST /themes/pipeline/run` | `ThemeMention`, `ThemeCluster`, `ThemeConstituent` (`theme_extraction_service.py:917`, `:1719`, `:1808`) |
 | `ThemeCorrelationService.create_theme_from_cluster` | `POST /themes/create-from-cluster` | `ThemeCluster`, `ThemeConstituent` (`theme_correlation_service.py:427-477`) |
 | `ThemeCorrelationService.validate_theme` | task `validate_themes`, `POST /themes/validate-all` (the per-theme `GET /{id}/validate` is guarded) | cluster validation fields (`theme_correlation_service.py:160`, `:169`) |
-| `ThemeMergingService` | `POST /themes/merge-suggestions/{id}/approve`, `/consolidate`, `/merge-wave/*` | merges, `ThemeMergeSuggestion` (`theme_merging_service.py:1446`) |
+| `ThemeMergingService` | task `consolidate_themes` (`theme_discovery_tasks.py:1421`); `POST /themes/merge-suggestions/{id}/approve`, `/consolidate`, `/merge-wave/*` | merges, `ThemeMergeSuggestion` (`theme_merging_service.py:1446`) |
 | `ThemeTaxonomyService.run_full_taxonomy_assignment` | task `run_taxonomy_assignment` (the API is guarded by `_reject_economic_mode`; the task is not) | L1 `ThemeCluster` and L2 assignments (`theme_taxonomy_service.py:178`) |
 | `ThemeTaxonomyService.compute_all_l1_metrics` | task `compute_l1_metrics` (`theme_discovery_tasks.py:1504`), also called from `run_full_pipeline` (`:1221`) after the fenced L2 metrics step | L1 `ThemeMetrics` (`theme_taxonomy_service.py:1088`) |
 | Theme review and merge API | `POST /themes/{id}/add-constituents`, `DELETE /themes/{id}`, `/candidates/review`, `/alerts/*` | `ThemeConstituent` (`themes_review_merge.py:384`), cluster state, alerts |
 | Equivalence API | `POST /themes/equivalence`, `/equivalence/{id}/undo` | legacy identity equivalence |
+| `ThemeTaxonomyService.compute_l1_centroid_embeddings` | task `recompute_l1_centroid_embeddings` (`theme_discovery_tasks.py:1607`) | L1 `ThemeEmbedding` (`theme_taxonomy_service.py:1102-1159`) |
+| One-off maintenance | `theme_pipeline_state_backfill_service`, `theme_alias_backfill_service`, `app/scripts/repair_jp_alpha_universe_symbols.py` | legacy theme rows, run by an operator |
 | `ThemeMergingService` embeddings | task `recompute_stale_theme_embeddings` (`theme_discovery_tasks.py:603`), `POST /themes/embeddings/refresh-campaign` | `ThemeEmbedding` for legacy clusters (`theme_merging_service.py:573-601`, `:630-708`, `:840`) |
 | `ThemeDiscoveryService.check_for_alerts` | task `check_alerts`, `run_full_pipeline`, `POST /themes/alerts/check` | `ThemeAlert` (`theme_discovery_service.py:1157`) |
 
@@ -232,11 +234,30 @@ something checkable.
 | `watchlist_stewardship_service.py:328` | `ThemeAlert` | **Serves legacy-derived alerts**: `check_for_alerts` is unfenced (G2), but lifecycle-transition alerts stop because they come from the fenced lifecycle path |
 | `validation_service.py:235` (`/validation`, stock validation) | `ThemeAlert`, `ThemeCluster` | Same |
 | MCP `market_copilot._recent_alerts` (`market_copilot.py:1495`), used by `market_overview` (`:239`) and a second tool (`:719`) | `ThemeAlert` | Same |
+| `GET /themes/pipeline/state-health`, `/themes/pipeline/observability` (`themes_content_pipeline.py:215-245`, via `theme_pipeline_state_service.py:338-352`, `:430-475`) | `ThemeMention`, `ThemeCluster`, `ThemeMergeSuggestion` | Serves legacy-only diagnostics |
+| `SocialSignalOperationsService.snapshot` (`social_signal_operations_service.py:106-111`), used by `GET /operations/social-signals` and `GET /social-signals/admin/health` | counts `SocialThemeAssociation` | Counts legacy Social associations |
 | `GET /social-signals/admin/associations` (`social_signals.py:422-442`) | `SocialThemeAssociation` joined to `ThemeCluster` | Serves legacy associations; the decision endpoint beside it is mode-aware, but this list is not |
 | `theme_development_preparation`, `theme_platform/content_browser_queries`, `social_refresh_support` | legacy clusters and mentions | Serves legacy data |
 
 `ContentItem` and content-source endpoints are shared ingestion inputs, not
 legacy authority. Retirement must keep them.
+
+### Coverage check
+
+Every module under `backend/app` that names a legacy theme or Social model
+(`ThemeCluster`, `ThemeMention`, `ThemeConstituent`, `ThemeMetrics`,
+`ThemeAlert`, `ThemeEmbedding`, `ThemeMergeSuggestion`, `ThemeMergeHistory`,
+`ThemeRelationship`, `ThemeLifecycleTransition`, `SocialThemeAssociation`) is
+either listed above or falls into one of these groups:
+- **Helpers reached only through the services listed above:**
+  `theme_lifecycle_service`, `theme_group_reads`, `theme_mention_replacement`,
+  `theme_embedding_service`, `theme_development_facts`,
+  `theme_content_recovery_service`, `api/v1/themes_common`.
+- **Model definitions, and historical schema migrations** under
+  `app/db_migrations/`.
+
+Every task in `app/tasks/theme_discovery_tasks.py` is either classified above
+or writes only shared ingestion state (`ingest_content`, `poll_due_sources`).
 
 ## Proposed follow-ups
 
