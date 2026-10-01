@@ -119,7 +119,7 @@ legacy, shadow and dual, at `app/services/economic_taxonomy_runtime.py:872`):
 | Equivalence API | `POST /themes/equivalence`, `/equivalence/{id}/undo` | legacy identity equivalence |
 | `ThemeTaxonomyService.compute_l1_centroid_embeddings` | task `recompute_l1_centroid_embeddings` (`theme_discovery_tasks.py:1607`) | L1 `ThemeEmbedding` (`theme_taxonomy_service.py:1102-1159`) |
 | `theme_group_refresh.refresh_groups` | beat `theme-group-refresh` every 60 s (`celery_app.py:536-540`, task `theme_intelligence_tasks.py:33`) | `ThemeEquivalenceOperation` status (`theme_group_refresh.py:29-44`) |
-| One-off maintenance | `theme_pipeline_state_backfill_service`, `theme_alias_backfill_service`, `app/scripts/repair_jp_alpha_universe_symbols.py` | legacy theme rows, run by an operator |
+| One-off maintenance | `theme_alias_backfill_service` (`ThemeAlias`, `:227-246`), `app/scripts/repair_jp_alpha_universe_symbols.py` (`ThemeConstituent`, `ThemeMention`, `ThemeAlert`) | legacy theme rows, run by an operator |
 | `ThemeMergingService` embeddings | task `recompute_stale_theme_embeddings` (`theme_discovery_tasks.py:603`), `POST /themes/embeddings/refresh-campaign` | `ThemeEmbedding` for legacy clusters (`theme_merging_service.py:573-601`, `:630-708`, `:840`) |
 | `ThemeDiscoveryService.check_for_alerts` | task `check_alerts`, `run_full_pipeline`, `POST /themes/alerts/check` | `ThemeAlert` (`theme_discovery_service.py:1157`) |
 
@@ -239,6 +239,7 @@ something checkable.
 | `GET /themes/matching/telemetry` (`themes_queries.py:409-439`; the module's other endpoints are routed) | `ThemeMention` | Serves legacy matcher statistics |
 | `theme_development_worker.discover` (`:43-57`), from beat `theme-development-preparation` every minute (`celery_app.py:541-545`, task `theme_intelligence_tasks.py:16-29`) and `POST /themes/developments/backfill` with `apply=true` (`themes_intelligence.py:177-195`) | `ThemeMention` | Keeps reading legacy mentions; no authority check on either path |
 | Content listing mention annotations (`api/v1/themes.py:106-115`) | `ThemeMention` | Serves legacy annotations |
+| One-off `theme_pipeline_state_backfill_service` (`:122-130`) | `ThemeMention`, to infer status | Writes only shared `ContentItemPipelineState`, so the G2 fence must **not** block it; adapt it before `ThemeMention` is removed |
 | **Economic** reader snapshot builder (`economic_taxonomy_snapshot_builder.py:698-717`) | `ThemeDevelopmentTheme`, mapped to economic themes | **The economic side itself depends on legacy development links.** Retirement must migrate these links first |
 | `GET /themes/pipeline/state-health`, `/themes/pipeline/observability` (`themes_content_pipeline.py:215-245`, via `theme_pipeline_state_service.py:338-352`, `:430-475`) | `ThemeMention`, `ThemeCluster`, `ThemeMergeSuggestion` | Serves legacy-only diagnostics |
 | `SocialSignalOperationsService.snapshot` (`social_signal_operations_service.py:106-111`), used by `GET /operations/social-signals` and `GET /social-signals/admin/health` | counts `SocialThemeAssociation` | Counts legacy Social associations |
