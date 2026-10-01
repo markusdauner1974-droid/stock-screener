@@ -31,6 +31,7 @@ from ...schemas.user_watchlist import (
     WatchlistImportRequest, WatchlistImportResult,
     WatchlistStewardshipResponse,
 )
+from ...services.price_row_normalization import stock_price_frame
 from ...services.symbol_format import normalize_symbol
 from ...services.watchlist_import_service import (
     parse_watchlist_import_symbols,
@@ -131,6 +132,27 @@ def create_watchlist(data: WatchlistCreate, db: Session = Depends(get_db)):
     return WatchlistResponse.model_validate(watchlist)
 
 
+def _positions_by_id(ids: List[int]) -> Dict[int, int]:
+    """Request order → position; a repeated id keeps its last slot, as before."""
+    return {item_id: idx for idx, item_id in enumerate(ids)}
+
+
+# Declared before PUT /{watchlist_id}: FastAPI matches routes in order, and
+# that route would otherwise take "reorder" as an id and answer 422.
+@router.put("/reorder")
+def reorder_watchlists(
+    reorder_data: ReorderWatchlistsRequest,
+    db: Session = Depends(get_db)
+):
+    """Reorder watchlists by updating their position values."""
+    positions = _positions_by_id(reorder_data.watchlist_ids)
+    if positions:
+        for watchlist in db.query(UserWatchlist).filter(UserWatchlist.id.in_(positions)):
+            watchlist.position = positions[watchlist.id]
+    db.commit()
+    return {"status": "reordered"}
+
+
 @router.put("/{watchlist_id}", response_model=WatchlistResponse)
 def update_watchlist(watchlist_id: int, updates: WatchlistUpdate, db: Session = Depends(get_db)):
     """Update watchlist properties."""
@@ -162,20 +184,6 @@ def delete_watchlist(watchlist_id: int, db: Session = Depends(get_db)):
     db.delete(watchlist)
     db.commit()
     return {"status": "deleted", "watchlist_id": watchlist_id}
-
-
-@router.put("/reorder")
-def reorder_watchlists(
-    reorder_data: ReorderWatchlistsRequest,
-    db: Session = Depends(get_db)
-):
-    """Reorder watchlists by updating their position values."""
-    for idx, watchlist_id in enumerate(reorder_data.watchlist_ids):
-        watchlist = db.query(UserWatchlist).filter(UserWatchlist.id == watchlist_id).first()
-        if watchlist:
-            watchlist.position = idx
-    db.commit()
-    return {"status": "reordered"}
 
 
 # ================= Watchlist Data (with sparklines and price changes) =================
@@ -368,26 +376,13 @@ def _load_price_frames_from_db(symbols: List[str], db: Session) -> Dict[str, pd.
     for price in prices:
         grouped_prices[price.symbol].append(price)
 
-    frames: Dict[str, pd.DataFrame] = {}
-    for symbol in unique_symbols:
-        symbol_prices = grouped_prices.get(symbol)
-        if not symbol_prices:
-            continue
-        df = pd.DataFrame(
-            {
-                "Date": [price.date for price in symbol_prices],
-                "Open": [price.open for price in symbol_prices],
-                "High": [price.high for price in symbol_prices],
-                "Low": [price.low for price in symbol_prices],
-                "Close": [price.close for price in symbol_prices],
-                "Volume": [price.volume for price in symbol_prices],
-            }
-        )
-        df["Date"] = pd.to_datetime(df["Date"])
-        df.set_index("Date", inplace=True)
-        frames[symbol] = df
-
-    return frames
+    # Any non-empty history is kept and not normalized: watchlists show newly
+    # listed stocks, unlike the price cache's 50-row minimum (#432).
+    return {
+        symbol: stock_price_frame(grouped_prices[symbol], include_adj_close=False)
+        for symbol in unique_symbols
+        if grouped_prices.get(symbol)
+    }
 
 
 def _compute_price_change_bounds(stock_data_map: Dict) -> Dict[str, PriceChangeBounds]:
@@ -666,12 +661,12 @@ def reorder_items(
     db: Session = Depends(get_db)
 ):
     """Reorder items within a watchlist."""
-    for idx, item_id in enumerate(reorder_data.item_ids):
-        item = db.query(WatchlistItem).filter(
-            WatchlistItem.id == item_id,
-            WatchlistItem.watchlist_id == watchlist_id
-        ).first()
-        if item:
-            item.position = idx
+    positions = _positions_by_id(reorder_data.item_ids)
+    if positions:
+        for item in db.query(WatchlistItem).filter(
+            WatchlistItem.id.in_(positions),
+            WatchlistItem.watchlist_id == watchlist_id,
+        ):
+            item.position = positions[item.id]
     db.commit()
     return {"status": "reordered"}

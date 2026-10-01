@@ -143,3 +143,63 @@ async def test_watchlist_data_endpoint_uses_db_price_history_without_price_cache
     assert len(item["price_data"]) == 30
     assert len(item["rs_data"]) == 30
     assert item["change_12m"] is not None
+
+
+# ── Reorder loads the rows once (#432) ─────────────────────────────────
+
+
+def _count_selects(session):
+    from sqlalchemy import event
+
+    selects: list[str] = []
+
+    def before_execute(conn, cursor, statement, *args):
+        if statement.lstrip().upper().startswith("SELECT"):
+            selects.append(statement)
+
+    event.listen(session.get_bind(), "before_cursor_execute", before_execute)
+    return selects
+
+
+@pytest.mark.asyncio
+async def test_reorder_watchlists_sets_request_positions_with_one_select(client, session):
+    app.dependency_overrides[get_db] = _override_db(session)
+    first, second, third = (UserWatchlist(name=n, position=i) for i, n in enumerate("ABC"))
+    session.add_all([first, second, third])
+    session.commit()
+    # Unknown ids are skipped but still take their slot, as before.
+    ids = [third.id, first.id, 9999, second.id]  # read before counting
+    selects = _count_selects(session)
+
+    response = await client.put("/api/v1/user-watchlists/reorder", json={"watchlist_ids": ids})
+    request_selects = len(selects)
+
+    assert response.status_code == 200
+    assert request_selects == 1
+    session.expire_all()
+    assert (third.position, first.position, second.position) == (0, 1, 3)
+
+
+@pytest.mark.asyncio
+async def test_reorder_items_only_touches_the_watchlist_with_one_select(client, session):
+    app.dependency_overrides[get_db] = _override_db(session)
+    mine, other = UserWatchlist(name="Mine", position=0), UserWatchlist(name="Other", position=1)
+    session.add_all([mine, other])
+    session.flush()
+    a, b = WatchlistItem(watchlist_id=mine.id, symbol="AAPL", position=0), WatchlistItem(
+        watchlist_id=mine.id, symbol="MSFT", position=1
+    )
+    foreign = WatchlistItem(watchlist_id=other.id, symbol="NVDA", position=5)
+    session.add_all([a, b, foreign])
+    session.commit()
+    url = f"/api/v1/user-watchlists/{mine.id}/items/reorder"
+    ids = [b.id, foreign.id, a.id]  # read before counting
+    selects = _count_selects(session)
+
+    response = await client.put(url, json={"item_ids": ids})
+    request_selects = len(selects)
+
+    assert response.status_code == 200
+    assert request_selects == 1
+    session.expire_all()
+    assert (b.position, a.position, foreign.position) == (0, 2, 5)
