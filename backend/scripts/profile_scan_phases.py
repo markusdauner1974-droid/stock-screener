@@ -21,8 +21,9 @@ out-of-memory kill. Remove it from the UI, or with DELETE /api/v1/scans/<id>;
 its universe_key starts with "profile-scan-phases:".
 
 Provider access is blocked. The scan runs with ``cache_only``, which keeps the
-bulk price read off the provider (#451); the script also stubs the bulk,
-benchmark and single-symbol price fetches with counters and points HTTP(S) at
+bulk per-stock price read off the provider (#451) but not the benchmark lookup
+(#455); the script stubs the bulk, benchmark and single-symbol price fetches
+with counters and points HTTP(S) at
 a dead proxy, with any proxy bypass cleared, so anything that still reaches a
 provider fails fast and shows up in the "provider fetches blocked" line. A
 non-zero count there means some path is not cache-only.
