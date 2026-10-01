@@ -112,7 +112,7 @@ legacy, shadow and dual, at `app/services/economic_taxonomy_runtime.py:872`):
 | `ThemeExtractionService` | beat `extract_themes` (:10, :40) and `reprocess_failed_themes` (:05); task `refresh_attachment_themes` (`live_attachment_tasks.py:15-33`); `POST /themes/extract`, `POST /themes/pipeline/run` | `ThemeMention`, `ThemeCluster`, `ThemeConstituent` (`theme_extraction_service.py:917`, `:1719`, `:1808`) |
 | `ThemeCorrelationService.create_theme_from_cluster` | `POST /themes/create-from-cluster` | `ThemeCluster`, `ThemeConstituent` (`theme_correlation_service.py:427-477`) |
 | `ThemeCorrelationService.validate_theme` | task `validate_themes`, `POST /themes/validate-all` (the per-theme `GET /{id}/validate` is guarded) | cluster validation fields (`theme_correlation_service.py:160`, `:169`) |
-| `ThemeMergingService` | task `consolidate_themes` (`theme_discovery_tasks.py:1421`); `POST /themes/merge-suggestions/{id}/approve`, `/consolidate`, `/merge-wave/*` | merges, `ThemeMergeSuggestion` (`theme_merging_service.py:1446`) |
+| `ThemeMergingService` | task `consolidate_themes` (`theme_discovery_tasks.py:1421`); `POST /themes/merge-suggestions/{id}/approve` and `/reject` (`theme_merging_service.py:2919`, `:2964-2986`), `/consolidate`, `/merge-wave/*` | merges, `ThemeMergeSuggestion` (`theme_merging_service.py:1446`) |
 | `ThemeTaxonomyService.run_full_taxonomy_assignment` | task `run_taxonomy_assignment` (the API is guarded by `_reject_economic_mode`; the task is not) | L1 `ThemeCluster` and L2 assignments (`theme_taxonomy_service.py:178`) |
 | `ThemeTaxonomyService.compute_all_l1_metrics` | task `compute_l1_metrics` (`theme_discovery_tasks.py:1504`), also called from `run_full_pipeline` (`:1221`) after the fenced L2 metrics step | L1 `ThemeMetrics` (`theme_taxonomy_service.py:1088`) |
 | Theme review and merge API | `POST /themes/{id}/add-constituents`, `DELETE /themes/{id}`, `/candidates/review`, `/alerts/*` | `ThemeConstituent` (`themes_review_merge.py:384`), cluster state, alerts |
@@ -205,7 +205,8 @@ something checkable.
 |---|---|---|
 | Fenced theme pipeline (`_fenced_legacy_mutation`) | legacy, shadow, dual | Rejected (`AuthorityModeRejected`) |
 | Social projection: `apply_live` and `decide` | all | Routes to the economic adapter |
-| Economic producers: source admission, migration, developments, processor, operations, work repo | listed per call site (`allowed_modes=`) | Mode-aware |
+| Economic producers: source admission, migration, processor, operations, work repo | listed per call site (`allowed_modes=`) | Mode-aware |
+| Development recording (`theme_development_service.py:155-160`), from beat `prepare_developments` and `POST /themes/developments/backfill` | all, including economic | **Writes legacy `ThemeDevelopmentTheme` links next to economic links** (`:319-328`) in every mode |
 | Unfenced legacy writers (G2 table) | not checked | **Keep writing legacy tables** |
 
 ### Readers routed by authority (`EconomicThemeReader`)
@@ -236,7 +237,7 @@ something checkable.
 | `validation_service.py:235` (`/validation`, stock validation) | `ThemeAlert`, `ThemeCluster` | Same |
 | MCP `market_copilot._recent_alerts` (`market_copilot.py:1495`), used by `market_overview` (`:239`) and a second tool (`:719`) | `ThemeAlert` | Same |
 | `GET /themes/matching/telemetry` (`themes_queries.py:409-439`; the module's other endpoints are routed) | `ThemeMention` | Serves legacy matcher statistics |
-| beat `theme-development-preparation` every minute (`celery_app.py:541-545`) → `prepare_developments` (`theme_intelligence_tasks.py:16-29`) → `theme_development_worker.discover` (`:43-57`) | `ThemeMention` | Keeps reading legacy mentions; its automation gate has no authority check |
+| `theme_development_worker.discover` (`:43-57`), from beat `theme-development-preparation` every minute (`celery_app.py:541-545`, task `theme_intelligence_tasks.py:16-29`) and `POST /themes/developments/backfill` with `apply=true` (`themes_intelligence.py:177-195`) | `ThemeMention` | Keeps reading legacy mentions; no authority check on either path |
 | Content listing mention annotations (`api/v1/themes.py:106-115`) | `ThemeMention` | Serves legacy annotations |
 | **Economic** reader snapshot builder (`economic_taxonomy_snapshot_builder.py:698-717`) | `ThemeDevelopmentTheme`, mapped to economic themes | **The economic side itself depends on legacy development links.** Retirement must migrate these links first |
 | `GET /themes/pipeline/state-health`, `/themes/pipeline/observability` (`themes_content_pipeline.py:215-245`, via `theme_pipeline_state_service.py:338-352`, `:430-475`) | `ThemeMention`, `ThemeCluster`, `ThemeMergeSuggestion` | Serves legacy-only diagnostics |
@@ -297,6 +298,6 @@ still contain an unrouted endpoint, as `themes_queries` does with
    copilot's alert reads) to an
    economic signal, or label them legacy-only. In economic mode they
    currently mix legacy-derived alerts with missing lifecycle alerts.
-6. Migrate the economic snapshot builder's development links off
-   `ThemeDevelopmentTheme` before any retirement. Today the economic side
-   reads them.
+6. Move development links off `ThemeDevelopmentTheme` before any retirement.
+   Today the economic snapshot builder reads them, and development recording
+   keeps writing them in every mode, so both sides need to change together.
