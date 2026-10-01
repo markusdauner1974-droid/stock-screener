@@ -120,7 +120,9 @@ legacy, shadow and dual, at `app/services/economic_taxonomy_runtime.py:872`):
 | `ThemeTaxonomyService.compute_l1_centroid_embeddings` | task `recompute_l1_centroid_embeddings` (`theme_discovery_tasks.py:1607`) | L1 `ThemeEmbedding` (`theme_taxonomy_service.py:1102-1159`) |
 | Theme content corruption recovery: `reset_corrupt_theme_content_storage` (`theme_content_recovery_service.py:53-72`) | content list and export, when corruption survives REINDEX (`api/v1/themes.py:140-171`) | **Drops and recreates** `theme_mentions`, together with the shared `content_items` and `content_item_pipeline_state`. No authority check: in economic mode it deletes rollback data, and after retirement it would recreate `theme_mentions` |
 | `theme_group_refresh.refresh_groups` | beat `theme-group-refresh` every 60 s (`celery_app.py:536-540`, task `theme_intelligence_tasks.py:33`) | `ThemeEquivalenceOperation` status (`theme_group_refresh.py:29-44`) |
-| One-off maintenance | `theme_alias_backfill_service` (`ThemeAlias`, `:227-246`), `app/scripts/repair_jp_alpha_universe_symbols.py` (`ThemeConstituent`, `ThemeMention`, `ThemeAlert`) | legacy theme rows, run by an operator |
+| One-off maintenance | `theme_alias_backfill_service` (`ThemeAlias`, `:227-246`; CLI `scripts/backfill_theme_aliases.py`), `app/scripts/repair_jp_alpha_universe_symbols.py` (`ThemeConstituent`, `ThemeMention`, `ThemeAlert`) | legacy theme rows, run by an operator |
+| Operator CLI `scripts/backfill_l1_taxonomy.py` | `run_full_taxonomy_assignment` (`:59`), then `compute_l1_centroid_embeddings` and `compute_all_l1_metrics` with commits (`:107-113`) | L1 `ThemeCluster`, `ThemeEmbedding`, `ThemeMetrics` |
+| Operator CLI `scripts/backfill_silent_failures.py` | reprocesses content through `ThemeExtractionService` | same rows as extraction |
 | `ThemeMergingService` embeddings | task `recompute_stale_theme_embeddings` (`theme_discovery_tasks.py:603`), `POST /themes/embeddings/refresh-campaign` | `ThemeEmbedding` for legacy clusters (`theme_merging_service.py:573-601`, `:630-708`, `:840`) |
 | `ThemeDiscoveryService.check_for_alerts` | task `check_alerts`, `run_full_pipeline`, `POST /themes/alerts/check` | `ThemeAlert` (`theme_discovery_service.py:1157`) |
 
@@ -241,7 +243,7 @@ something checkable.
 | `theme_development_worker.discover` (`:43-57`), from beat `theme-development-preparation` every minute (`celery_app.py:541-545`, task `theme_intelligence_tasks.py:16-29`) and `POST /themes/developments/backfill` with `apply=true` (`themes_intelligence.py:177-195`) | `ThemeMention` | Keeps reading legacy mentions; no authority check on either path |
 | Content listing mention annotations (`api/v1/themes.py:106-115`) | `ThemeMention` | Serves legacy annotations |
 | Social publication preparation: `social_signal_writer.prepare_run()` and `publish()` (`social_signal_writer.py:716`, `:784`) → `SocialThemeProjectionService.prepare_application()` (`social_theme_projection_service.py:153-175`, `:189-226`) | `ThemeCluster`, `ThemeMention`, `ThemeAlias`, `ThemeConstituent`, `SocialThemeAssociation` | **Runs for every live Social run, in every mode**, before `apply_live` makes its economic-mode check (`:433`). Social publication would fail if these tables were retired; its basket preparation must move first |
-| One-off `theme_pipeline_state_backfill_service` (`:122-130`) | `ThemeMention`, to infer status | Writes only shared `ContentItemPipelineState`, so the G2 fence must **not** block it; adapt it before `ThemeMention` is removed |
+| One-off `theme_pipeline_state_backfill_service` (`:122-130`; CLI `scripts/backfill_theme_pipeline_state.py`) | `ThemeMention`, to infer status | Writes only shared `ContentItemPipelineState`, so the G2 fence must **not** block it; adapt it before `ThemeMention` is removed |
 | **Economic** reader snapshot builder (`economic_taxonomy_snapshot_builder.py:698-717`) | `ThemeDevelopmentTheme`, mapped to economic themes | **The economic side itself depends on legacy development links.** Retirement must migrate these links first |
 | `GET /themes/pipeline/state-health`, `/themes/pipeline/observability` (`themes_content_pipeline.py:215-245`, via `theme_pipeline_state_service.py:338-352`, `:430-475`) | `ThemeMention`, `ThemeCluster`, `ThemeMergeSuggestion` | Serves legacy-only diagnostics |
 | `SocialSignalOperationsService.snapshot` (`social_signal_operations_service.py:106-111`), used by `GET /operations/social-signals` and `GET /social-signals/admin/health` | counts `SocialThemeAssociation` | Counts legacy Social associations |
@@ -264,7 +266,9 @@ legacy authority. Retirement must keep them.
 `ThemePipelineRun`, and the Social work, attempt and budget tables.
 
 Every module under `backend/app` that imports a theme, theme-intelligence or
-Social-analysis model package was checked. Modules that use only shared models
+Social-analysis model package was checked. So was every script under
+`backend/scripts` that names a legacy model or legacy theme service (the
+static checker `check_phase2_type_contracts.py` is out of scope). Modules that use only shared models
 are out of scope. The rest are either listed above or fall into one of these
 groups:
 - **Helpers reached only through the services listed above:**
