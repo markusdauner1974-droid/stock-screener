@@ -465,7 +465,10 @@ class StockDataProvider(abc.ABC):
         allow_partial: bool = True,
         batch_only_prices: bool = False,
         batch_only_fundamentals: bool = False,
+        cache_only: bool = False,
     ) -> dict[str, object]:
+        """``batch_only_*`` disable the per-symbol fallback fetches;
+        ``cache_only`` also stops the bulk read from calling a price provider."""
         ...
 
     @abc.abstractmethod

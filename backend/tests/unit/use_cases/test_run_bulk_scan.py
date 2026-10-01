@@ -532,6 +532,9 @@ class TestRunBulkScanHappyPath:
         call = data_provider.captured_bulk_kwargs[0]
         assert call["batch_only_prices"] is True
         assert call["batch_only_fundamentals"] is True
+        # batch_only_* only stop the per-symbol fallback; this stops the bulk
+        # read's provider fetch too (#451).
+        assert call["cache_only"] is True
 
     def test_cache_only_skips_per_symbol_fallback_when_bulk_fetch_fails(self):
         """When prepare_data_bulk raises AND cache_only=True, the per-symbol
@@ -670,6 +673,7 @@ class TestRunBulkScanHappyPath:
 
         assert data_provider.captured_bulk_kwargs[0]["batch_only_prices"] is False
         assert data_provider.captured_bulk_kwargs[0]["batch_only_fundamentals"] is False
+        assert data_provider.captured_bulk_kwargs[0]["cache_only"] is False
 
     @pytest.mark.parametrize("parallel_workers", [1, 4])
     def test_parallel_workers_preserve_result_order_counts_and_progress(

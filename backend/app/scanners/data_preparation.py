@@ -572,6 +572,7 @@ class DataPreparationLayer:
         allow_partial: bool = True,
         batch_only_prices: bool = False,
         batch_only_fundamentals: bool = False,
+        cache_only: bool = False,
     ) -> Dict[str, StockData]:
         """
         Fetch data for multiple stocks efficiently using bulk cache operations.
@@ -587,6 +588,10 @@ class DataPreparationLayer:
             symbols: List of stock symbols
             requirements: Merged data requirements
             allow_partial: If False, raise DataFetchError when any component fails.
+            batch_only_prices / batch_only_fundamentals: No per-symbol fallback
+                fetch for symbols the bulk read did not return.
+            cache_only: The bulk price read does not call a provider either
+                (see ``PriceCacheService.get_many``).
 
         Returns:
             Dict mapping symbols to their StockData objects
@@ -614,6 +619,7 @@ class DataPreparationLayer:
             unique_canonical_symbols,
             period=requirements.price_period,
             market_by_symbol=market_by_symbol,
+            cache_only=cache_only,
         )
         # Fundamentals cache now includes quarterly growth data (consolidated)
         cached_fundamentals = (

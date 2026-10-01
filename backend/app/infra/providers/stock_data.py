@@ -40,6 +40,7 @@ class DataPrepStockDataProvider(StockDataProvider):
         allow_partial: bool = True,
         batch_only_prices: bool = False,
         batch_only_fundamentals: bool = False,
+        cache_only: bool = False,
     ) -> dict[str, object]:
         return self._layer.prepare_data_bulk(
             symbols,
@@ -47,6 +48,7 @@ class DataPrepStockDataProvider(StockDataProvider):
             allow_partial=allow_partial,
             batch_only_prices=batch_only_prices,
             batch_only_fundamentals=batch_only_fundamentals,
+            cache_only=cache_only,
         )
 
     def apply_market_rs_resolution(self, results, resolution) -> None:

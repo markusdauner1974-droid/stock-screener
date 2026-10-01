@@ -20,15 +20,12 @@ history: --keep (on purpose, to inspect the results) and SIGKILL or an
 out-of-memory kill. Remove it from the UI, or with DELETE /api/v1/scans/<id>;
 its universe_key starts with "profile-scan-phases:".
 
-Provider access is blocked. ``cache_only`` alone is not enough: the price
-cache's bulk read still batch-fetches from the provider for symbols with no
-usable database frame (stale rows, or fewer than 50 bars), and stores what it
-gets. Here that fetch, the benchmark fetch and the single-symbol price fetch
-return nothing and are counted instead, and HTTP(S) is pointed at a dead
-proxy, with any proxy bypass cleared, so anything else fails fast. Two consequences:
-symbols that depend on that fetch end up without a result, and the prefetch
-time reported here excludes the provider round-trips a real scan would make
-for them.
+Provider access is blocked. The scan runs with ``cache_only``, which keeps the
+bulk price read off the provider (#451); the script also stubs the bulk,
+benchmark and single-symbol price fetches with counters and points HTTP(S) at
+a dead proxy, with any proxy bypass cleared, so anything that still reaches a
+provider fails fast and shows up in the "provider fetches blocked" line. A
+non-zero count there means some path is not cache-only.
 
 Usage (inside a backend or worker container):
 
@@ -207,7 +204,7 @@ class _CacheTierCounter(logging.Handler):
 def block_provider_fetches() -> dict[str, int]:
     """Replace the price paths' provider fetches with counters.
 
-    Covers the bulk price fetch (reached in cache-only scans, #451), the
+    Covers the bulk price fetch (reached by cache-only scans before #451), the
     benchmark fetch and the single-symbol price fetch. The dead proxy is a
     backstop for anything else; it only works if nothing bypasses it.
     """
