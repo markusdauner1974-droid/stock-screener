@@ -889,6 +889,16 @@ class TestBulkDataPreparation:
         assert results["MSFT"].price_data.empty
         mock_yfinance.get_historical_data.assert_not_called()
 
+    @pytest.mark.parametrize("cache_only", [True, False])
+    def test_bulk_passes_cache_only_to_the_price_cache(
+        self, data_layer, mock_price_cache, cache_only
+    ):
+        mock_price_cache.get_many.return_value = {"AAPL": _make_price_df()}
+
+        data_layer.prepare_data_bulk(["AAPL"], REQUIREMENTS, cache_only=cache_only)
+
+        assert mock_price_cache.get_many.call_args.kwargs["cache_only"] is cache_only
+
 
 # ===================================================================
 # Class 7: Adapter delegation
@@ -929,6 +939,7 @@ class TestAdapterDelegation:
                 allow_partial=True,
                 batch_only_prices=False,
                 batch_only_fundamentals=False,
+                cache_only=False,
             )
 
     def test_adapter_delegates_prepare_data_bulk_batch_only_flags(self):
@@ -946,6 +957,7 @@ class TestAdapterDelegation:
                 REQUIREMENTS,
                 batch_only_prices=True,
                 batch_only_fundamentals=True,
+                cache_only=True,
             )
 
             mock_pdb.assert_called_once_with(
@@ -954,6 +966,7 @@ class TestAdapterDelegation:
                 allow_partial=True,
                 batch_only_prices=True,
                 batch_only_fundamentals=True,
+                cache_only=True,
             )
 
     def test_adapter_forwards_allow_partial(self):

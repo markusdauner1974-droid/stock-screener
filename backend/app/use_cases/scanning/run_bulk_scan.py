@@ -347,6 +347,7 @@ class RunBulkScanUseCase:
                         allow_partial=True,
                         batch_only_prices=cmd.cache_only,
                         batch_only_fundamentals=cmd.cache_only,
+                        cache_only=cmd.cache_only,
                     )
                 except Exception:
                     logger.warning(

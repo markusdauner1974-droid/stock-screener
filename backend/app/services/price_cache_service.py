@@ -2147,6 +2147,8 @@ class PriceCacheService:
         period: str = "2y",
         market: str | None = None,
         market_by_symbol: Dict[str, str | None] | None = None,
+        *,
+        cache_only: bool = False,
     ) -> Dict[str, Optional[pd.DataFrame]]:
         """
         Get cached price data for multiple symbols using Redis pipeline.
@@ -2166,6 +2168,10 @@ class PriceCacheService:
                 the same window
             market: Optional market for homogeneous batches.
             market_by_symbol: Optional per-symbol market map for mixed batches.
+            cache_only: Never call a price provider. Symbols Redis cannot serve
+                get whatever the database holds, however short or stale, or
+                None. Manual scans set this; freshness is decided before the
+                scan starts (``services/market_data_freshness.py``).
 
         Returns:
             Dict mapping symbols to their cached DataFrames (or None if not cached)
@@ -2192,6 +2198,7 @@ class PriceCacheService:
                 now_et=now_et,
                 market=market,
                 market_by_symbol=market_by_symbol,
+                cache_only=cache_only,
             )
 
         try:
@@ -2341,6 +2348,7 @@ class PriceCacheService:
                         fetch_meta_by_symbol=fetch_meta_by_symbol,
                         market=market,
                         market_by_symbol=market_by_symbol,
+                        cache_only=cache_only,
                     )
                 )
 
@@ -2371,12 +2379,14 @@ class PriceCacheService:
         fetch_meta_by_symbol: Optional[Dict[str, Optional[Dict[str, Any]]]] = None,
         market: str | None = None,
         market_by_symbol: Dict[str, str | None] | None = None,
+        cache_only: bool = False,
     ) -> Dict[str, Optional[pd.DataFrame]]:
         """
         Resolve a multi-symbol cache miss via one DB query and one optional batch fetch.
 
         This keeps the non-Redis path efficient and reuses the same freshness logic
-        as the Redis-assisted bulk path.
+        as the Redis-assisted bulk path. With ``cache_only`` there is no fetch:
+        see ``get_many``.
         """
         if not symbols:
             return {}
@@ -2384,7 +2394,12 @@ class PriceCacheService:
         fetch_meta_by_symbol = fetch_meta_by_symbol or {}
         cached_data: Dict[str, Optional[pd.DataFrame]] = {}
 
-        db_results = self._get_many_from_database(symbols, period)
+        if cache_only:
+            # A new listing has fewer than the loader's default 50 bars; the
+            # scanner decides what is enough history, not the cache.
+            db_results = self._get_many_from_database(symbols, period, minimum_rows=1)
+        else:
+            db_results = self._get_many_from_database(symbols, period)
         db_hits = []
         yfinance_needed = []
         caller_market_by_symbol = {
@@ -2425,6 +2440,11 @@ class PriceCacheService:
                 yfinance_needed.append(symbol)
 
         logger.info("Database query: %d hits, %d need yfinance", len(db_hits), len(yfinance_needed))
+
+        if cache_only:
+            for symbol in yfinance_needed:
+                cached_data[symbol] = db_results.get(symbol, (None, None))[0]
+            return cached_data
 
         if not yfinance_needed:
             return cached_data
