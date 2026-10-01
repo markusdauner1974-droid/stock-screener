@@ -76,9 +76,20 @@ def test_feature_store_strips_setup_payload_with_jsonb_path_delete(db_session):
     finally:
         event.remove(engine, "before_cursor_execute", capture)
 
-    # The mapper also drops these fields, so assert the SQL did the stripping.
+    # The mapper also drops these fields, so check the SQL projection itself:
+    # both JSONB path deletes must apply, and nothing else may be removed.
     feature_selects = [s for s in statements if "from stock_feature_daily" in s]
     assert any("#-" in s for s in feature_selects)
+    from app.infra.db.repositories.feature_store_repo import (
+        _feature_results_without_setup_payload_query,
+    )
+
+    [projected] = [
+        row.details_json
+        for row in _feature_results_without_setup_payload_query(db_session, run.id)
+    ]
+    assert projected["rating"] == "Strong Buy"
+    assert projected["setup_engine"] == {"setup_score": 82.0, "pattern_primary": "VCP"}
     assert item.extended_fields["se_setup_score"] == 82.0
     assert item.extended_fields["se_pattern_primary"] == "VCP"
     assert "se_explain" not in item.extended_fields
@@ -213,6 +224,24 @@ def _hold_projection_registry_lock(factory, on_locked):
         on_locked()
 
 
+def _wait_for_lock_waiter(timeout: float = 15.0) -> None:
+    probe = create_engine(engine.url, poolclass=NullPool)
+    deadline = time.monotonic() + timeout
+    try:
+        with probe.connect() as connection:
+            while time.monotonic() < deadline:
+                waiting = connection.scalar(text(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                ))
+                if waiting:
+                    return
+                time.sleep(0.05)
+    finally:
+        probe.dispose()
+    raise TimeoutError("no transaction ever waited on the registry lock")
+
+
 @pytest.mark.parametrize(
     "hold_lock",
     [_hold_social_analysis_transaction, _hold_projection_registry_lock],
@@ -235,7 +264,9 @@ def test_social_registry_lock_serializes_transactions(db_session, hold_lock):
     def first():
         def while_locked():
             first_locked.set()
-            time.sleep(0.3)
+            # Hold the lock until PostgreSQL reports the second session waiting
+            # on it; without FOR UPDATE it never waits and this times out.
+            _wait_for_lock_waiter()
             events.append("first released")
         hold_lock(factory, while_locked)
 
