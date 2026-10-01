@@ -13,8 +13,9 @@ import time
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import event, func, select, text
+from sqlalchemy import create_engine, event, func, select, text
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 
 from app.database import engine
 from app.domain.common.query import SortOrder, SortSpec
@@ -85,14 +86,51 @@ def test_feature_store_strips_setup_payload_with_jsonb_path_delete(db_session):
 
 
 def _advisory_lock_is_free(lock_id: int) -> bool:
-    with engine.connect() as connection:
-        acquired = connection.scalar(select(func.pg_try_advisory_lock(lock_id)))
-        if acquired:
-            connection.execute(select(func.pg_advisory_unlock(lock_id)))
-        return bool(acquired)
+    # Advisory locks are reentrant for their owning session, so probe from a
+    # fresh, unpooled connection: a pooled one could be the leaking session.
+    probe = create_engine(engine.url, poolclass=NullPool)
+    try:
+        with probe.connect() as connection:
+            acquired = connection.scalar(select(func.pg_try_advisory_lock(lock_id)))
+            if acquired:
+                connection.execute(select(func.pg_advisory_unlock(lock_id)))
+            return bool(acquired)
+    finally:
+        probe.dispose()
 
 
-def test_cot_refresh_publishes_and_upserts_under_advisory_locks(db_session):
+def _gold_managed_money(db_session):
+    from app.domain.cot.models import Participant
+    from app.infra.db.models.cot import CotInstrument, CotWeeklyPosition
+
+    return db_session.scalars(
+        select(CotWeeklyPosition)
+        .join(CotInstrument, CotInstrument.id == CotWeeklyPosition.instrument_id)
+        .where(
+            CotInstrument.slug == "gold",
+            CotWeeklyPosition.participant == Participant.MANAGED_MONEY.value,
+        )
+        .order_by(CotWeeklyPosition.report_date)
+    ).all()
+
+
+@pytest.fixture
+def lock_timeout():
+    """Fail fast instead of hanging if a leaked advisory lock blocks a refresh."""
+
+    def on_checkout(dbapi_connection, _record, _proxy):
+        with dbapi_connection.cursor() as cursor:
+            cursor.execute("SET lock_timeout = '10s'")
+
+    event.listen(engine, "checkout", on_checkout)
+    try:
+        yield
+    finally:
+        event.remove(engine, "checkout", on_checkout)
+        engine.dispose()  # no pooled connection keeps the setting
+
+
+def test_cot_refresh_publishes_and_upserts_under_advisory_locks(db_session, lock_timeout):
     from app.infra.db.models.cot import CotPublicationPointer
     from app.use_cases.cot.refresh import CotRefreshCommand, RefreshCotUseCase
     from tests.unit.test_cot_refresh import FakePriceHydrator, FakeSource
@@ -106,11 +144,17 @@ def test_cot_refresh_publishes_and_upserts_under_advisory_locks(db_session):
 
     first = use_case.execute(CotRefreshCommand(origin="test"))
     second = use_case.execute(CotRefreshCommand(origin="test"))
+    original_long = _gold_managed_money(db_session)[155].long
     source.correct_gold_week(155, long_delta=50)  # rewrites stored rows via ON CONFLICT DO UPDATE
     third = use_case.execute(CotRefreshCommand(origin="test"))
 
     assert (first.status, second.status, third.status) == ("published", "no_change", "published")
     assert db_session.get(CotPublicationPointer, "latest_published").run_id == 3
+    # Publishing alone would pass with DO NOTHING; the stored row itself must change.
+    db_session.expire_all()
+    corrected = _gold_managed_money(db_session)[155]
+    assert corrected.long == original_long + 50
+    assert corrected.import_run_id == 3
     # The session-level refresh lock is released even though it lives on its own connection.
     assert _advisory_lock_is_free(_COT_REFRESH_LOCK_ID)
     assert _advisory_lock_is_free(_COT_PUBLICATION_LOCK_ID)
