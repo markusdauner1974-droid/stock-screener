@@ -41,6 +41,7 @@ from .errors import CacheRefreshError
 from .price_row_normalization import (
     normalize_price_batch,
     normalize_price_frame,
+    stock_price_frame,
     stock_price_row_from_ohlcv,
 )
 from .stock_price_persistence import persist_stock_price_mappings
@@ -474,22 +475,7 @@ class PriceCacheService:
                 logger.debug(f"Insufficient cached data for {symbol} ({len(prices) if prices else 0} rows)")
                 return None, None
 
-            # Convert to DataFrame
-            data = {
-                'Date': [p.date for p in prices],
-                'Open': [p.open for p in prices],
-                'High': [p.high for p in prices],
-                'Low': [p.low for p in prices],
-                'Close': [p.close for p in prices],
-                'Adj Close': [p.adj_close for p in prices],
-                'Volume': [p.volume for p in prices],
-            }
-
-            df = pd.DataFrame(data)
-            # Convert Date to pd.Timestamp for consistency with yfinance data
-            df['Date'] = pd.to_datetime(df['Date'])
-            df.set_index('Date', inplace=True)
-            df = normalize_price_frame(df, min_rows=50)
+            df = normalize_price_frame(stock_price_frame(prices, include_adj_close=True), min_rows=50)
             if df is None:
                 logger.debug(f"Insufficient finite cached data for {symbol}")
                 return None, None
@@ -584,20 +570,9 @@ class PriceCacheService:
                         results[symbol] = (None, None)
                         continue
 
-                    data = {
-                        'Date': [p.date for p in prices],
-                        'Open': [p.open for p in prices],
-                        'High': [p.high for p in prices],
-                        'Low': [p.low for p in prices],
-                        'Close': [p.close for p in prices],
-                        'Adj Close': [p.adj_close for p in prices],
-                        'Volume': [p.volume for p in prices],
-                    }
-
-                    df = pd.DataFrame(data)
-                    df['Date'] = pd.to_datetime(df['Date'])
-                    df.set_index('Date', inplace=True)
-                    df = normalize_price_frame(df, min_rows=minimum_rows)
+                    df = normalize_price_frame(
+                        stock_price_frame(prices, include_adj_close=True), min_rows=minimum_rows
+                    )
                     if df is None:
                         results[symbol] = (None, None)
                         continue

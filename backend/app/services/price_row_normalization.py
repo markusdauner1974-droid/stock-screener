@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 import numpy as np
 import pandas as pd
@@ -121,3 +121,25 @@ def stock_price_row_from_ohlcv(
         "volume": _volume_or_zero(row.get("Volume")),
         "adj_close": adj_close if adj_close is not None else close,
     }
+
+
+def stock_price_frame(rows: Iterable[Any], *, include_adj_close: bool) -> pd.DataFrame:
+    """Turn StockPrice rows (oldest first) into an OHLCV frame indexed by ``Date``.
+
+    The inverse of ``stock_price_row_from_ohlcv``. Callers keep their own row
+    thresholds and finite-close normalization.
+    """
+    rows = list(rows)
+    data = {
+        "Date": [row.date for row in rows],
+        "Open": [row.open for row in rows],
+        "High": [row.high for row in rows],
+        "Low": [row.low for row in rows],
+        "Close": [row.close for row in rows],
+    }
+    if include_adj_close:
+        data["Adj Close"] = [row.adj_close for row in rows]
+    data["Volume"] = [row.volume for row in rows]
+    df = pd.DataFrame(data)
+    df["Date"] = pd.to_datetime(df["Date"])
+    return df.set_index("Date")

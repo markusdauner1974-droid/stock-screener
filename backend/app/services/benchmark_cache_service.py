@@ -34,7 +34,11 @@ from .benchmark_resolution import (
 )
 from .cache.market_cache_policy import MarketAwareCachePolicy, market_cache_policy
 from .cache.redis_codec import decode_frame, encode_frame
-from .price_row_normalization import normalize_price_frame, stock_price_row_from_ohlcv
+from .price_row_normalization import (
+    normalize_price_frame,
+    stock_price_frame,
+    stock_price_row_from_ohlcv,
+)
 from ..utils.market_hours import get_eastern_now, get_last_trading_day, is_market_open, is_trading_day
 
 logger = logging.getLogger(__name__)
@@ -321,20 +325,7 @@ class BenchmarkCacheService:
                 logger.debug("Insufficient data in database for benchmark %s %s", benchmark_symbol, period)
                 return None
 
-            # Convert to DataFrame
-            data = {
-                'Date': [p.date for p in prices],
-                'Open': [p.open for p in prices],
-                'High': [p.high for p in prices],
-                'Low': [p.low for p in prices],
-                'Close': [p.close for p in prices],
-                'Volume': [p.volume for p in prices],
-            }
-
-            df = pd.DataFrame(data)
-            df['Date'] = pd.to_datetime(df['Date'])
-            df.set_index('Date', inplace=True)
-            df = normalize_price_frame(df, min_rows=100)
+            df = normalize_price_frame(stock_price_frame(prices, include_adj_close=False), min_rows=100)
             if df is None:
                 logger.debug("No finite database rows for benchmark %s %s", benchmark_symbol, period)
                 return None
