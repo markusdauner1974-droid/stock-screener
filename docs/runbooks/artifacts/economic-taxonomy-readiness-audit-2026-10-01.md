@@ -2,8 +2,14 @@
 
 Audit for #430 (part of #410). Line numbers refer to `main` @ `93f22b30`.
 It checks deployments against the [cutover runbook](../economic-taxonomy-cutover.md),
-defines when legacy rollback support can be retired, and lists every reader and
-writer that still depends on legacy, shadow or dual mode. It changes no code.
+defines when legacy rollback support can be retired, and inventories the
+readers and writers that still depend on legacy, shadow or dual mode. It
+changes no code.
+
+The inventory was built by reading the code, starting from searches for legacy
+theme models and authority-mode checks. It is a starting point, not proof that
+nothing is missing. Retirement criterion 4's CI gate is the check that makes it
+complete.
 
 ## Summary
 
@@ -111,6 +117,7 @@ legacy, shadow and dual, at `app/services/economic_taxonomy_runtime.py:872`):
 | `ThemeTaxonomyService.compute_all_l1_metrics` | task `compute_l1_metrics` (`theme_discovery_tasks.py:1504`), also called from `run_full_pipeline` (`:1221`) after the fenced L2 metrics step | L1 `ThemeMetrics` (`theme_taxonomy_service.py:1088`) |
 | Theme review and merge API | `POST /themes/{id}/add-constituents`, `DELETE /themes/{id}`, `/candidates/review`, `/alerts/*` | `ThemeConstituent` (`themes_review_merge.py:384`), cluster state, alerts |
 | Equivalence API | `POST /themes/equivalence`, `/equivalence/{id}/undo` | legacy identity equivalence |
+| `ThemeMergingService` embeddings | task `recompute_stale_theme_embeddings` (`theme_discovery_tasks.py:603`), `POST /themes/embeddings/refresh-campaign` | `ThemeEmbedding` for legacy clusters (`theme_merging_service.py:573-601`, `:630-708`, `:840`) |
 | `ThemeDiscoveryService.check_for_alerts` | task `check_alerts`, `run_full_pipeline`, `POST /themes/alerts/check` | `ThemeAlert` (`theme_discovery_service.py:1157`) |
 
 **Effect in economic mode:**
@@ -209,7 +216,8 @@ something checkable.
 - `stocks.py:322`, `economic_themes.py`, `economic_taxonomy.py`.
 - `digest_service`, `ui_snapshot_service`, `social_confirmation_reader`,
   `social_theme_market_service`, `stock_universe_service`.
-- The MCP `market_copilot`.
+- The MCP `market_copilot` theme tools (partly; its alert reads are not
+  routed, see below).
 - Frontend: `ThemesPageContainer.jsx:114-129` switches on
   `generation.authority_mode`. The legacy review, settings, sources and article
   dialogs render only in the legacy branch (after line 522). This means the
@@ -223,6 +231,7 @@ something checkable.
 | `themes_intelligence.py` GETs: equivalence preview, history and search; `/{id}/developments` | legacy identities | Same |
 | `watchlist_stewardship_service.py:328` | `ThemeAlert` | **Serves legacy-derived alerts**: `check_for_alerts` is unfenced (G2), but lifecycle-transition alerts stop because they come from the fenced lifecycle path |
 | `validation_service.py:235` (`/validation`, stock validation) | `ThemeAlert`, `ThemeCluster` | Same |
+| MCP `market_copilot._recent_alerts` (`market_copilot.py:1495`), used by `market_overview` (`:239`) and a second tool (`:719`) | `ThemeAlert` | Same |
 | `GET /social-signals/admin/associations` (`social_signals.py:422-442`) | `SocialThemeAssociation` joined to `ThemeCluster` | Serves legacy associations; the decision endpoint beside it is mode-aware, but this list is not |
 | `theme_development_preparation`, `theme_platform/content_browser_queries`, `social_refresh_support` | legacy clusters and mentions | Serves legacy data |
 
@@ -240,6 +249,7 @@ legacy authority. Retirement must keep them.
    runbook step 2.
 4. **Retirement criterion 4:** a CI consumer-inventory gate for legacy reads,
    starting from the tables above.
-5. Move the `ThemeAlert` readers (watchlist stewardship, validation) to an
+5. Move the `ThemeAlert` readers (watchlist stewardship, validation, the MCP
+   copilot's alert reads) to an
    economic signal, or label them legacy-only. In economic mode they
    currently mix legacy-derived alerts with missing lifecycle alerts.
