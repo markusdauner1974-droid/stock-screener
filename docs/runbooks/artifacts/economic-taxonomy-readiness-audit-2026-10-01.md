@@ -19,8 +19,9 @@ writer that still depends on legacy, shadow or dual mode. It changes no code.
      would log an error on every scheduled run.
   3. **G3:** the runbook's seed step refuses an authority row that the fence
      itself creates on the first fenced legacy write.
-- **Retirement:** not yet possible, because no deployment has run in economic
-  mode. Criteria are defined below; G1–G3 come first.
+- **Retirement:** not yet possible for the local Docker deployment, because it
+  has not run in economic mode. Other deployments were not checked; apply the
+  criteria below to each one. G1–G3 come first.
 
 ## 1. Readiness audit
 
@@ -59,8 +60,10 @@ FROM taxonomy_authority;
 SELECT version_num FROM alembic_version;
 ```
 
-No rows means "implicit legacy, not seeded". A row with `seeded = false` means
-a fenced legacy write created it; that deployment hits G3.
+No rows means "implicit legacy, not seeded". A row with `seeded = false` has
+no processing taxonomy version and hits the G3 seed blocker. The query does not
+show what created the row, but `lock_authority()` is the code path that creates
+rows in this state.
 
 ### G1: news content is never admitted as economic evidence
 
@@ -101,9 +104,11 @@ legacy, shadow and dual, at `app/services/economic_taxonomy_runtime.py:872`):
 | Writer | Entry points | Legacy rows written |
 |---|---|---|
 | `ThemeExtractionService` | beat `extract_themes` (:10, :40) and `reprocess_failed_themes` (:05); `POST /themes/extract`, `POST /themes/pipeline/run` | `ThemeMention`, `ThemeCluster`, `ThemeConstituent` (`theme_extraction_service.py:917`, `:1719`, `:1808`) |
-| `ThemeCorrelationService` | task `discover_correlation_clusters`; `POST /themes/create-from-cluster` | `ThemeCluster`, `ThemeConstituent` (`theme_correlation_service.py:449`, `:466`, `:507`) |
+| `ThemeCorrelationService.create_theme_from_cluster` | `POST /themes/create-from-cluster` | `ThemeCluster`, `ThemeConstituent` (`theme_correlation_service.py:427-477`) |
+| `ThemeCorrelationService.validate_theme` | task `validate_themes`, `POST /themes/validate-all` (the per-theme `GET /{id}/validate` is guarded) | cluster validation fields (`theme_correlation_service.py:160`, `:169`) |
 | `ThemeMergingService` | `POST /themes/merge-suggestions/{id}/approve`, `/consolidate`, `/merge-wave/*` | merges, `ThemeMergeSuggestion` (`theme_merging_service.py:1446`) |
-| `ThemeTaxonomyService` | task `run_taxonomy_assignment` (the API is guarded by `_reject_economic_mode`; the task is not) | `ThemeCluster`, `ThemeMetrics` (`theme_taxonomy_service.py:178`, `:1088`) |
+| `ThemeTaxonomyService.run_full_taxonomy_assignment` | task `run_taxonomy_assignment` (the API is guarded by `_reject_economic_mode`; the task is not) | L1 `ThemeCluster` and L2 assignments (`theme_taxonomy_service.py:178`) |
+| `ThemeTaxonomyService.compute_all_l1_metrics` | task `compute_l1_metrics` (`theme_discovery_tasks.py:1504`), also called from `run_full_pipeline` (`:1221`) after the fenced L2 metrics step | L1 `ThemeMetrics` (`theme_taxonomy_service.py:1088`) |
 | Theme review and merge API | `POST /themes/{id}/add-constituents`, `DELETE /themes/{id}`, `/candidates/review`, `/alerts/*` | `ThemeConstituent` (`themes_review_merge.py:384`), cluster state, alerts |
 | Equivalence API | `POST /themes/equivalence`, `/equivalence/{id}/undo` | legacy identity equivalence |
 | `ThemeDiscoveryService.check_for_alerts` | task `check_alerts`, `run_full_pipeline`, `POST /themes/alerts/check` | `ThemeAlert` (`theme_discovery_service.py:1157`) |
@@ -218,6 +223,7 @@ something checkable.
 | `themes_intelligence.py` GETs: equivalence preview, history and search; `/{id}/developments` | legacy identities | Same |
 | `watchlist_stewardship_service.py:328` | `ThemeAlert` | **Serves legacy-derived alerts**: `check_for_alerts` is unfenced (G2), but lifecycle-transition alerts stop because they come from the fenced lifecycle path |
 | `validation_service.py:235` (`/validation`, stock validation) | `ThemeAlert`, `ThemeCluster` | Same |
+| `GET /social-signals/admin/associations` (`social_signals.py:422-442`) | `SocialThemeAssociation` joined to `ThemeCluster` | Serves legacy associations; the decision endpoint beside it is mode-aware, but this list is not |
 | `theme_development_preparation`, `theme_platform/content_browser_queries`, `social_refresh_support` | legacy clusters and mentions | Serves legacy data |
 
 `ContentItem` and content-source endpoints are shared ingestion inputs, not
