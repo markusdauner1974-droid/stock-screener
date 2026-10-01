@@ -1070,10 +1070,17 @@ class ThemeMergingService:
             ThemeCluster.is_l1 == False,
         ).all()
 
+        # One query for every candidate's embedding (#420). include_stale keeps
+        # stale rows in the map, as get_for_cluster would; the refresh check
+        # below decides what to do with them.
+        records_by_theme = self.embedding_repo.get_by_cluster_ids(
+            [theme.id for theme in other_themes], include_stale=True
+        )
+
         # Calculate similarities
         similar = []
         for theme in other_themes:
-            other_record = self.embedding_repo.get_for_cluster(theme.id)
+            other_record = records_by_theme.get(theme.id)
             if self._embedding_record_needs_refresh(theme, other_record):
                 other_record, _ = self.update_theme_embedding(theme)
             if not other_record:
