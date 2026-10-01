@@ -44,8 +44,45 @@ def _numpy_native(value: Any) -> Any:
     return value
 
 
+try:
+    import numpy as _np
+
+    _NUMPY_FLOAT_TYPES = frozenset({_np.float64, _np.float32})
+    _NUMPY_INT_TYPES = frozenset({_np.int64, _np.int32})
+    _NUMPY_BOOL_TYPE = _np.bool_
+except ImportError:  # pragma: no cover - numpy is a runtime dependency
+    _NUMPY_FLOAT_TYPES = _NUMPY_INT_TYPES = frozenset()
+    _NUMPY_BOOL_TYPE = None
+
+
 def json_safe(value: Any, *, stringify_keys: bool = True) -> Any:
     """Convert a value tree into strict JSON-compatible primitives."""
+    # Exact-type fast paths for the values scan results are made of (#465):
+    # they skip the per-call numpy import, the numbers-ABC checks and pd.isna.
+    # Anything else (subclasses, other numpy/pandas types, dates) takes the
+    # generic path below, with identical results.
+    kind = type(value)
+    if kind is str or kind is bool or value is None:
+        return value
+    if kind is float:
+        return value if math.isfinite(value) else None
+    if kind is int:
+        return value
+    if kind is dict:
+        return {
+            str(key) if stringify_keys else key: json_safe(item, stringify_keys=stringify_keys)
+            for key, item in value.items()
+        }
+    if kind is list or kind is tuple:
+        return [json_safe(item, stringify_keys=stringify_keys) for item in value]
+    if kind in _NUMPY_FLOAT_TYPES:
+        number = float(value)
+        return number if math.isfinite(number) else None
+    if kind in _NUMPY_INT_TYPES:
+        return int(value)
+    if kind is _NUMPY_BOOL_TYPE:
+        return bool(value)
+
     value = _numpy_native(value)
     if value is None or isinstance(value, (str, bool)):
         return value
