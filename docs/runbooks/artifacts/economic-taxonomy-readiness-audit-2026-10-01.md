@@ -118,6 +118,7 @@ legacy, shadow and dual, at `app/services/economic_taxonomy_runtime.py:872`):
 | Theme review and merge API | `POST /themes/{id}/add-constituents`, `DELETE /themes/{id}`, `/candidates/review`, `/alerts/*` | `ThemeConstituent` (`themes_review_merge.py:384`), cluster state, alerts |
 | Equivalence API | `POST /themes/equivalence`, `/equivalence/{id}/undo` | legacy identity equivalence |
 | `ThemeTaxonomyService.compute_l1_centroid_embeddings` | task `recompute_l1_centroid_embeddings` (`theme_discovery_tasks.py:1607`) | L1 `ThemeEmbedding` (`theme_taxonomy_service.py:1102-1159`) |
+| Theme content corruption recovery: `reset_corrupt_theme_content_storage` (`theme_content_recovery_service.py:53-72`) | content list and export, when corruption survives REINDEX (`api/v1/themes.py:140-171`) | **Drops and recreates** `theme_mentions`, together with the shared `content_items` and `content_item_pipeline_state`. No authority check: in economic mode it deletes rollback data, and after retirement it would recreate `theme_mentions` |
 | `theme_group_refresh.refresh_groups` | beat `theme-group-refresh` every 60 s (`celery_app.py:536-540`, task `theme_intelligence_tasks.py:33`) | `ThemeEquivalenceOperation` status (`theme_group_refresh.py:29-44`) |
 | One-off maintenance | `theme_alias_backfill_service` (`ThemeAlias`, `:227-246`), `app/scripts/repair_jp_alpha_universe_symbols.py` (`ThemeConstituent`, `ThemeMention`, `ThemeAlert`) | legacy theme rows, run by an operator |
 | `ThemeMergingService` embeddings | task `recompute_stale_theme_embeddings` (`theme_discovery_tasks.py:603`), `POST /themes/embeddings/refresh-campaign` | `ThemeEmbedding` for legacy clusters (`theme_merging_service.py:573-601`, `:630-708`, `:840`) |
@@ -239,6 +240,7 @@ something checkable.
 | `GET /themes/matching/telemetry` (`themes_queries.py:409-439`; the module's other endpoints are routed) | `ThemeMention` | Serves legacy matcher statistics |
 | `theme_development_worker.discover` (`:43-57`), from beat `theme-development-preparation` every minute (`celery_app.py:541-545`, task `theme_intelligence_tasks.py:16-29`) and `POST /themes/developments/backfill` with `apply=true` (`themes_intelligence.py:177-195`) | `ThemeMention` | Keeps reading legacy mentions; no authority check on either path |
 | Content listing mention annotations (`api/v1/themes.py:106-115`) | `ThemeMention` | Serves legacy annotations |
+| Social publication preparation: `social_signal_writer.prepare_run()` and `publish()` (`social_signal_writer.py:716`, `:784`) → `SocialThemeProjectionService.prepare_application()` (`social_theme_projection_service.py:153-175`, `:189-226`) | `ThemeCluster`, `ThemeMention`, `ThemeAlias`, `ThemeConstituent`, `SocialThemeAssociation` | **Runs for every live Social run, in every mode**, before `apply_live` makes its economic-mode check (`:433`). Social publication would fail if these tables were retired; its basket preparation must move first |
 | One-off `theme_pipeline_state_backfill_service` (`:122-130`) | `ThemeMention`, to infer status | Writes only shared `ContentItemPipelineState`, so the G2 fence must **not** block it; adapt it before `ThemeMention` is removed |
 | **Economic** reader snapshot builder (`economic_taxonomy_snapshot_builder.py:698-717`) | `ThemeDevelopmentTheme`, mapped to economic themes | **The economic side itself depends on legacy development links.** Retirement must migrate these links first |
 | `GET /themes/pipeline/state-health`, `/themes/pipeline/observability` (`themes_content_pipeline.py:215-245`, via `theme_pipeline_state_service.py:338-352`, `:430-475`) | `ThemeMention`, `ThemeCluster`, `ThemeMergeSuggestion` | Serves legacy-only diagnostics |
@@ -268,8 +270,7 @@ groups:
 - **Helpers reached only through the services listed above:**
   `theme_lifecycle_service`, `theme_group_reads`, `theme_group_snapshot`,
   `theme_mention_replacement`, `theme_embedding_service`,
-  `theme_development_facts`, `theme_content_recovery_service`,
-  `infra/db/repositories/theme_alias_repo` (used by extraction) and
+  `theme_development_facts`, `infra/db/repositories/theme_alias_repo` (used by extraction) and
   `api/v1/themes_common`.
 - **Model definitions, and historical schema migrations** under
   `app/db_migrations/`.
@@ -302,3 +303,6 @@ still contain an unrouted endpoint, as `themes_queries` does with
 6. Move development links off `ThemeDevelopmentTheme` before any retirement.
    Today the economic snapshot builder reads them, and development recording
    keeps writing them in every mode, so both sides need to change together.
+7. Move Social publication's basket preparation (`prepare_application`) off
+   the legacy theme tables. In economic mode only its final apply step
+   switches today.
