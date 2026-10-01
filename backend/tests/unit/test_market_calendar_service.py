@@ -802,3 +802,20 @@ def test_session_anchors_require_enough_history():
 
     with pytest.raises(ValueError, match="253 required"):
         service.session_anchors("US", sessions[-1].date(), offsets=(252,))
+
+
+@pytest.mark.parametrize(
+    "holiday",
+    [date(2025, 9, 29), date(2025, 10, 24), date(2025, 12, 25)],
+)
+def test_tw_2025_commemoration_holidays_are_closed_in_rs_anchors(holiday):
+    # XTAI in exchange_calendars predates Taiwan's May 2025 holiday law, so
+    # RS anchors landed on days with no ^TWII/0050.TW bar and blocked TW
+    # group-rank backfill. 2026-04-13 reaches 2025-09-29 at offset 126.
+    service = MarketCalendarService()
+
+    assert service.is_trading_day("TW", holiday) is False
+    anchors = service.session_anchors(
+        "TW", date(2026, 4, 13), offsets=(1, 5, 21, 63, 126, 189, 252)
+    )
+    assert holiday not in anchors.values()
