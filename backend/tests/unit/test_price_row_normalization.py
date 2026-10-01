@@ -9,9 +9,12 @@ import pytest
 
 from app.infra.serialization import finite_float_or_none
 from app.services.price_row_normalization import (
+    STOCK_PRICE_ROW_COLUMNS,
     drop_non_finite_close_rows,
     normalize_price_batch,
     normalize_price_frame,
+    stock_price_frame,
+    stock_price_frames_by_symbol,
     stock_price_row_from_ohlcv,
 )
 
@@ -189,3 +192,72 @@ def test_normalize_price_batch_filters_symbols_with_insufficient_clean_rows():
 
     assert list(cleaned) == ["AAPL"]
     assert cleaned["AAPL"]["Close"].tolist() == [101.0, 102.0]
+
+
+def _price_rows():
+    """Column-select rows as the bulk loader gets them: by symbol, then date."""
+    from collections import namedtuple
+
+    Row = namedtuple("Row", STOCK_PRICE_ROW_COLUMNS)
+    return [
+        Row("AAPL", date(2026, 6, 22), 100.0, 101.0, 99.0, 100.5, 100.5, 1_000),
+        Row("AAPL", date(2026, 6, 23), 101.0, 102.0, 100.0, None, None, None),
+        Row("AAPL", date(2026, 6, 24), 102.0, 103.0, 101.0, 102.5, 102.0, 3_000),
+        Row("MSFT", date(2026, 6, 23), 300.0, 301.0, 299.0, float("nan"), 300.0, 5_000),
+        Row("MSFT", date(2026, 6, 24), 301.0, 302.0, 300.0, 301.5, 301.5, 6_000),
+    ]
+
+
+@pytest.mark.parametrize("include_adj_close", [True, False])
+def test_frames_by_symbol_match_the_per_symbol_builder(include_adj_close):
+    rows = _price_rows()
+
+    frames = stock_price_frames_by_symbol(rows, include_adj_close=include_adj_close)
+
+    assert list(frames) == ["AAPL", "MSFT"]
+    for symbol, frame in frames.items():
+        expected = stock_price_frame(
+            [row for row in rows if row.symbol == symbol],
+            include_adj_close=include_adj_close,
+        )
+        pd.testing.assert_frame_equal(frame, expected)  # values, dtypes and index
+
+
+def test_frames_by_symbol_keep_an_all_null_column_as_its_own_frame_would():
+    """Review on #460: a symbol whose Adj Close and Volume are all NULL must not
+    pick up its neighbours' dtype."""
+    from collections import namedtuple
+
+    Row = namedtuple("Row", STOCK_PRICE_ROW_COLUMNS)
+    rows = [
+        Row("BARE", date(2026, 6, 23), 10.0, 11.0, 9.0, 10.5, None, None),
+        Row("BARE", date(2026, 6, 24), 10.5, 11.5, 9.5, 11.0, None, None),
+        Row("FULL", date(2026, 6, 23), 20.0, 21.0, 19.0, 20.5, 20.5, 7_000),
+        Row("FULL", date(2026, 6, 24), 20.5, 21.5, 19.5, 21.0, 21.0, 8_000),
+    ]
+
+    frames = stock_price_frames_by_symbol(rows, include_adj_close=True)
+
+    for symbol in ("BARE", "FULL"):
+        pd.testing.assert_frame_equal(
+            frames[symbol],
+            stock_price_frame(
+                [row for row in rows if row.symbol == symbol], include_adj_close=True
+            ),
+        )
+
+
+def test_frames_by_symbol_are_independent_copies():
+    frames = stock_price_frames_by_symbol(_price_rows(), include_adj_close=True)
+
+    # A slice of the shared chunk frame would keep the whole chunk alive and
+    # warn when a caller adds or changes a column.
+    assert not np.shares_memory(
+        frames["AAPL"]["Open"].to_numpy(), frames["MSFT"]["Open"].to_numpy()
+    )
+    frames["AAPL"]["Close"] = 0.0
+    assert frames["MSFT"]["Close"].tolist()[1] == 301.5
+
+
+def test_frames_by_symbol_of_no_rows_is_empty():
+    assert stock_price_frames_by_symbol([], include_adj_close=True) == {}

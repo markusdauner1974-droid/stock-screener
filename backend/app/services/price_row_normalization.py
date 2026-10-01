@@ -143,3 +143,56 @@ def stock_price_frame(rows: Iterable[Any], *, include_adj_close: bool) -> pd.Dat
     df = pd.DataFrame(data)
     df["Date"] = pd.to_datetime(df["Date"])
     return df.set_index("Date")
+
+
+# Column order of the StockPrice select that ``stock_price_frames_by_symbol`` reads.
+STOCK_PRICE_ROW_COLUMNS = (
+    "symbol", "date", "open", "high", "low", "close", "adj_close", "volume",
+)
+_FRAME_COLUMN_NAMES = {
+    "date": "Date", "open": "Open", "high": "High", "low": "Low",
+    "close": "Close", "adj_close": "Adj Close", "volume": "Volume",
+}
+
+
+def stock_price_frames_by_symbol(
+    rows: Iterable[Any], *, include_adj_close: bool
+) -> dict[str, pd.DataFrame]:
+    """``stock_price_frame`` for many symbols at once, from one row list.
+
+    ``rows`` are tuples in ``STOCK_PRICE_ROW_COLUMNS`` order, sorted by symbol
+    and then date (oldest first). One frame is built for all of them and cut
+    at the symbol boundaries, which is several times faster than a Python
+    list per column per symbol (#418). Each symbol gets its own copy.
+    """
+    frame = pd.DataFrame.from_records(list(rows), columns=STOCK_PRICE_ROW_COLUMNS)
+    if frame.empty:
+        return {}
+    frame["date"] = pd.to_datetime(frame["date"])
+    symbols = frame.pop("symbol").to_numpy()
+    if not include_adj_close:
+        frame = frame.drop(columns="adj_close")
+    frame = frame.rename(columns=_FRAME_COLUMN_NAMES).set_index("Date")
+    # Sorted by symbol, so every symbol is one contiguous run of rows.
+    starts = np.flatnonzero(np.r_[True, symbols[1:] != symbols[:-1]])
+    ends = np.r_[starts[1:], len(symbols)]
+    # A symbol's frame must not depend on the other symbols in the chunk, so
+    # NULLs are counted per symbol and column (one vectorized pass):
+    # - a column that is all NULL for a symbol becomes object None, as in
+    #   ``stock_price_frame``, not float NaN borrowed from the shared column;
+    # - one NULL volume elsewhere makes the shared column float, so a symbol
+    #   without gaps gets integer volume back.
+    present = np.add.reduceat(frame.notna().to_numpy(), starts, axis=0)
+    volume_column = frame.columns.get_loc("Volume")
+    volume_widened = frame["Volume"].dtype.kind == "f"
+    frames = {}
+    for present_counts, start, end in zip(present, starts, ends):
+        part = frame.iloc[start:end].copy()
+        for column in np.flatnonzero(present_counts == 0):
+            part[frame.columns[column]] = pd.Series(
+                [None] * (end - start), index=part.index, dtype=object
+            )
+        if volume_widened and present_counts[volume_column] == end - start:
+            part["Volume"] = part["Volume"].astype("int64")
+        frames[symbols[start]] = part
+    return frames
