@@ -381,53 +381,37 @@ class ThemeDiscoveryService:
         # Use extended lookback so 200-day MA and 1-month correlations have enough data.
         date_lookback = as_of_date - timedelta(days=260)
 
-        prices_query = self.db.query(StockPrice).filter(
+        # Three columns, not ORM entities, and one long frame for the whole basket
+        # instead of a frame per symbol: most of a metrics run was spent here (#419).
+        rows = self.db.query(StockPrice.symbol, StockPrice.date, StockPrice.close).filter(
             StockPrice.symbol.in_(symbols),
             StockPrice.date >= date_lookback.date(),
             StockPrice.date <= as_of_date.date(),
         ).all()
 
-        if not prices_query:
+        if not rows:
             return self._empty_price_metrics()
 
-        # Convert to DataFrame
-        price_data = defaultdict(list)
-        for p in prices_query:
-            price_data[p.symbol].append({
-                "date": p.date,
-                "close": p.close,
-            })
+        prices = pd.DataFrame.from_records(rows, columns=["symbol", "date", "close"])
+        prices["close"] = prices["close"].astype(float)
+        prices = prices.sort_values(["symbol", "date"], kind="stable")
+        rows_per_symbol = prices.groupby("symbol")["close"].transform("size")
+        prices = prices[rows_per_symbol >= 5].copy()  # too little history to use
 
-        # Calculate returns for each stock
-        returns_data = {}
-        current_prices = {}
-        ma_50 = {}
-        ma_200 = {}
-
-        for symbol, prices in price_data.items():
-            if len(prices) < 5:
-                continue
-
-            df = pd.DataFrame(prices).sort_values("date")
-            df["return"] = df["close"].pct_change(fill_method=None)
-
-            current_price = df.iloc[-1]["close"]
-            current_prices[symbol] = current_price
-
-            # Calculate MAs
-            if len(df) >= 50:
-                ma_50[symbol] = df["close"].tail(50).mean()
-            if len(df) >= 200:
-                ma_200[symbol] = df["close"].tail(200).mean()
-
-            # Store returns
-            returns_data[symbol] = df.set_index("date")["return"]
-
-        if not returns_data:
+        if prices.empty:
             return self._empty_price_metrics()
 
-        # Combine returns into DataFrame
-        returns_df = pd.DataFrame(returns_data)
+        by_symbol = prices.groupby("symbol", sort=False)
+        # Each symbol's return is against its own previous row, as before.
+        prices["return"] = by_symbol["close"].pct_change(fill_method=None)
+        sizes = by_symbol.size()
+        # The last row's close even when it is missing (NaN), as iloc[-1] gave.
+        current_prices = by_symbol.tail(1).set_index("symbol")["close"].to_dict()
+        ma_50 = by_symbol.tail(50).groupby("symbol")["close"].mean()[sizes >= 50].to_dict()
+        ma_200 = by_symbol.tail(200).groupby("symbol")["close"].mean()[sizes >= 200].to_dict()
+
+        # Dates as rows, one column per symbol.
+        returns_df = prices.pivot(index="date", columns="symbol", values="return")
 
         # Calculate basket returns (equal-weight)
         basket_returns = returns_df.mean(axis=1)
