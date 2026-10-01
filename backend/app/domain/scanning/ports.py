@@ -469,7 +469,8 @@ class StockDataProvider(abc.ABC):
     ) -> dict[str, object]:
         """``batch_only_*`` disable the per-symbol fallback fetches;
         ``cache_only`` also stops the bulk per-stock price read from calling a
-        provider. The market benchmark lookup is not covered (#455)."""
+        provider. The market benchmark lookup is not covered; the scan gate
+        checks the benchmark instead (#455)."""
         ...
 
     @abc.abstractmethod

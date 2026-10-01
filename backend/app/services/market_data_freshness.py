@@ -3,6 +3,9 @@
 Returns a 409 detail payload when any symbol the scan will process lacks cached
 prices through its market's last completed trading day. Scoped to the resolved
 universe, so unrelated data-quality issues on other symbols don't false-positive.
+
+A market is also refused when no cached benchmark candidate reaches that day:
+the scan's benchmark lookup would otherwise fetch it from the provider (#455).
 """
 
 from __future__ import annotations
@@ -23,8 +26,9 @@ from ..domain.scanning.models import (
 )
 from ..models.stock import StockPrice
 from ..models.stock_universe import StockUniverse
+from ..services.benchmark_registry_service import benchmark_registry
 from ..services.market_refresh_state_service import get_market_refresh_state
-from ..wiring.bootstrap import get_market_calendar_service
+from ..wiring.bootstrap import get_benchmark_cache, get_market_calendar_service
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +44,34 @@ class _MarketFreshnessAssessment:
     oldest_last_cached_date: date | None = None
     reason: str | None = None
     hard_block: bool = False
+    benchmark: dict[str, Any] | None = None
 
     @property
     def has_stale_signal(self) -> bool:
         return bool(self.stale_symbols) or self.reason is not None
+
+
+def _latest_benchmark_bar(market: str) -> tuple[tuple[str, ...], date | None]:
+    """The market's benchmark candidates and the newest bar the scan could use.
+
+    Mirrors the scan's benchmark lookup, which serves any candidate (primary,
+    then fallback) whose cached data reaches the last completed session. Both
+    of its cache tiers are written together, so the database decides, read
+    through the lookup's own database reader so its row-count and finite-close
+    rules apply. "1y" is that reader's smaller window, so it is the stricter
+    row count. A market without a configured benchmark returns no candidates.
+    """
+    try:
+        candidates = tuple(benchmark_registry.get_candidate_symbols(market))
+    except (KeyError, ValueError):  # not a benchmark market: the scan cannot fetch one either
+        return (), None
+    reader = get_benchmark_cache()
+    last_dates = []
+    for symbol in candidates:
+        frame = reader.load_benchmark_from_database(symbol, "1y", market)
+        if frame is not None and not frame.empty:
+            last_dates.append(frame.index[-1].date())
+    return candidates, max(last_dates, default=None)
 
 
 def _parse_state_date(value: object) -> date | None:
@@ -103,6 +131,8 @@ def _market_stale_detail(
     }
     if assessment.reason is not None:
         entry["reason"] = assessment.reason
+    if assessment.benchmark is not None:
+        entry["benchmark"] = assessment.benchmark
     if freshness_rate is not None:
         entry["freshness_rate"] = freshness_rate
     return entry
@@ -116,6 +146,15 @@ def _build_blocking_detail(
     def _describe(market_entry: dict) -> str:
         if market_entry.get("reason") == "calendar_unavailable":
             return f"{market_entry['market']} (calendar unavailable — could not verify freshness)"
+        if market_entry.get("reason") == "benchmark_stale":
+            benchmark = market_entry["benchmark"]
+            return (
+                f"{market_entry['market']} "
+                f"(benchmark {'/'.join(benchmark['symbols'])} "
+                f"last: {benchmark['last_cached_date'] or 'never'}, "
+                f"expected: {benchmark['expected_date']}; "
+                f"oldest stock: {market_entry['oldest_last_cached_date'] or 'never'})"
+            )
         return (
             f"{market_entry['market']} "
             f"(oldest: {market_entry['oldest_last_cached_date'] or 'never'}, "
@@ -205,6 +244,25 @@ def _assess_market_freshness(
             oldest_last_cached_date=observed_date,
             reason="refresh_state_stale",
             hard_block=True,
+        )
+
+    candidates, benchmark_last = _latest_benchmark_bar(market)
+    if candidates and (benchmark_last is None or benchmark_last < expected_date):
+        return _MarketFreshnessAssessment(
+            market=market,
+            rows=rows,
+            stale_symbols=all_market_symbols,
+            covered_dates=covered_dates,
+            uncovered_symbols=uncovered,
+            expected_date=expected_date,
+            oldest_last_cached_date=oldest,
+            reason="benchmark_stale",
+            hard_block=True,
+            benchmark={
+                "symbols": list(candidates),
+                "last_cached_date": str(benchmark_last) if benchmark_last else None,
+                "expected_date": str(expected_date),
+            },
         )
 
     comparison_date = observed_date if observed_date is not None else expected_date
