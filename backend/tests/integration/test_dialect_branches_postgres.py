@@ -239,15 +239,21 @@ def _wait_for_lock_waiter(timeout: float = 15.0) -> None:
                 time.sleep(0.05)
     finally:
         probe.dispose()
-    raise TimeoutError("no transaction ever waited on the registry lock")
+    raise TimeoutError("no session ever waited on the lock")
+
+
+def _hold_cot_refresh_lock(factory, on_locked):
+    with factory() as db:
+        with SqlCotRepository(db).serialized_refresh():
+            on_locked()
 
 
 @pytest.mark.parametrize(
     "hold_lock",
-    [_hold_social_analysis_transaction, _hold_projection_registry_lock],
-    ids=["social_analysis_transaction", "projection_lock_registry"],
+    [_hold_social_analysis_transaction, _hold_projection_registry_lock, _hold_cot_refresh_lock],
+    ids=["social_analysis_transaction", "projection_lock_registry", "cot_refresh_advisory_lock"],
 )
-def test_social_registry_lock_serializes_transactions(db_session, hold_lock):
+def test_lock_serializes_concurrent_sessions(db_session, hold_lock):
     db_session.add(SocialSourceRegistry(id=1))
     db_session.commit()
     factory = sessionmaker(bind=engine)
