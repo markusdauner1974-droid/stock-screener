@@ -10,7 +10,8 @@ All data-fetching tasks use the @serialized_data_fetch_task decorator
 to ensure only one task fetches external data at a time.
 """
 import logging
-from typing import Dict, Optional, List
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional, List
 from datetime import datetime
 import time
 
@@ -277,6 +278,177 @@ def _run_snapshot_pipeline(db, *, publish: bool) -> Dict:
     }
 
 
+def _resolve_refresh_scope(market: str | None) -> tuple[frozenset[str] | None, str, str | None]:
+    """Return ``(enabled_markets, effective_market, scoped_market)`` for a weekly refresh.
+
+    Unscoped runs cover every enabled market; activity and the GitHub bundle
+    use the primary market (US unless the install runs non-US markets only).
+    """
+    from .market_queues import normalize_market
+
+    scope = _runtime_market_scope()
+    enabled_markets = scope[1] if scope is not None else None
+    effective_market = (
+        normalize_market(market) if market is not None
+        else scope[0] if scope is not None else "US"
+    )
+    scoped_market = effective_market if market is not None else None
+    return enabled_markets, effective_market, scoped_market
+
+
+def _disabled_market_response(effective_market: str) -> Dict:
+    return {
+        'status': 'skipped',
+        'reason': f'market {effective_market} is disabled in local runtime preferences',
+        'market': effective_market,
+        'timestamp': datetime.now().isoformat(),
+    }
+
+
+@dataclass
+class _RefreshActivity:
+    """Market-activity bookkeeping shared by the weekly fundamentals refreshes."""
+
+    db: Any
+    market: str
+    lifecycle: str
+    task_name: str
+    task_id: Optional[str]
+    progress_state: dict = field(
+        default_factory=lambda: {"last_current": 0, "last_time": time.monotonic()}
+    )
+
+    def _identity(self) -> dict:
+        return {
+            "market": self.market,
+            "stage_key": "fundamentals",
+            "lifecycle": self.lifecycle,
+            "task_name": self.task_name,
+            "task_id": self.task_id,
+        }
+
+    def started(self) -> None:
+        mark_market_activity_started(self.db, **self._identity(), message="Refreshing fundamentals")
+
+    def progress(self, current: int, total: int, *, force: bool = False) -> None:
+        _maybe_publish_fundamentals_progress(
+            self.db,
+            market=self.market,
+            lifecycle=self.lifecycle,
+            task_name=self.task_name,
+            task_id=self.task_id,
+            current=current,
+            total=total,
+            message="Refreshing fundamentals",
+            progress_state=self.progress_state,
+            **({"force": True} if force else {}),
+        )
+
+    def completed(
+        self,
+        current: int | None,
+        total: int | None,
+        message: str = "Fundamentals refresh completed",
+    ) -> None:
+        mark_market_activity_completed(
+            self.db, **self._identity(), current=current, total=total, message=message
+        )
+
+    def failed(self, message: str) -> None:
+        mark_market_activity_failed(self.db, **self._identity(), message=message)
+
+    def failed_safely(self, message: str, **counts) -> None:
+        _mark_market_activity_failed_safely(self.db, **self._identity(), message=message, **counts)
+
+
+def _complete_from_github_bundle(
+    activity: _RefreshActivity,
+    github_sync: Dict,
+    *,
+    scoped_market: str | None,
+    enabled_markets: frozenset[str] | None,
+    start_time: float,
+    extra_fields: Optional[Dict] = None,
+    with_minutes: bool = False,
+) -> Dict:
+    """Finish a refresh whose every in-scope market was synced from its GitHub bundle."""
+    total_stocks = len(_load_active_universe_stocks(
+        activity.db, market=scoped_market, enabled_markets=enabled_markets
+    ))
+    if total_stocks > 0:
+        activity.progress(total_stocks, total_stocks, force=True)
+    duration = time.time() - start_time
+    eps_task = calculate_eps_rating_percentiles.delay()
+    activity.completed(
+        total_stocks or None,
+        total_stocks or None,
+        message="Fundamentals refresh completed from GitHub bundle",
+    )
+    response = {
+        "status": "success",
+        "source": "github",
+        "github_sync_status": github_sync.get("status"),
+        "market": activity.market,
+        "source_revision": github_sync.get("source_revision"),
+        "import": github_sync.get("import"),
+        **(extra_fields or {}),
+        "eps_rating_task_id": eps_task.id,
+        "duration_seconds": round(duration, 2),
+        "timestamp": datetime.now().isoformat(),
+    }
+    if with_minutes:
+        response["duration_minutes"] = round(duration / 60, 1)
+    return response
+
+
+def _refresh_from_snapshot(
+    activity: _RefreshActivity,
+    *,
+    scoped_market: str | None,
+    enabled_markets: frozenset[str] | None,
+    publish: bool,
+    start_time: float,
+    extra_fields: Optional[Dict] = None,
+    with_minutes: bool = False,
+) -> Dict:
+    """Refresh US fundamentals through the provider snapshot pipeline."""
+    total_stocks = len(_load_active_universe_stocks(
+        activity.db, market=scoped_market, enabled_markets=enabled_markets
+    ))
+    activity.progress(0, total_stocks, force=True)
+    result = _run_snapshot_pipeline(activity.db, publish=publish)
+    total_stocks = _resolve_snapshot_progress_total(result, total_stocks)
+    activity.progress(total_stocks, total_stocks, force=True)
+    duration = time.time() - start_time
+    response = {
+        **result,
+        **(extra_fields or {}),
+        "duration_seconds": round(duration, 2),
+        "timestamp": datetime.now().isoformat(),
+    }
+    if with_minutes:
+        response["duration_minutes"] = round(duration / 60, 1)
+    if publish and result.get("snapshot", {}).get("published"):
+        eps_task = calculate_eps_rating_percentiles.delay()
+        response["eps_rating_task_id"] = eps_task.id
+    activity.completed(total_stocks or None, total_stocks or None)
+    return response
+
+
+def _log_refresh_summary(title: str, total_stocks: int, stats: Dict, duration: float) -> None:
+    logger.info("=" * 60)
+    logger.info(title)
+    logger.info(f"Total stocks: {total_stocks}")
+    logger.info(f"Updated: {stats['updated']}")
+    logger.info(f"Failed: {stats['failed']}")
+    logger.info(f"Skipped: {stats['skipped']}")
+    logger.info(f"Duration: {duration:.2f}s ({duration/60:.1f} minutes)")
+    logger.info(f"Average: {duration/total_stocks:.2f}s per stock")
+    if stats['failed_symbols'][:5]:
+        logger.info(f"Failed symbols (first 5): {', '.join(stats['failed_symbols'][:5])}")
+    logger.info("=" * 60)
+
+
 @serialized_data_fetch_task(
     celery_app,
     "refresh_all_fundamentals",
@@ -306,54 +478,33 @@ def refresh_all_fundamentals(
             'timestamp': str
         }
     """
-    from .market_queues import market_tag, log_extra, normalize_market
+    from .market_queues import market_tag, log_extra
     _log_extra = log_extra(market)
     logger.info("=" * 60)
     logger.info("TASK: Weekly Fundamental Data Refresh %s", market_tag(market), extra=_log_extra)
     logger.info("Timestamp: %s", datetime.now().strftime('%Y-%m-%d %H:%M:%S'), extra=_log_extra)
     logger.info("=" * 60)
 
-    scope = _runtime_market_scope()
-    enabled_markets = scope[1] if scope is not None else None
-    # Unscoped runs cover every enabled market; activity and the GitHub bundle
-    # use the primary market (US unless the install runs non-US markets only).
-    effective_market = (
-        normalize_market(market) if market is not None
-        else scope[0] if scope is not None else "US"
-    )
-    activity_lifecycle = activity_lifecycle or "weekly_refresh"
+    enabled_markets, effective_market, scoped_market = _resolve_refresh_scope(market)
     if market is not None and not _market_enabled(effective_market, enabled_markets):
         logger.info("Skipping fundamentals refresh for disabled market %s", market, extra=_log_extra)
-        return {
-            'status': 'skipped',
-            'reason': f'market {effective_market} is disabled in local runtime preferences',
-            'market': effective_market,
-            'timestamp': datetime.now().isoformat(),
-        }
+        return _disabled_market_response(effective_market)
 
     db = SessionLocal()
     start_time = time.time()
     ticker_validation_service = get_ticker_validation_service()
-    task_name = getattr(self, "name", "refresh_all_fundamentals")
-    task_id = getattr(getattr(self, "request", None), "id", None)
-    progress_state: dict[str, float | int] = {
-        "last_current": 0,
-        "last_time": time.monotonic(),
-    }
+    activity = _RefreshActivity(
+        db=db,
+        market=effective_market,
+        lifecycle=activity_lifecycle or "weekly_refresh",
+        task_name=getattr(self, "name", "refresh_all_fundamentals"),
+        task_id=getattr(getattr(self, "request", None), "id", None),
+    )
     processed = 0
     total_stocks = 0
-    scoped_market = effective_market if market is not None else None
 
     try:
-        mark_market_activity_started(
-            db,
-            market=effective_market,
-            stage_key="fundamentals",
-            lifecycle=activity_lifecycle,
-            task_name=task_name,
-            task_id=task_id,
-            message="Refreshing fundamentals",
-        )
+        activity.started()
         github_sync, pending_markets = _sync_weekly_bundles(
             db,
             effective_market=effective_market,
@@ -361,121 +512,37 @@ def refresh_all_fundamentals(
             enabled_markets=enabled_markets,
         )
         if not pending_markets:
-            total_stocks = len(_load_active_universe_stocks(
-                db, market=scoped_market, enabled_markets=enabled_markets
-            ))
-            if total_stocks > 0:
-                _maybe_publish_fundamentals_progress(
-                    db,
-                    market=effective_market,
-                    lifecycle=activity_lifecycle,
-                    task_name=task_name,
-                    task_id=task_id,
-                    current=total_stocks,
-                    total=total_stocks,
-                    message="Refreshing fundamentals",
-                    progress_state=progress_state,
-                    force=True,
-                )
-            duration = time.time() - start_time
-            eps_task = calculate_eps_rating_percentiles.delay()
-            mark_market_activity_completed(
-                db,
-                market=effective_market,
-                stage_key="fundamentals",
-                lifecycle=activity_lifecycle,
-                task_name=task_name,
-                task_id=task_id,
-                current=total_stocks if total_stocks > 0 else None,
-                total=total_stocks if total_stocks > 0 else None,
-                message="Fundamentals refresh completed from GitHub bundle",
+            return _complete_from_github_bundle(
+                activity,
+                github_sync,
+                scoped_market=scoped_market,
+                enabled_markets=enabled_markets,
+                start_time=start_time,
             )
-            return {
-                "status": "success",
-                "source": "github",
-                "github_sync_status": github_sync.get("status"),
-                "market": effective_market,
-                "source_revision": github_sync.get("source_revision"),
-                "import": github_sync.get("import"),
-                "eps_rating_task_id": eps_task.id,
-                "duration_seconds": round(duration, 2),
-                "timestamp": datetime.now().isoformat(),
-            }
         if scoped_market is None and enabled_markets is not None:
             # Markets refreshed from their GitHub bundle are done; continue with the rest.
             enabled_markets = pending_markets
         if settings.provider_snapshot_cutover_enabled and _us_only_refresh_scope(scoped_market, enabled_markets):
-            total_stocks = len(_load_active_universe_stocks(
-                db, market=scoped_market, enabled_markets=enabled_markets
-            ))
-            _maybe_publish_fundamentals_progress(
-                db,
-                market=effective_market,
-                lifecycle=activity_lifecycle,
-                task_name=task_name,
-                task_id=task_id,
-                current=0,
-                total=total_stocks,
-                message="Refreshing fundamentals",
-                progress_state=progress_state,
-                force=True,
-            )
             logger.info(
                 "Provider snapshot cutover enabled - using snapshot publish pipeline",
                 extra=_log_extra,
             )
-            result = _run_snapshot_pipeline(db, publish=True)
-            total_stocks = _resolve_snapshot_progress_total(result, total_stocks)
-            _maybe_publish_fundamentals_progress(
-                db,
-                market=effective_market,
-                lifecycle=activity_lifecycle,
-                task_name=task_name,
-                task_id=task_id,
-                current=total_stocks,
-                total=total_stocks,
-                message="Refreshing fundamentals",
-                progress_state=progress_state,
-                force=True,
+            return _refresh_from_snapshot(
+                activity,
+                scoped_market=scoped_market,
+                enabled_markets=enabled_markets,
+                publish=True,
+                start_time=start_time,
             )
-            duration = time.time() - start_time
-            response = {
-                **result,
-                "duration_seconds": round(duration, 2),
-                "timestamp": datetime.now().isoformat(),
-            }
-            if result.get("snapshot", {}).get("published"):
-                eps_task = calculate_eps_rating_percentiles.delay()
-                response["eps_rating_task_id"] = eps_task.id
-            mark_market_activity_completed(
-                db,
-                market=effective_market,
-                stage_key="fundamentals",
-                lifecycle=activity_lifecycle,
-                task_name=task_name,
-                task_id=task_id,
-                current=total_stocks if total_stocks > 0 else None,
-                total=total_stocks if total_stocks > 0 else None,
-                message="Fundamentals refresh completed",
-            )
-            return response
 
         # Get all active stocks from universe (market-filtered when scoped)
         universe_stocks = _load_active_universe_stocks(
-                db, market=scoped_market, enabled_markets=enabled_markets
-            )
+            db, market=scoped_market, enabled_markets=enabled_markets
+        )
 
         if not universe_stocks:
             logger.warning("No active stocks found in universe", extra=_log_extra)
-            mark_market_activity_failed(
-                db,
-                market=effective_market,
-                stage_key="fundamentals",
-                lifecycle=activity_lifecycle,
-                task_name=task_name,
-                task_id=task_id,
-                message="No active stocks found",
-            )
+            activity.failed("No active stocks found")
             return {
                 'error': 'No active stocks found',
                 'timestamp': datetime.now().isoformat()
@@ -483,18 +550,7 @@ def refresh_all_fundamentals(
 
         total_stocks = len(universe_stocks)
         logger.info(f"Found {total_stocks} active stocks to refresh")
-        _maybe_publish_fundamentals_progress(
-            db,
-            market=effective_market,
-            lifecycle=activity_lifecycle,
-            task_name=task_name,
-            task_id=task_id,
-            current=0,
-            total=total_stocks,
-            message="Refreshing fundamentals",
-            progress_state=progress_state,
-            force=True,
-        )
+        activity.progress(0, total_stocks, force=True)
 
         # Initialize cache service
         cache = get_fundamentals_cache()
@@ -560,66 +616,24 @@ def refresh_all_fundamentals(
                     symbol=symbol,
                     error_type=error_type,
                     error_message=error_msg,
-                        data_source=TickerValidationService.SOURCE_YFINANCE,
-                        triggered_by=TickerValidationService.TRIGGER_FUNDAMENTALS_REFRESH,
-                        task_id=self.request.id if self.request else None,
-                    )
+                    data_source=TickerValidationService.SOURCE_YFINANCE,
+                    triggered_by=TickerValidationService.TRIGGER_FUNDAMENTALS_REFRESH,
+                    task_id=self.request.id if self.request else None,
+                )
             finally:
                 processed = i + 1
-                _maybe_publish_fundamentals_progress(
-                    db,
-                    market=effective_market,
-                    lifecycle=activity_lifecycle,
-                    task_name=task_name,
-                    task_id=task_id,
-                    current=i + 1,
-                    total=total_stocks,
-                    message="Refreshing fundamentals",
-                    progress_state=progress_state,
-                )
+                activity.progress(i + 1, total_stocks)
 
-        _maybe_publish_fundamentals_progress(
-            db,
-            market=effective_market,
-            lifecycle=activity_lifecycle,
-            task_name=task_name,
-            task_id=task_id,
-            current=total_stocks,
-            total=total_stocks,
-            message="Refreshing fundamentals",
-            progress_state=progress_state,
-            force=True,
-        )
+        activity.progress(total_stocks, total_stocks, force=True)
 
         duration = time.time() - start_time
-
-        logger.info("=" * 60)
-        logger.info("Weekly Fundamental Refresh Complete!")
-        logger.info(f"Total stocks: {total_stocks}")
-        logger.info(f"Updated: {stats['updated']}")
-        logger.info(f"Failed: {stats['failed']}")
-        logger.info(f"Skipped: {stats['skipped']}")
-        logger.info(f"Duration: {duration:.2f}s ({duration/60:.1f} minutes)")
-        logger.info(f"Average: {duration/total_stocks:.2f}s per stock")
-        if stats['failed_symbols'][:5]:
-            logger.info(f"Failed symbols (first 5): {', '.join(stats['failed_symbols'][:5])}")
-        logger.info("=" * 60)
+        _log_refresh_summary("Weekly Fundamental Refresh Complete!", total_stocks, stats, duration)
 
         # Chain EPS rating percentiles calculation after fundamentals refresh
         logger.info("Queuing EPS Rating Percentiles calculation...")
         eps_task = calculate_eps_rating_percentiles.delay()
         logger.info(f"EPS Rating Percentiles task queued: {eps_task.id}")
-        mark_market_activity_completed(
-            db,
-            market=effective_market,
-            stage_key="fundamentals",
-            lifecycle=activity_lifecycle,
-            task_name=task_name,
-            task_id=task_id,
-            current=total_stocks,
-            total=total_stocks,
-            message="Fundamentals refresh completed",
-        )
+        activity.completed(total_stocks, total_stocks)
 
         return {
             'total_stocks': total_stocks,
@@ -636,47 +650,17 @@ def refresh_all_fundamentals(
     except SoftTimeLimitExceeded:
         db.rollback()
         logger.error("Soft time limit exceeded in refresh_all_fundamentals", exc_info=True)
-        _mark_market_activity_failed_safely(
-            db,
-            market=effective_market,
-            stage_key="fundamentals",
-            lifecycle=activity_lifecycle,
-            task_name=task_name,
-            task_id=task_id,
-            current=processed,
-            total=locals().get("total_stocks", 0),
-            message="Soft time limit exceeded",
-        )
+        activity.failed_safely("Soft time limit exceeded", current=processed, total=total_stocks)
         raise
     except TRANSIENT_TASK_EXCEPTIONS as e:
         db.rollback()
-        _mark_market_activity_failed_safely(
-            db,
-            market=effective_market,
-            stage_key="fundamentals",
-            lifecycle=activity_lifecycle,
-            task_name=task_name,
-            task_id=task_id,
-            current=processed,
-            total=locals().get("total_stocks", 0),
-            message=str(e),
-        )
+        activity.failed_safely(str(e), current=processed, total=total_stocks)
         _retry_transient_failure(self, "refresh_all_fundamentals", e)
     except Exception as e:
         raise_if_transient_database_error(e)
         db.rollback()
         logger.error(f"Fatal error in fundamental refresh: {e}", exc_info=True)
-        _mark_market_activity_failed_safely(
-            db,
-            market=effective_market,
-            stage_key="fundamentals",
-            lifecycle=activity_lifecycle,
-            task_name=task_name,
-            task_id=task_id,
-            current=processed,
-            total=locals().get("total_stocks", 0),
-            message=str(e),
-        )
+        activity.failed_safely(str(e), current=processed, total=total_stocks)
         return {
             'error': str(e),
             'timestamp': datetime.now().isoformat()
@@ -1002,7 +986,7 @@ def refresh_all_fundamentals_hybrid(
     Returns:
         Dict with refresh statistics
     """
-    from .market_queues import market_tag, log_extra, normalize_market
+    from .market_queues import market_tag, log_extra
     _log_extra = log_extra(market)
     logger.info("=" * 60)
     logger.info(
@@ -1014,47 +998,25 @@ def refresh_all_fundamentals_hybrid(
     logger.info("yfinance batch size: %s", yfinance_batch_size, extra=_log_extra)
     logger.info("=" * 60)
 
-
-    scope = _runtime_market_scope()
-    enabled_markets = scope[1] if scope is not None else None
-    # Unscoped runs cover every enabled market; activity and the GitHub bundle
-    # use the primary market (US unless the install runs non-US markets only).
-    effective_market = (
-        normalize_market(market) if market is not None
-        else scope[0] if scope is not None else "US"
-    )
+    enabled_markets, effective_market, scoped_market = _resolve_refresh_scope(market)
     if market is not None and not _market_enabled(effective_market, enabled_markets):
         logger.info("Skipping hybrid fundamentals refresh for disabled market %s", market, extra=_log_extra)
-        return {
-            'status': 'skipped',
-            'reason': f'market {effective_market} is disabled in local runtime preferences',
-            'market': effective_market,
-            'timestamp': datetime.now().isoformat(),
-        }
+        return _disabled_market_response(effective_market)
 
     db = SessionLocal()
     start_time = time.time()
     ticker_validation_service = get_ticker_validation_service()
-    activity_lifecycle = activity_lifecycle or "weekly_refresh"
-    task_name = getattr(self, "name", "refresh_all_fundamentals_hybrid")
-    task_id = getattr(getattr(self, "request", None), "id", None)
-    progress_state: dict[str, float | int] = {
-        "last_current": 0,
-        "last_time": time.monotonic(),
-    }
+    activity = _RefreshActivity(
+        db=db,
+        market=effective_market,
+        lifecycle=activity_lifecycle or "weekly_refresh",
+        task_name=getattr(self, "name", "refresh_all_fundamentals_hybrid"),
+        task_id=getattr(getattr(self, "request", None), "id", None),
+    )
     total_stocks = 0
-    scoped_market = effective_market if market is not None else None
 
     try:
-        mark_market_activity_started(
-            db,
-            market=effective_market,
-            stage_key="fundamentals",
-            lifecycle=activity_lifecycle,
-            task_name=task_name,
-            task_id=task_id,
-            message="Refreshing fundamentals",
-        )
+        activity.started()
         github_sync, pending_markets = _sync_weekly_bundles(
             db,
             effective_market=effective_market,
@@ -1062,48 +1024,15 @@ def refresh_all_fundamentals_hybrid(
             enabled_markets=enabled_markets,
         )
         if not pending_markets:
-            total_stocks = len(_load_active_universe_stocks(
-                db, market=scoped_market, enabled_markets=enabled_markets
-            ))
-            if total_stocks > 0:
-                _maybe_publish_fundamentals_progress(
-                    db,
-                    market=effective_market,
-                    lifecycle=activity_lifecycle,
-                    task_name=task_name,
-                    task_id=task_id,
-                    current=total_stocks,
-                    total=total_stocks,
-                    message="Refreshing fundamentals",
-                    progress_state=progress_state,
-                    force=True,
-                )
-            duration = time.time() - start_time
-            eps_task = calculate_eps_rating_percentiles.delay()
-            mark_market_activity_completed(
-                db,
-                market=effective_market,
-                stage_key="fundamentals",
-                lifecycle=activity_lifecycle,
-                task_name=task_name,
-                task_id=task_id,
-                current=total_stocks if total_stocks > 0 else None,
-                total=total_stocks if total_stocks > 0 else None,
-                message="Fundamentals refresh completed from GitHub bundle",
+            return _complete_from_github_bundle(
+                activity,
+                github_sync,
+                scoped_market=scoped_market,
+                enabled_markets=enabled_markets,
+                start_time=start_time,
+                extra_fields={"include_finviz": include_finviz},
+                with_minutes=True,
             )
-            return {
-                "status": "success",
-                "source": "github",
-                "github_sync_status": github_sync.get("status"),
-                "market": effective_market,
-                "source_revision": github_sync.get("source_revision"),
-                "import": github_sync.get("import"),
-                "include_finviz": include_finviz,
-                "eps_rating_task_id": eps_task.id,
-                "duration_seconds": round(duration, 2),
-                "duration_minutes": round(duration / 60, 1),
-                "timestamp": datetime.now().isoformat(),
-            }
         if scoped_market is None and enabled_markets is not None:
             # Markets refreshed from their GitHub bundle are done; continue with the rest.
             enabled_markets = pending_markets
@@ -1112,79 +1041,28 @@ def refresh_all_fundamentals_hybrid(
             or settings.provider_snapshot_ingestion_enabled
         ) and _us_only_refresh_scope(scoped_market, enabled_markets):
             publish = settings.provider_snapshot_cutover_enabled
-            total_stocks = len(_load_active_universe_stocks(
-                db, market=scoped_market, enabled_markets=enabled_markets
-            ))
-            _maybe_publish_fundamentals_progress(
-                db,
-                market=effective_market,
-                lifecycle=activity_lifecycle,
-                task_name=task_name,
-                task_id=task_id,
-                current=0,
-                total=total_stocks,
-                message="Refreshing fundamentals",
-                progress_state=progress_state,
-                force=True,
-            )
             logger.info(
                 "Provider snapshot pipeline enabled (publish=%s) - bypassing legacy hybrid fetch",
                 publish,
             )
-            result = _run_snapshot_pipeline(db, publish=publish)
-            total_stocks = _resolve_snapshot_progress_total(result, total_stocks)
-            _maybe_publish_fundamentals_progress(
-                db,
-                market=effective_market,
-                lifecycle=activity_lifecycle,
-                task_name=task_name,
-                task_id=task_id,
-                current=total_stocks,
-                total=total_stocks,
-                message="Refreshing fundamentals",
-                progress_state=progress_state,
-                force=True,
+            return _refresh_from_snapshot(
+                activity,
+                scoped_market=scoped_market,
+                enabled_markets=enabled_markets,
+                publish=publish,
+                start_time=start_time,
+                extra_fields={"include_finviz": include_finviz},
+                with_minutes=True,
             )
-            duration = time.time() - start_time
-            response = {
-                **result,
-                "include_finviz": include_finviz,
-                "duration_seconds": round(duration, 2),
-                "duration_minutes": round(duration / 60, 1),
-                "timestamp": datetime.now().isoformat(),
-            }
-            if publish and result.get("snapshot", {}).get("published"):
-                eps_task = calculate_eps_rating_percentiles.delay()
-                response["eps_rating_task_id"] = eps_task.id
-            mark_market_activity_completed(
-                db,
-                market=effective_market,
-                stage_key="fundamentals",
-                lifecycle=activity_lifecycle,
-                task_name=task_name,
-                task_id=task_id,
-                current=total_stocks if total_stocks > 0 else None,
-                total=total_stocks if total_stocks > 0 else None,
-                message="Fundamentals refresh completed",
-            )
-            return response
 
         # Get all active stocks from universe (market-filtered when scoped)
         universe_stocks = _load_active_universe_stocks(
-                db, market=scoped_market, enabled_markets=enabled_markets
-            )
+            db, market=scoped_market, enabled_markets=enabled_markets
+        )
 
         if not universe_stocks:
             logger.warning("No active stocks found in universe", extra=_log_extra)
-            _mark_market_activity_failed_safely(
-                db,
-                market=effective_market,
-                stage_key="fundamentals",
-                lifecycle=activity_lifecycle,
-                task_name=task_name,
-                task_id=task_id,
-                message="No active stocks found",
-            )
+            activity.failed_safely("No active stocks found")
             return {
                 'error': 'No active stocks found',
                 'timestamp': datetime.now().isoformat()
@@ -1221,17 +1099,7 @@ def refresh_all_fundamentals_hybrid(
             if current > 0:
                 eta = (elapsed / current) * (total - current) / 60
                 logger.info(f"Hybrid progress: {current}/{total} ({pct:.1f}%), ETA: {eta:.1f} min")
-            _maybe_publish_fundamentals_progress(
-                db,
-                market=effective_market,
-                lifecycle=activity_lifecycle,
-                task_name=task_name,
-                task_id=task_id,
-                current=current,
-                total=total,
-                message="Refreshing fundamentals",
-                progress_state=progress_state,
-            )
+            activity.progress(current, total)
 
         # Fetch all fundamentals using hybrid approach
         all_data = hybrid_service.fetch_fundamentals_batch(
@@ -1275,46 +1143,14 @@ def refresh_all_fundamentals_hybrid(
             )
 
         duration = time.time() - start_time
-
-        logger.info("=" * 60)
-        logger.info("Hybrid Fundamental Refresh Complete!")
-        logger.info(f"Total stocks: {total_stocks}")
-        logger.info(f"Updated: {stats['updated']}")
-        logger.info(f"Failed: {stats['failed']}")
-        logger.info(f"Skipped: {stats['skipped']}")
-        logger.info(f"Duration: {duration:.2f}s ({duration/60:.1f} minutes)")
-        logger.info(f"Average: {duration/total_stocks:.2f}s per stock")
-        if stats['failed_symbols'][:5]:
-            logger.info(f"Failed symbols (first 5): {', '.join(stats['failed_symbols'][:5])}")
-        logger.info("=" * 60)
+        _log_refresh_summary("Hybrid Fundamental Refresh Complete!", total_stocks, stats, duration)
 
         # Chain EPS rating percentiles calculation after fundamentals refresh
         logger.info("Queuing EPS Rating Percentiles calculation...")
         eps_task = calculate_eps_rating_percentiles.delay()
         logger.info(f"EPS Rating Percentiles task queued: {eps_task.id}")
-        _maybe_publish_fundamentals_progress(
-            db,
-            market=effective_market,
-            lifecycle=activity_lifecycle,
-            task_name=task_name,
-            task_id=task_id,
-            current=total_stocks,
-            total=total_stocks,
-            message="Refreshing fundamentals",
-            progress_state=progress_state,
-            force=True,
-        )
-        mark_market_activity_completed(
-            db,
-            market=effective_market,
-            stage_key="fundamentals",
-            lifecycle=activity_lifecycle,
-            task_name=task_name,
-            task_id=task_id,
-            current=total_stocks,
-            total=total_stocks,
-            message="Fundamentals refresh completed",
-        )
+        activity.progress(total_stocks, total_stocks, force=True)
+        activity.completed(total_stocks, total_stocks)
 
         return {
             'mode': 'hybrid',
@@ -1335,16 +1171,10 @@ def refresh_all_fundamentals_hybrid(
         raise_if_transient_database_error(e)
         logger.error(f"Fatal error in hybrid fundamental refresh: {e}", exc_info=True)
         db.rollback()
-        _mark_market_activity_failed_safely(
-            db,
-            market=effective_market,
-            stage_key="fundamentals",
-            lifecycle=activity_lifecycle,
-            task_name=task_name,
-            task_id=task_id,
-            current=int(progress_state.get("last_current") or 0),
+        activity.failed_safely(
+            str(e),
+            current=int(activity.progress_state.get("last_current") or 0),
             total=total_stocks,
-            message=str(e),
         )
         return {
             'error': str(e),
