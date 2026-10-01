@@ -7,6 +7,9 @@ the [implementation plan](../superpowers/plans/2026-09-21-economic-taxonomy.md),
 and [ADR-0005](../adr/0005-economic-taxonomy-snapshots-and-interpretations.md).
 The completed disposable-database exercise is recorded in the
 [2026-09-21 rehearsal artifact](artifacts/economic-taxonomy-rehearsal-2026-09-21.md).
+Deployment readiness gaps, legacy retirement criteria and the legacy
+dependency inventory are in the
+[2026-10-01 readiness audit](artifacts/economic-taxonomy-readiness-audit-2026-10-01.md).
 
 ## Safety model
 

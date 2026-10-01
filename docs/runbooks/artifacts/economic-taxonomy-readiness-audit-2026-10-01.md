@@ -1,0 +1,239 @@
+# Economic Taxonomy readiness and legacy retirement audit — 2026-10-01
+
+Audit for #430 (part of #410). Line numbers refer to `main` @ `93f22b30`.
+It checks deployments against the [cutover runbook](../economic-taxonomy-cutover.md),
+defines when legacy rollback support can be retired, and lists every reader and
+writer that still depends on legacy, shadow or dual mode. It changes no code.
+
+## Summary
+
+- **Local Docker deployment:** never seeded. There is no `taxonomy_authority`
+  row, so it runs as implicit legacy authority. It is not ready to enter
+  shadow; see the checklist below.
+- **Three gaps in the code apply to every deployment.** They are not
+  configuration problems:
+  1. **G1:** news and RSS content is never admitted as economic evidence. After
+     cutover, only Social saved work would feed the economic catalog.
+  2. **G2:** several legacy theme writers bypass the authority fence. They
+     would keep changing legacy tables after cutover, and the fenced tasks
+     would log an error on every scheduled run.
+  3. **G3:** the runbook's seed step refuses an authority row that the fence
+     itself creates on the first fenced legacy write.
+- **Retirement:** not yet possible, because no deployment has run in economic
+  mode. Criteria are defined below; G1–G3 come first.
+
+## 1. Readiness audit
+
+### Deployments checked
+
+Only the local Docker stack (`stockscreenclaude-*`) was reachable from this
+audit. Other deployments, such as a homelab or VPS, should run the read-only
+check at the end of this section and fill in their own copy of the table.
+
+| Runbook item | Local status | Evidence |
+|---|---|---|
+| Migrations at head (step 1) | **One behind**: `20260926_0060`; head is `20260928_0061_workload_fences` (not taxonomy-related) | `alembic_version` |
+| Required PostgreSQL gate (step 1) | Passes in CI on every PR; **not yet run** as release evidence for this deployment | `.github/workflows/ci.yml:94-98` |
+| Admin identity (`ADMIN_API_KEY`, `ADMIN_PRINCIPAL_ID`) | **`ADMIN_PRINCIPAL_ID` empty**: publication would stop with `admin_identity_not_configured` | `scripts/publish_economic_taxonomy.py:32-33` |
+| Extraction-provider credential | MiniMax and Z.AI keys are set | `.env` (names only) |
+| Synthetic processing request (`processed: 1`) | **Not run.** It calls a paid provider, so it was left for the operator | runbook step 1 |
+| Seeded V1 snapshot and authority (step 2) | **Not seeded**: no `taxonomy_authority` row | `SELECT * FROM taxonomy_authority` → 0 rows |
+| Reviewed migration coverage and sealed snapshot (step 3) | Not started | — |
+| Reader capability and shadow benchmark (step 4) | Not started | — |
+| Full-procedure rehearsal | Done on a disposable clone, 2026-09-21 | [rehearsal artifact](economic-taxonomy-rehearsal-2026-09-21.md) |
+
+**Next steps for this deployment:**
+- Run `alembic upgrade head` and set `ADMIN_PRINCIPAL_ID`.
+- Resolve G3 before seeding: the first scheduled theme metrics run will create
+  the authority row.
+- Resolve G1 before dual mode, so that shadow comparisons include news-derived
+  themes.
+
+### Read-only check for other deployments
+
+```sql
+SELECT mode, authority_epoch, writes_fenced, rollback_state,
+       processing_taxonomy_version_id IS NOT NULL AS seeded,
+       serving_generation_id IS NOT NULL AS has_generation
+FROM taxonomy_authority;
+SELECT version_num FROM alembic_version;
+```
+
+No rows means "implicit legacy, not seeded". A row with `seeded = false` means
+a fenced legacy write created it; that deployment hits G3.
+
+### G1: news content is never admitted as economic evidence
+
+`EconomicSourceAdmissionService.admit_content()`
+(`app/services/economic_source_admission.py:124`) is called only from tests.
+The only production admission path is Social saved work
+(`app/services/economic_social_taxonomy_adapter.py:984`, `admit_social_work`).
+
+- **Expected:** the design says legacy content and Social work for the same
+  post share one source family and lineage (design spec line 224), and the plan
+  delivers `admit_content()` for that purpose.
+- **What happens instead:** content ingestion (`poll_due_sources`, `ingest`)
+  feeds only the legacy pipeline. In economic mode, news, RSS and Substack
+  evidence would stop reaching the serving catalog.
+- **What already works:** the admission service itself is tested (for example,
+  `tests/unit/test_economic_source_admission.py`). Only the call from ingestion
+  is missing.
+- **When it blocks:** dual and economic. Shadow can still be entered, and shadow
+  comparisons are where this gap would show up.
+
+### G2: legacy writers that bypass the authority fence
+
+The design requires that "a legacy writer racing cutover cannot commit after the
+authority switch" (design spec line 728).
+
+**Paths that comply** (they use
+`EconomicTaxonomyRuntimeService.legacy_producer_write`, which allows only
+legacy, shadow and dual, at `app/services/economic_taxonomy_runtime.py:872`):
+- `ThemeDiscoveryService._fenced_legacy_mutation`
+  (`app/services/theme_discovery_service.py:111`) and its call sites: metrics,
+  candidate promotion, lifecycle policies and relationship inference.
+- Social projection and decisions. They switch to the economic adapter in
+  economic mode (`social_theme_projection_service.py:433`, `:727`), which makes
+  them the model for the paths below.
+
+**Paths with no authority check:**
+
+| Writer | Entry points | Legacy rows written |
+|---|---|---|
+| `ThemeExtractionService` | beat `extract_themes` (:10, :40) and `reprocess_failed_themes` (:05); `POST /themes/extract`, `POST /themes/pipeline/run` | `ThemeMention`, `ThemeCluster`, `ThemeConstituent` (`theme_extraction_service.py:917`, `:1719`, `:1808`) |
+| `ThemeCorrelationService` | task `discover_correlation_clusters`; `POST /themes/create-from-cluster` | `ThemeCluster`, `ThemeConstituent` (`theme_correlation_service.py:449`, `:466`, `:507`) |
+| `ThemeMergingService` | `POST /themes/merge-suggestions/{id}/approve`, `/consolidate`, `/merge-wave/*` | merges, `ThemeMergeSuggestion` (`theme_merging_service.py:1446`) |
+| `ThemeTaxonomyService` | task `run_taxonomy_assignment` (the API is guarded by `_reject_economic_mode`; the task is not) | `ThemeCluster`, `ThemeMetrics` (`theme_taxonomy_service.py:178`, `:1088`) |
+| Theme review and merge API | `POST /themes/{id}/add-constituents`, `DELETE /themes/{id}`, `/candidates/review`, `/alerts/*` | `ThemeConstituent` (`themes_review_merge.py:384`), cluster state, alerts |
+| Equivalence API | `POST /themes/equivalence`, `/equivalence/{id}/undo` | legacy identity equivalence |
+| `ThemeDiscoveryService.check_for_alerts` | task `check_alerts`, `run_full_pipeline`, `POST /themes/alerts/check` | `ThemeAlert` (`theme_discovery_service.py:1157`) |
+
+**Effect in economic mode:**
+- These paths keep changing legacy tables with no source revision and no
+  compatibility event. A later rollback would serve legacy rows that are partly
+  rebuilt projections and partly direct writes.
+- The fenced tasks fail closed but loudly. `calculate_theme_metrics` (:20, :50),
+  `promote_candidate_themes` (04:30) and `apply_lifecycle_policies` (04:45) raise
+  `AuthorityModeRejected`, which their handlers log as an ERROR on every run
+  (for example `theme_discovery_tasks.py:584-590` and `:756-759`).
+- They need a mode-aware skip: a reason in the task result, and 409
+  `economic_generation_endpoint_required` on the APIs, as `themes_queries` and
+  `themes_taxonomy` already return.
+
+### G3: the seed step conflicts with the authority row the fence creates
+
+- `EconomicTaxonomyPublicationRepository.lock_authority()`
+  (`app/infra/db/repositories/economic_taxonomy_publication_repo.py:43-69`)
+  inserts a `legacy` authority row with `processing_taxonomy_version_id = NULL`
+  the first time any fenced legacy write runs, for example a theme metrics run.
+- Runbook step 2 is meant to run "when `processing_taxonomy_version_id` is null".
+  However, its script stops on any existing row (`economic-taxonomy-cutover.md:122`).
+- Nothing else can set the processing taxonomy in legacy mode. Taxonomy
+  operations require shadow mode or later and an existing base version
+  (`economic_taxonomy_operations.py:282`, `:314`).
+- So a deployment that has run theme metrics since the fence shipped cannot
+  follow the runbook as written.
+- **Fix:** the seed should accept an existing `legacy` row with a null taxonomy
+  version, and fill it under the exclusive fence.
+
+## 2. Retirement criteria
+
+The legacy authority modes and compatibility paths are the **rollback** design.
+They may be retired only when all of the following hold, and only through a
+separate, explicitly approved change. These criteria turn the runbook's
+"Remove legacy Theme/Social storage or compatibility writes" entry into
+something checkable.
+
+1. **Gaps closed:** G1–G3 are resolved and released.
+2. **Stable economic authority:** every deployment has served in `economic`
+   mode for at least **8 consecutive weeks**, covering at least two monthly
+   lifecycle and metrics cycles. During that time:
+   - no rollback publication;
+   - no `rollback_recovery` and no `recovery_failed`;
+   - no structural `held` state left unresolved for more than 7 days.
+3. **Healthy compatibility delivery throughout the window:**
+   `deliver_taxonomy_outbox` stays drained (`failures: 0`) and
+   `rollback_state = ready`. This is the evidence that a rollback would still
+   have worked if it had been needed.
+4. **Zero legacy reads, checked by a machine:** a CI test enumerates API routes,
+   Celery tasks and the MCP tools, and fails if any of them reads the legacy
+   theme tables without routing through `EconomicThemeReader`. Every entry in
+   the reader inventory below must be routed, moved to economic data, or
+   removed.
+5. **A recovery path that doesn't need legacy projections:** a documented and
+   rehearsed restore, from a backup or an economic snapshot export, replaces
+   "roll back to legacy". It is exercised on a disposable clone, as the
+   2026-09-21 rehearsal was.
+6. **Retention and approval:**
+   - a retention and export policy for legacy Theme and Social history;
+   - a rollback-support end date;
+   - an explicit irreversible-cleanup approval from the owner.
+
+## 3. Inventory of legacy, shadow and dual dependencies
+
+### Rollback machinery (keep until retirement)
+
+- `AuthorityMode` (`app/domain/economic_taxonomy/contracts.py:42`), the writer
+  fence (`app/services/economic_taxonomy_fence.py`), and `lock_authority`'s
+  implicit-legacy default.
+- `EconomicTaxonomyRuntimeService.legacy_producer_write` and compatibility
+  projection staging (`economic_taxonomy_runtime.py:86-140`, `:857-903`).
+- `economic_social_taxonomy_adapter.py`,
+  `economic_taxonomy_publication_compatibility.py` and
+  `economic_taxonomy_rollback_recovery.py`.
+- The publication coordinator's legacy target mode
+  (`economic_taxonomy_publication.py:192`).
+
+### Writers
+
+| Writer | Allowed modes | In economic mode |
+|---|---|---|
+| Fenced theme pipeline (`_fenced_legacy_mutation`) | legacy, shadow, dual | Rejected (`AuthorityModeRejected`) |
+| Social projection: `apply_live` and `decide` | all | Routes to the economic adapter |
+| Economic producers: source admission, migration, developments, processor, operations, work repo | listed per call site (`allowed_modes=`) | Mode-aware |
+| Unfenced legacy writers (G2 table) | not checked | **Keep writing legacy tables** |
+
+### Readers routed by authority (`EconomicThemeReader`)
+
+- `themes_queries.py`:
+  - rankings and emerging switch to economic data;
+  - alerts return an empty list;
+  - detail, history, mentions, correlation, validate, entrants, similar,
+    lifecycle transitions and alert dismissal return 409.
+- `themes_taxonomy.py`: every endpoint returns 409.
+- `stocks.py:322`, `economic_themes.py`, `economic_taxonomy.py`.
+- `digest_service`, `ui_snapshot_service`, `social_confirmation_reader`,
+  `social_theme_market_service`, `stock_universe_service`.
+- The MCP `market_copilot`.
+- Frontend: `ThemesPageContainer.jsx:114-129` switches on
+  `generation.authority_mode`. The legacy review, settings, sources and article
+  dialogs render only in the legacy branch (after line 522). This means the
+  content-source management UI disappears in economic mode.
+
+### Readers with no routing (they read legacy tables in every mode)
+
+| Reader | What it reads | In economic mode |
+|---|---|---|
+| `themes_review_merge.py` GETs: merge suggestions, merge history, merge-plan dry run, candidate queue, relationship graph | legacy clusters and suggestions | Serves legacy data (UI hidden; API still reachable) |
+| `themes_intelligence.py` GETs: equivalence preview, history and search; `/{id}/developments` | legacy identities | Same |
+| `watchlist_stewardship_service.py:328` | `ThemeAlert` | **Serves legacy-derived alerts**: `check_for_alerts` is unfenced (G2), but lifecycle-transition alerts stop because they come from the fenced lifecycle path |
+| `validation_service.py:235` (`/validation`, stock validation) | `ThemeAlert`, `ThemeCluster` | Same |
+| `theme_development_preparation`, `theme_platform/content_browser_queries`, `social_refresh_support` | legacy clusters and mentions | Serves legacy data |
+
+`ContentItem` and content-source endpoints are shared ingestion inputs, not
+legacy authority. Retirement must keep them.
+
+## Proposed follow-ups
+
+1. **G1:** admit ingested content through `admit_content()`, with lineage shared
+   with Social. Also decide where content-source management lives in economic
+   mode.
+2. **G2:** make the unfenced writers and the fenced tasks mode-aware: skip with a
+   reason in Celery and return 409 from the APIs. Add economic-mode tests.
+3. **G3:** let the seed adopt an implicit-legacy authority row, and update
+   runbook step 2.
+4. **Retirement criterion 4:** a CI consumer-inventory gate for legacy reads,
+   starting from the tables above.
+5. Move the `ThemeAlert` readers (watchlist stewardship, validation) to an
+   economic signal, or label them legacy-only. In economic mode they
+   currently mix legacy-derived alerts with missing lifecycle alerts.
