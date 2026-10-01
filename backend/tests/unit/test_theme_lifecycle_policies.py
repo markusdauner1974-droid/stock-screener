@@ -561,6 +561,137 @@ def test_calculate_price_metrics_tolerates_sparse_prices_without_futurewarning(d
     assert metrics["basket_rs_vs_spy"] >= 0
 
 
+def _reference_price_metrics(service, theme_cluster_id, as_of_date):
+    """calculate_price_metrics as it was before #419 step 2, kept verbatim as the oracle."""
+    from collections import defaultdict
+
+    import numpy as np
+    import pandas as pd
+
+    from app.services.theme_discovery_service import (
+        compound_theme_returns,
+        theme_relative_return_score,
+    )
+
+    constituents = service.db.query(ThemeConstituent).filter(
+        ThemeConstituent.theme_cluster_id.in_(service.groups.members(theme_cluster_id)),
+        ThemeConstituent.is_active == True,  # noqa: E712
+    ).all()
+    if not constituents:
+        return service._empty_price_metrics()
+    symbols = sorted({c.symbol for c in constituents})
+    date_lookback = as_of_date - timedelta(days=260)
+    prices_query = service.db.query(StockPrice).filter(
+        StockPrice.symbol.in_(symbols),
+        StockPrice.date >= date_lookback.date(),
+        StockPrice.date <= as_of_date.date(),
+    ).all()
+    if not prices_query:
+        return service._empty_price_metrics()
+    price_data = defaultdict(list)
+    for p in prices_query:
+        price_data[p.symbol].append({"date": p.date, "close": p.close})
+    returns_data, current_prices, ma_50, ma_200 = {}, {}, {}, {}
+    for symbol, prices in price_data.items():
+        if len(prices) < 5:
+            continue
+        df = pd.DataFrame(prices).sort_values("date")
+        df["return"] = df["close"].pct_change(fill_method=None)
+        current_prices[symbol] = df.iloc[-1]["close"]
+        if len(df) >= 50:
+            ma_50[symbol] = df["close"].tail(50).mean()
+        if len(df) >= 200:
+            ma_200[symbol] = df["close"].tail(200).mean()
+        returns_data[symbol] = df.set_index("date")["return"]
+    if not returns_data:
+        return service._empty_price_metrics()
+    returns_df = pd.DataFrame(returns_data)
+    basket_returns = returns_df.mean(axis=1)
+    spy_returns = service._load_spy_returns(as_of_date)
+
+    def _compound_return(series, periods):
+        value = compound_theme_returns(series.tail(periods).dropna(), periods)
+        return value if value is not None else 0
+
+    basket_return_1d = basket_returns.iloc[-1] if len(basket_returns) > 0 else 0
+    basket_return_1w = _compound_return(basket_returns, 5)
+    basket_return_1m = _compound_return(basket_returns, 21)
+    basket_rs_vs_spy = theme_relative_return_score(basket_return_1m, _compound_return(spy_returns, 21))
+    num_above_50ma = sum(1 for s, p in current_prices.items() if s in ma_50 and p > ma_50[s])
+    num_above_200ma = sum(1 for s, p in current_prices.items() if s in ma_200 and p > ma_200[s])
+    pct_above_50ma = num_above_50ma / len(current_prices) * 100 if current_prices else 0
+    pct_above_200ma = num_above_200ma / len(current_prices) * 100 if current_prices else 0
+    weekly_returns = (1 + returns_df.tail(5).fillna(0)).prod() - 1
+    pct_positive_1w = (weekly_returns > 0).sum() / len(weekly_returns) * 100 if len(weekly_returns) > 0 else 0
+    if len(returns_df.columns) >= 2:
+        corr_matrix = returns_df.tail(21).corr()
+        mask = np.triu(np.ones_like(corr_matrix, dtype=bool), k=1)
+        correlations = corr_matrix.where(mask).stack().values
+        avg_correlation = np.nanmean(correlations) if len(correlations) > 0 else 0
+        correlation_tightness = np.nanstd(correlations) if len(correlations) > 0 else 0
+    else:
+        avg_correlation = 0
+        correlation_tightness = 0
+    result = service._empty_price_metrics()
+    result.update({
+        "basket_return_1d": round(basket_return_1d * 100, 2),
+        "basket_return_1w": round(basket_return_1w * 100, 2),
+        "basket_return_1m": round(basket_return_1m * 100, 2),
+        "basket_rs_vs_spy": round(basket_rs_vs_spy, 1),
+        "pct_above_50ma": round(pct_above_50ma, 1),
+        "pct_above_200ma": round(pct_above_200ma, 1),
+        "pct_positive_1w": round(pct_positive_1w, 1),
+        "avg_internal_correlation": round(avg_correlation, 3),
+        "correlation_tightness": round(correlation_tightness, 3),
+        "num_constituents": len(symbols),
+    })
+    return result
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3])
+def test_calculate_price_metrics_matches_the_previous_algorithm(db_session, seed):
+    """#419: same metrics as before the change, on histories with gaps, missing
+    closes, and lengths either side of the 5/50/200-row thresholds."""
+    import random
+
+    rng = random.Random(seed)
+    now = datetime(2026, 2, 24, 16, 30, 0)
+    days = [now - timedelta(days=offset) for offset in range(259, -1, -1)]
+    lengths = {"LONG": 240, "MID": 120, "EDGE": 50, "SHORT": 30, "TINY": 4, "GAPPY": 220}
+    for symbol, length in lengths.items():
+        for day in days[-length:]:
+            if symbol == "GAPPY" and rng.random() < 0.15:
+                continue  # missing session
+            close = None if rng.random() < 0.03 else 50 + rng.random() * 50
+            _add_stock_price(db_session, symbol=symbol, trade_date=day, close=close)
+    for day in days:
+        _add_stock_price(db_session, symbol="SPY", trade_date=day, close=400 + rng.random() * 20)
+
+    baskets = {
+        "broad": list(lengths),
+        "short_only": ["TINY", "SHORT"],
+        "single": ["LONG"],
+        "tiny_only": ["TINY"],
+        "unpriced": ["NOPRICE"],
+    }
+    themes = {}
+    for name, members in baskets.items():
+        theme = _make_theme(db_session, name=name, canonical_key=name, state="active", now=now)
+        for symbol in members:
+            db_session.add(ThemeConstituent(
+                theme_cluster_id=theme.id, symbol=symbol, source="manual", confidence=1.0, is_active=True,
+            ))
+        themes[name] = theme
+    db_session.commit()
+
+    service = ThemeDiscoveryService(db_session, pipeline="technical")
+
+    for name, theme in themes.items():
+        assert service.calculate_price_metrics(theme.id, as_of_date=now) == _reference_price_metrics(
+            service, theme.id, now
+        ), name
+
+
 def test_relationship_inference_writes_merge_and_overlap_edges(db_session):
     now = datetime.utcnow()
     theme_a = _make_theme(
