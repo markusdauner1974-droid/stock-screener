@@ -12,6 +12,7 @@ one session and nothing older.
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Iterable, Mapping
 from datetime import date, datetime, timezone
 from typing import Any
@@ -29,6 +30,13 @@ YAHOO_QUOTE_TIMEOUT_SECONDS = 20
 # Stop after this many consecutive failed requests so a block costs a few
 # timeouts, not one per batch.
 YAHOO_QUOTE_MAX_CONSECUTIVE_FAILURES = 3
+# Sleeps before re-sending a failed batch: Yahoo's 429 bursts on CI runners
+# clear within about a minute, and a lost batch drops 100 symbols' latest session.
+YAHOO_QUOTE_RETRY_BACKOFF_SECONDS = (15, 45)
+# ponytail: process-wide breaker because callers repair one 150-symbol batch at
+# a time; after this many consecutive batches exhaust their retries, send each
+# batch once until a request succeeds, so a hard block costs minutes, not hours.
+_retry_breaker = {"exhausted_batches": 0}
 _QUOTE_FIELDS = (
     "regularMarketOpen,regularMarketDayHigh,regularMarketDayLow,"
     "regularMarketPrice,regularMarketVolume,regularMarketTime,marketState"
@@ -86,6 +94,41 @@ def _chunks(items: list[str], size: int) -> Iterable[list[str]]:
         yield items[start : start + size]
 
 
+def _fetch_with_retries(
+    batch: list[str],
+    *,
+    fetch_quotes: QuoteFetcher,
+    wait: Callable[[], Any] | None,
+    sleep: Callable[[float], Any],
+) -> list[dict[str, Any]] | None:
+    """Quotes for ``batch``, or None once every attempt failed."""
+    retrying = _retry_breaker["exhausted_batches"] < YAHOO_QUOTE_MAX_CONSECUTIVE_FAILURES
+    backoffs = YAHOO_QUOTE_RETRY_BACKOFF_SECONDS if retrying else ()
+    for attempt in range(len(backoffs) + 1):
+        if attempt:
+            sleep(backoffs[attempt - 1])
+        try:
+            if wait is not None:
+                wait()
+            quotes = fetch_quotes(batch)
+            if not quotes:
+                # Every stale symbol has Yahoo history, so an empty batch is an outage.
+                raise ValueError("empty quote response")
+        except Exception as exc:  # provider/network variability
+            logger.warning(
+                "Yahoo quote repair request failed (%d symbols, attempt %d/%d): %s",
+                len(batch),
+                attempt + 1,
+                len(backoffs) + 1,
+                exc,
+            )
+            continue
+        _retry_breaker["exhausted_batches"] = 0
+        return quotes
+    _retry_breaker["exhausted_batches"] += 1
+    return None
+
+
 def repair_from_yahoo_quotes(
     results: Mapping[str, dict[str, Any]],
     *,
@@ -93,11 +136,13 @@ def repair_from_yahoo_quotes(
     market_tz: ZoneInfo,
     fetch_quotes: QuoteFetcher = fetch_yahoo_quotes,
     wait: Callable[[], Any] | None = None,
+    sleep: Callable[[float], Any] = time.sleep,
 ) -> dict[str, int]:
     """Fill the ``expected_session`` bar from Yahoo quotes into frames lacking it.
 
     Only stale symbols are quoted, in batches. ``wait`` is called before each
-    request (the Yahoo rate budget). Mutates ``results`` in place; see
+    request (the Yahoo rate budget). A failed request is retried after each
+    ``YAHOO_QUOTE_RETRY_BACKOFF_SECONDS`` sleep. Mutates ``results`` in place; see
     :func:`repair_missing_latest_sessions` for the adjusted-close handling.
     """
     stale = stale_symbols(results, expected_session=expected_session)
@@ -108,15 +153,8 @@ def repair_from_yahoo_quotes(
         if consecutive_failures >= YAHOO_QUOTE_MAX_CONSECUTIVE_FAILURES:
             unsent += len(batch)
             continue
-        try:
-            if wait is not None:
-                wait()
-            quotes = fetch_quotes(batch)
-            if not quotes:
-                # Every stale symbol has Yahoo history, so an empty batch is an outage.
-                raise ValueError("empty quote response")
-        except Exception as exc:  # provider/network variability
-            logger.warning("Yahoo quote repair request failed (%d symbols): %s", len(batch), exc)
+        quotes = _fetch_with_retries(batch, fetch_quotes=fetch_quotes, wait=wait, sleep=sleep)
+        if quotes is None:
             consecutive_failures += 1
             continue
         consecutive_failures = 0

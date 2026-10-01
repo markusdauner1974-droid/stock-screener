@@ -12,7 +12,10 @@ from app.domain.markets.key_markets import key_market_price_symbols
 from app.domain.providers.price_symbol_support import split_supported_price_symbols
 from app.models.stock import StockPrice
 from app.models.stock_universe import StockUniverse
-from app.services.price_row_normalization import stock_price_row_from_ohlcv
+from app.services.price_row_normalization import (
+    drop_non_finite_close_rows,
+    stock_price_row_from_ohlcv,
+)
 from app.services.stock_price_persistence import persist_stock_price_mappings
 from app.services.breadth_history_price_coverage import (
     BreadthHistoryPriceCoverageService,
@@ -106,6 +109,11 @@ def _frame_price_rows(symbol: str, frame: pd.DataFrame) -> list[dict[str, Any]]:
         for stamp, row in frame.iterrows()
     )
     return [row for row in rows if row is not None]
+
+
+def _has_session(frame: pd.DataFrame, session: date) -> bool:
+    valid = drop_non_finite_close_rows(frame)
+    return valid is not None and any(pd.Timestamp(stamp).date() == session for stamp in valid.index)
 
 
 def _dedupe_symbols(symbols: list[str]) -> list[str]:
@@ -335,6 +343,7 @@ class StaticDailyPriceRefreshService:
             period=STATIC_DAILY_PRICE_REFRESH_PERIOD,
             batch_size=batch_size,
             market=market,
+            as_of_date=as_of_date,
             readjusted_symbols=readjusted_symbols,
         )
         bootstrap_refreshed, bootstrap_failed, bootstrap_rate_limited = self._fetch_and_store(
@@ -342,6 +351,7 @@ class StaticDailyPriceRefreshService:
             period=STATIC_DAILY_PRICE_BOOTSTRAP_PERIOD,
             batch_size=batch_size,
             market=market,
+            as_of_date=as_of_date,
         )
         refreshed = stale_refreshed + bootstrap_refreshed
         failed = stale_failed + bootstrap_failed
@@ -371,6 +381,7 @@ class StaticDailyPriceRefreshService:
                 period=STATIC_DAILY_PRICE_BOOTSTRAP_PERIOD,
                 batch_size=batch_size,
                 market=market,
+                as_of_date=as_of_date,
                 replacement_required_dates=readjusted_symbols,
             )
             refreshed += readjusted_refreshed
@@ -534,10 +545,15 @@ class StaticDailyPriceRefreshService:
         period: str,
         batch_size: int,
         market: str | None,
+        as_of_date: date | None = None,
         readjusted_symbols: dict[str, set[date]] | None = None,
         replacement_required_dates: dict[str, set[date]] | None = None,
     ) -> tuple[int, int, list[str]]:
         """Fetch and store ``symbols``.
+
+        With ``as_of_date``, each batch line also counts the frames a provider
+        repair (e.g. Yahoo quotes) completed and those still stored without
+        that session: the gap behind a Market RS coverage failure.
 
         With ``readjusted_symbols``, symbols whose history Yahoo back-adjusted
         are neither stored nor counted; they are appended there for a full
@@ -549,6 +565,8 @@ class StaticDailyPriceRefreshService:
         """
         refreshed_count = 0
         failed_count = 0
+        repaired_count = 0
+        missing_session_count = 0
         rate_limited: list[str] = []
         total_symbols = len(symbols)
         if not symbols:
@@ -603,10 +621,24 @@ class StaticDailyPriceRefreshService:
                     also_store_db=True,
                     market=market,
                 )
+            session_note = ""
+            if as_of_date is not None:
+                repaired_count += sum(
+                    1 for symbol in batch_to_store if batch_results[symbol].get("repaired_by")
+                )
+                missing_session_count += sum(
+                    1
+                    for frame in batch_to_store.values()
+                    if isinstance(frame, pd.DataFrame) and not _has_session(frame, as_of_date)
+                )
+                session_note = (
+                    f", {repaired_count:,} repaired, "
+                    f"{missing_session_count:,} missing {as_of_date.isoformat()}"
+                )
             print(
                 f"[static-daily prices] Batch {batch_index}/{total_group_batches} complete: "
                 f"{refreshed_count + failed_count:,}/{total_symbols:,} processed, "
-                f"{refreshed_count:,} refreshed, {failed_count:,} failed.",
+                f"{refreshed_count:,} refreshed, {failed_count:,} failed{session_note}.",
                 flush=True,
             )
         return refreshed_count, failed_count, rate_limited

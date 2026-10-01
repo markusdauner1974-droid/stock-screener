@@ -34,6 +34,7 @@ from app.services.ibd_industry_service import IBDIndustryService
 from app.services.market_exposure_service import EXPOSURE_BACKFILL_DAYS
 from app.services.market_rs_result_contract import (
     MARKET_RS_REASON_BENCHMARK_ADJUSTED_ANCHOR_MISSING,
+    MARKET_RS_REASON_CURRENT_ADJUSTED_PRICE_COVERAGE_BELOW_THRESHOLD,
 )
 from app.services.static_breadth_contributor_metadata_contract import (
     build_static_breadth_contributor_metadata_plan,
@@ -518,6 +519,15 @@ def _latest_static_rs_benchmark_backed_as_of_date(
     return latest_backed_date
 
 
+def _previous_static_rs_session(*, market: str, as_of_date: date) -> date | None:
+    try:
+        return get_market_calendar_service().session_anchors(
+            market, as_of_date, offsets=(1,)
+        )[1]
+    except ValueError:
+        return None
+
+
 def _hydrate_remaining_static_rs_benchmarks(
     *,
     market: str,
@@ -829,16 +839,36 @@ def _run_daily_refresh(
                 market_rs_result,
                 requested_as_of_date=market_as_of,
             )
+            rewound_as_of = None
             if benchmark_backed_as_of is not None:
+                rewound_as_of = benchmark_backed_as_of
                 warnings.append(
                     f"Static export market {selected_market} using benchmark-backed "
                     f"as-of date {benchmark_backed_as_of.isoformat()} because "
                     f"benchmarks were unavailable for {market_as_of.isoformat()}."
                 )
-                as_of_by_market[selected_market] = benchmark_backed_as_of
+            elif (
+                market_rs_result.get("reason_code")
+                == MARKET_RS_REASON_CURRENT_ADJUSTED_PRICE_COVERAGE_BELOW_THRESHOLD
+            ):
+                # A refresh that crossed 00:00 UTC can leave part of the US
+                # universe without the latest session (Yahoo drops it until its
+                # EOD publish). One session stale beats publishing nothing.
+                rewound_as_of = _previous_static_rs_session(
+                    market=selected_market,
+                    as_of_date=market_as_of,
+                )
+                if rewound_as_of is not None:
+                    warnings.append(
+                        f"Static export market {selected_market} using previous-session "
+                        f"as-of date {rewound_as_of.isoformat()} because current price "
+                        f"coverage was below threshold for {market_as_of.isoformat()}."
+                    )
+            if rewound_as_of is not None:
+                as_of_by_market[selected_market] = rewound_as_of
                 market_rs_result = _prepare_static_rs_formula(
                     market=selected_market,
-                    as_of_date=benchmark_backed_as_of,
+                    as_of_date=rewound_as_of,
                     formula_version=formula_by_market[selected_market],
                 )
             market_rs_results[selected_market] = market_rs_result

@@ -325,7 +325,10 @@ def test_static_site_rrg_history_publish_skips_rewound_market_exports() -> None:
     assert 'log_status="${pipeline_status[1]}"' in export_step
     assert 'if [ "$log_status" -ne 0 ]; then' in export_step
     assert 'exit "$log_status"' in export_step
-    assert "using benchmark-backed as-of date" in export_step
+    assert (
+        'grep -qE "using (benchmark-backed|previous-session) as-of date"'
+        in export_step
+    )
     assert "rrg_history_publishable=false" in export_step
     assert "rrg_history_publishable=true" in export_step
     assert (
