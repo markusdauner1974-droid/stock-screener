@@ -41,7 +41,9 @@ from .errors import CacheRefreshError
 from .price_row_normalization import (
     normalize_price_batch,
     normalize_price_frame,
+    STOCK_PRICE_ROW_COLUMNS,
     stock_price_frame,
+    stock_price_frames_by_symbol,
     stock_price_row_from_ohlcv,
 )
 from .stock_price_persistence import persist_stock_price_mappings
@@ -464,8 +466,10 @@ class PriceCacheService:
 
             start_date = end_date - timedelta(days=_period_days(period))
 
-            # Query StockPrice table
-            prices = db.query(StockPrice).filter(
+            # Column select: several times cheaper than loading ORM entities (#418).
+            prices = db.query(
+                *(getattr(StockPrice, column) for column in STOCK_PRICE_ROW_COLUMNS[1:])
+            ).filter(
                 StockPrice.symbol == symbol,
                 StockPrice.date >= start_date,
                 StockPrice.date <= end_date
@@ -540,14 +544,7 @@ class PriceCacheService:
                 chunk_symbols = symbols[chunk_idx:chunk_idx + chunk_size]
                 chunk_num = (chunk_idx // chunk_size) + 1
                 rows = db.query(
-                    StockPrice.symbol,
-                    StockPrice.date,
-                    StockPrice.open,
-                    StockPrice.high,
-                    StockPrice.low,
-                    StockPrice.close,
-                    StockPrice.adj_close,
-                    StockPrice.volume,
+                    *(getattr(StockPrice, column) for column in STOCK_PRICE_ROW_COLUMNS)
                 ).filter(
                     and_(
                         StockPrice.symbol.in_(chunk_symbols),
@@ -556,23 +553,17 @@ class PriceCacheService:
                     )
                 ).order_by(StockPrice.symbol, StockPrice.date.asc()).all()
 
-                # Group by symbol within this bounded result set.
-                symbol_prices = {}
-                for row in rows:
-                    if row.symbol not in symbol_prices:
-                        symbol_prices[row.symbol] = []
-                    symbol_prices[row.symbol].append(row)
+                # One frame per chunk, cut by symbol (#418); rows are ordered by symbol.
+                frames = stock_price_frames_by_symbol(rows, include_adj_close=True)
 
                 for symbol in chunk_symbols:
-                    prices = symbol_prices.get(symbol, [])
+                    frame = frames.get(symbol)
 
-                    if not prices or len(prices) < minimum_rows:
+                    if frame is None or len(frame) < minimum_rows:
                         results[symbol] = (None, None)
                         continue
 
-                    df = normalize_price_frame(
-                        stock_price_frame(prices, include_adj_close=True), min_rows=minimum_rows
-                    )
+                    df = normalize_price_frame(frame, min_rows=minimum_rows)
                     if df is None:
                         results[symbol] = (None, None)
                         continue

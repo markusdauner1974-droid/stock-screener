@@ -143,3 +143,46 @@ def stock_price_frame(rows: Iterable[Any], *, include_adj_close: bool) -> pd.Dat
     df = pd.DataFrame(data)
     df["Date"] = pd.to_datetime(df["Date"])
     return df.set_index("Date")
+
+
+# Column order of the StockPrice select that ``stock_price_frames_by_symbol`` reads.
+STOCK_PRICE_ROW_COLUMNS = (
+    "symbol", "date", "open", "high", "low", "close", "adj_close", "volume",
+)
+_FRAME_COLUMN_NAMES = {
+    "date": "Date", "open": "Open", "high": "High", "low": "Low",
+    "close": "Close", "adj_close": "Adj Close", "volume": "Volume",
+}
+
+
+def stock_price_frames_by_symbol(
+    rows: Iterable[Any], *, include_adj_close: bool
+) -> dict[str, pd.DataFrame]:
+    """``stock_price_frame`` for many symbols at once, from one row list.
+
+    ``rows`` are tuples in ``STOCK_PRICE_ROW_COLUMNS`` order, sorted by symbol
+    and then date (oldest first). One frame is built for all of them and cut
+    at the symbol boundaries, which is several times faster than a Python
+    list per column per symbol (#418). Each symbol gets its own copy.
+    """
+    frame = pd.DataFrame.from_records(list(rows), columns=STOCK_PRICE_ROW_COLUMNS)
+    if frame.empty:
+        return {}
+    frame["date"] = pd.to_datetime(frame["date"])
+    symbols = frame.pop("symbol").to_numpy()
+    if not include_adj_close:
+        frame = frame.drop(columns="adj_close")
+    frame = frame.rename(columns=_FRAME_COLUMN_NAMES).set_index("Date")
+    # Sorted by symbol, so every symbol is one contiguous run of rows.
+    starts = np.flatnonzero(np.r_[True, symbols[1:] != symbols[:-1]])
+    ends = np.r_[starts[1:], len(symbols)]
+    # One missing volume anywhere makes the shared column float; a symbol
+    # without gaps keeps integer volume, as its own frame would have.
+    volume_widened = frame["Volume"].dtype.kind == "f"
+    frames = {}
+    for start, end in zip(starts, ends):
+        part = frame.iloc[start:end].copy()
+        if volume_widened and part["Volume"].notna().all():
+            part["Volume"] = part["Volume"].astype("int64")
+        frames[symbols[start]] = part
+    return frames

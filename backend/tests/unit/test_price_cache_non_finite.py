@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from collections import namedtuple
 from datetime import date
-from types import SimpleNamespace
 
 import pandas as pd
 
 from app.services.cache.redis_codec import encode_frame
 from app.services.price_cache_service import PriceCacheService
+from app.services.price_row_normalization import STOCK_PRICE_ROW_COLUMNS
 
 
 def _price_frame(closes: list[float], days: list[date]) -> pd.DataFrame:
@@ -26,8 +27,10 @@ def _price_frame(closes: list[float], days: list[date]) -> pd.DataFrame:
 
 
 def test_cached_only_fresh_can_return_structurally_valid_short_history():
+    # Column-select rows are tuples with attribute access, like SQLAlchemy Rows.
+    Row = namedtuple("Row", STOCK_PRICE_ROW_COLUMNS)
     rows = [
-        SimpleNamespace(
+        Row(
             symbol="NEW",
             date=row_date,
             open=close,
