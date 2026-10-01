@@ -499,8 +499,8 @@ jobs:
             exit "$status"
           fi
           echo "has_price_bundle=true" >> "$GITHUB_OUTPUT"
-          if grep -q "using benchmark-backed as-of date" "$EXPORT_LOG"; then
-            echo "Rolling RRG history publication disabled for ${{ matrix.market }} because the market export rewound to an older benchmark-backed date."
+          if grep -qE "using (benchmark-backed|previous-session) as-of date" "$EXPORT_LOG"; then
+            echo "Rolling RRG history publication disabled for ${{ matrix.market }} because the market export rewound to an older as-of date."
             echo "rrg_history_publishable=false" >> "$GITHUB_OUTPUT"
           else
             echo "rrg_history_publishable=true" >> "$GITHUB_OUTPUT"

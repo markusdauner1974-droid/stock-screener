@@ -1233,6 +1233,8 @@ def test_run_daily_refresh_continues_eligible_market_when_peer_market_rs_is_not_
         "price:DE",
         "price:HK",
         "market-rs:DE",
+        # Short coverage rewinds DE one session; it is still short there.
+        "market-rs:DE",
         "market-rs:HK",
         "exposure:HK",
         "snapshot:HK",
@@ -1248,7 +1250,7 @@ def test_run_daily_refresh_continues_eligible_market_when_peer_market_rs_is_not_
     assert results["group_rank_history_backfill"]["DE"]["reason"] == "market_rs_not_ready"
     assert results["group_rank_history_backfill"]["HK"]["status"] == "completed"
     assert (
-        "Static export market DE Market RS not ready for 2026-07-24: "
+        "Static export market DE Market RS not ready for 2026-07-23: "
         "current_adjusted_price_coverage_below_threshold."
     ) in warnings
 

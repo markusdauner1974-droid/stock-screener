@@ -11,6 +11,17 @@ from app.services.yahoo_quote_price_repair import repair_from_yahoo_quotes
 
 TOKYO = ZoneInfo("Asia/Tokyo")
 SESSION = date(2026, 9, 29)
+ATTEMPTS = len(repair_module.YAHOO_QUOTE_RETRY_BACKOFF_SECONDS) + 1
+
+
+@pytest.fixture(autouse=True)
+def _fresh_retry_breaker(monkeypatch):
+    monkeypatch.setitem(repair_module._retry_breaker, "exhausted_batches", 0)
+    monkeypatch.setattr(
+        repair_module,
+        "YAHOO_QUOTE_RETRY_BACKOFF_SECONDS",
+        (0,) * (ATTEMPTS - 1),
+    )
 
 
 def _yahoo(rows):
@@ -139,7 +150,7 @@ def test_request_breaker_skips_remaining_batches(monkeypatch):
         results, expected_session=SESSION, market_tz=TOKYO, fetch_quotes=failing
     )
 
-    assert len(calls) == repair_module.YAHOO_QUOTE_MAX_CONSECUTIVE_FAILURES
+    assert len(calls) == repair_module.YAHOO_QUOTE_MAX_CONSECUTIVE_FAILURES * ATTEMPTS
     assert stats == {"stale": 6, "repaired": 0, "failed": 3, "skipped": 3}
 
 
@@ -156,5 +167,62 @@ def test_empty_quote_responses_trip_the_request_breaker(monkeypatch):
         fetch_quotes=lambda symbols: calls.append(symbols) or [],
     )
 
-    assert len(calls) == repair_module.YAHOO_QUOTE_MAX_CONSECUTIVE_FAILURES
+    assert len(calls) == repair_module.YAHOO_QUOTE_MAX_CONSECUTIVE_FAILURES * ATTEMPTS
     assert stats["skipped"] == 3
+
+
+def test_failed_request_is_retried_after_backoff(monkeypatch):
+    monkeypatch.setattr(repair_module, "YAHOO_QUOTE_RETRY_BACKOFF_SECONDS", (15, 45))
+    responses = [RuntimeError("Too Many Requests"), [_quote("7203.T", close=3010.0)]]
+    slept = []
+
+    def flaky(symbols):
+        response = responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    results = {"7203.T": _ok(_yahoo([("2026-09-28", 1, 1, 1, 1, 1, 1, 0.0)]))}
+    stats = repair_from_yahoo_quotes(
+        results,
+        expected_session=SESSION,
+        market_tz=TOKYO,
+        fetch_quotes=flaky,
+        sleep=slept.append,
+    )
+
+    assert slept == [15]
+    assert stats["repaired"] == 1
+
+
+def test_retries_stop_across_calls_once_batches_keep_exhausting_them():
+    calls = []
+
+    def failing(symbols):
+        calls.append(symbols)
+        raise RuntimeError("blocked")
+
+    stale = _yahoo([("2026-09-28", 1, 1, 1, 1, 1, 1, 0.0)])
+    # One batch per call, as the price plan executor repairs one fetch batch at a time.
+    for code in range(1000, 1000 + repair_module.YAHOO_QUOTE_MAX_CONSECUTIVE_FAILURES):
+        repair_from_yahoo_quotes(
+            {f"{code}.T": _ok(stale)}, expected_session=SESSION, market_tz=TOKYO, fetch_quotes=failing
+        )
+    calls.clear()
+
+    repair_from_yahoo_quotes(
+        {"2000.T": _ok(stale)}, expected_session=SESSION, market_tz=TOKYO, fetch_quotes=failing
+    )
+    assert len(calls) == 1
+
+    repair_from_yahoo_quotes(
+        {"7203.T": _ok(stale)},
+        expected_session=SESSION,
+        market_tz=TOKYO,
+        fetch_quotes=lambda symbols: [_quote("7203.T", close=3010.0)],
+    )
+    calls.clear()
+    repair_from_yahoo_quotes(
+        {"2001.T": _ok(stale)}, expected_session=SESSION, market_tz=TOKYO, fetch_quotes=failing
+    )
+    assert len(calls) == ATTEMPTS

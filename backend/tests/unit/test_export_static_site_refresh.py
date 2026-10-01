@@ -4,6 +4,8 @@ from contextlib import nullcontext
 from datetime import date, datetime
 from types import SimpleNamespace
 
+import pytest
+
 from app.domain.relative_strength import BALANCED_RS_FORMULA_VERSION
 from app.scripts import export_static_site
 from app.services.market_exposure_service import EXPOSURE_BACKFILL_DAYS
@@ -165,8 +167,61 @@ def test_static_daily_refresh_ensures_market_breadth_before_exposure(monkeypatch
     }
 
 
-def test_static_daily_refresh_rewinds_to_latest_benchmark_backed_session(
+_BENCHMARK_STALE_RESULT = {
+    "reason_code": "benchmark_adjusted_anchor_missing",
+    "diagnostics": {
+        "error": "benchmark_not_current",
+        "market": "DE",
+        "date": "2026-08-03",
+        "benchmark_candidates": [
+            {
+                "symbol": "^GDAXI",
+                "role": "primary",
+                "source": "fetch",
+                "status": "stale_required_date",
+                "latest_date": datetime(2026, 7, 31, 15, 30),
+            },
+        ],
+    },
+}
+_COVERAGE_SHORT_RESULT = {
+    "reason_code": "current_adjusted_price_coverage_below_threshold",
+    "diagnostics": {
+        "current_price_coverage": 0.8665,
+        "minimum_current_price_coverage": 0.9,
+    },
+}
+
+
+class _PreviousSessionCalendar:
+    def session_anchors(self, market, as_of_date, *, offsets):
+        assert offsets == (1,)
+        return {0: as_of_date, 1: date(2026, 7, 31)}
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_warning"),
+    [
+        (
+            _BENCHMARK_STALE_RESULT,
+            (
+                "Static export market DE using benchmark-backed as-of date 2026-07-31 "
+                "because benchmarks were unavailable for 2026-08-03."
+            ),
+        ),
+        (
+            _COVERAGE_SHORT_RESULT,
+            (
+                "Static export market DE using previous-session as-of date 2026-07-31 "
+                "because current price coverage was below threshold for 2026-08-03."
+            ),
+        ),
+    ],
+)
+def test_static_daily_refresh_rewinds_a_session_when_market_rs_is_not_current(
     monkeypatch,
+    failure,
+    expected_warning,
 ):
     prepare_calls: list[date] = []
     snapshot_calls: list[dict[str, object]] = []
@@ -200,22 +255,8 @@ def test_static_daily_refresh_rewinds_to_latest_benchmark_backed_session(
                 "market": market,
                 "as_of_date": "2026-08-03",
                 "formula_version": formula_version,
-                "reason_code": "benchmark_adjusted_anchor_missing",
-                "diagnostics": {
-                    "error": "benchmark_not_current",
-                    "market": market,
-                    "date": "2026-08-03",
-                    "benchmark_candidates": [
-                        {
-                            "symbol": "^GDAXI",
-                            "role": "primary",
-                            "source": "fetch",
-                            "status": "stale_required_date",
-                            "latest_date": datetime(2026, 7, 31, 15, 30),
-                        },
-                    ],
-                },
                 "market_rs_run_id": None,
+                **failure,
             }
         return {
             "status": "completed",
@@ -226,6 +267,9 @@ def test_static_daily_refresh_rewinds_to_latest_benchmark_backed_session(
         }
 
     monkeypatch.setattr(export_static_site, "_prepare_static_rs_formula", prepare_static_rs)
+    monkeypatch.setattr(
+        export_static_site, "get_market_calendar_service", _PreviousSessionCalendar
+    )
     monkeypatch.setattr(
         export_static_site,
         "_ensure_breadth_history",
@@ -283,10 +327,7 @@ def test_static_daily_refresh_rewinds_to_latest_benchmark_backed_session(
     assert results["market_rs"]["DE"]["status"] == "completed"
     assert results["market_rs"]["DE"]["as_of_date"] == "2026-07-31"
     assert snapshot_calls[0]["as_of_date_str"] == "2026-07-31"
-    assert (
-        "Static export market DE using benchmark-backed as-of date 2026-07-31 "
-        "because benchmarks were unavailable for 2026-08-03."
-    ) in warnings
+    assert expected_warning in warnings
 
 
 def test_static_daily_refresh_skips_exposure_when_breadth_history_errors(monkeypatch):

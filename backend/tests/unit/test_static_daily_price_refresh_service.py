@@ -1661,3 +1661,36 @@ def test_static_daily_price_refresh_rejects_replacement_missing_the_discarded_to
 
     assert _adj_closes(session_factory, "SPLIT.NS") == {1.0}
     assert result["yahoo_failed_symbols"] == 1
+
+
+def test_static_daily_price_batch_line_counts_repaired_and_missing_sessions(capsys) -> None:
+    as_of = date(2026, 6, 4)
+    current = _top_up_frame(1.0)
+    stale = _price_frame([date(2026, 6, 3)], 1.0)
+
+    class _FakeFetcher:
+        def fetch_prices_in_batches(self, symbols, period="2y", start_batch_size=None, market=None):
+            return {
+                "FULL": {"price_data": current, "has_error": False},
+                "QUOTED": {"price_data": current, "has_error": False, "repaired_by": "yahoo_quote"},
+                "BEHIND": {"price_data": stale, "has_error": False},
+            }
+
+    service = StaticDailyPriceRefreshService(
+        session_factory=_sqlite_session_factory(),
+        price_cache=SimpleNamespace(store_batch_in_cache=lambda *args, **kwargs: None),
+        fetcher=_FakeFetcher(),
+    )
+
+    service._fetch_and_store(
+        ["FULL", "QUOTED", "BEHIND"],
+        period=STATIC_DAILY_PRICE_REFRESH_PERIOD,
+        batch_size=25,
+        market="US",
+        as_of_date=as_of,
+    )
+
+    assert (
+        "Batch 1/1 complete: 3/3 processed, 3 refreshed, 0 failed, "
+        "1 repaired, 1 missing 2026-06-04."
+    ) in capsys.readouterr().out
