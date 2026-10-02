@@ -19,6 +19,7 @@ from app.models.economic_taxonomy_runtime import (
 )
 from app.models.theme import ContentItem, ContentSource
 from app.services.content_ingestion_service import ContentIngestionService
+from app.services.theme_pipeline_state_service import reconcile_source_pipeline_change
 from app.tasks.economic_taxonomy_tasks import EconomicTaxonomyTaskService
 
 NOW = datetime(2026, 10, 2, 8, 0, tzinfo=timezone.utc)
@@ -226,6 +227,36 @@ def test_backfill_replays_each_recorded_legacy_observation(db_session):
         for channel in revision.evidence_channels
     }
     assert channels == {"technical", "fundamental"}
+
+
+def test_pipeline_added_to_a_source_reaches_economic_lens_of_old_items(db_session):
+    source = ContentSource(name="Feed", source_type="rss", url="https://feed.example.com/rss",
+                           pipelines=["technical"])
+    db_session.add(source)
+    db_session.commit()
+    _ingest(db_session, source, _Feed(_item()))
+    (packet,) = _packets(db_session)
+
+    def channels():
+        latest = db_session.scalars(
+            select(LensEligibilityRevision)
+            .where(LensEligibilityRevision.evidence_packet_id == packet.id)
+            .order_by(LensEligibilityRevision.revision_number.desc())
+        ).first()
+        return latest.evidence_channels
+
+    assert channels() == ["technical"]
+
+    reconcile_source_pipeline_change(
+        db_session, source.id, ["technical"], ["technical", "fundamental"]
+    )
+    revisions = db_session.scalar(select(func.count()).select_from(LensEligibilityRevision))
+    reconcile_source_pipeline_change(  # already applied: no new revision
+        db_session, source.id, ["technical", "fundamental"], ["technical", "fundamental"]
+    )
+
+    assert channels() == ["fundamental", "technical"]
+    assert db_session.scalar(select(func.count()).select_from(LensEligibilityRevision)) == revisions
 
 
 def test_unchanged_held_correction_is_not_readmitted_on_repoll(db_session):

@@ -21,7 +21,12 @@ from sqlalchemy.orm import Session
 from ..domain.economic_taxonomy.contracts import EvidenceChannel
 from ..infra.db.models.social_signals import ContentPipelineEligibility
 from ..models.theme import ContentSource, ContentItem, ContentItemPipelineState
-from .economic_source_admission import EconomicSourceAdmissionService, EvidenceAdmission
+from .economic_source_admission import (
+    CONTENT_INGESTION_ROUTE,
+    EconomicSourceAdmissionService,
+    EvidenceAdmission,
+    content_route_record_id,
+)
 from .theme_evidence_eligibility_service import grant_eligibility, is_social_owned_source, legacy_sources, legacy_eligibility_exists
 from ..models.app_settings import AppSetting
 from ..config import settings
@@ -332,10 +337,9 @@ class ContentIngestionService:
             EvidenceAdmission(
                 provider=content_item.source_type,
                 canonical_item_id=content_item.external_id,
-                capture_route="content_ingestion",
-                # One record per (item, source) observation: a mirror feed
-                # gets its own packet instead of reusing the first feed's.
-                route_record_id=f"{content_item.id}:{source_id}",
+                capture_route=CONTENT_INGESTION_ROUTE,
+                # A mirror feed gets its own packet instead of the first feed's.
+                route_record_id=content_route_record_id(content_item.id, source_id),
                 original_text=text,
                 preparation_version="content-ingestion-v1",
                 source_metadata={

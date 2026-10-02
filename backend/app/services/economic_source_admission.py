@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -40,6 +40,19 @@ def _utcnow() -> datetime:
 
 def _ordered(values) -> tuple[str, ...]:
     return tuple(sorted({str(value) for value in values}))
+
+
+# Capture route for news/RSS/Substack/Reddit content ingestion (#471).
+CONTENT_INGESTION_ROUTE = "content_ingestion"
+
+
+def post_family_key(provider: str, canonical_item_id: str) -> str:
+    return f"{provider.strip().lower()}:post:{canonical_item_id}"
+
+
+def content_route_record_id(content_item_id: int, source_id: int | None) -> str:
+    """One route record per (item, source) observation; feeds can share items."""
+    return f"{content_item_id}:{source_id}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +105,7 @@ class EvidenceAdmission:
     def family_key(self) -> str:
         if self.canonical_source_family:
             return self.canonical_source_family.strip()
-        return f"{self.provider.strip().lower()}:post:{self.canonical_item_id}"
+        return post_family_key(self.provider, self.canonical_item_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,24 +214,11 @@ class EconomicSourceAdmissionService:
                 if (packet.source_metadata or {}).get("route_record_id")
                 == evidence.route_record_id
             ]
-            # Reuse only a packet that still stands against the current
-            # effective one: that packet, an equivalent of it (preferred), or a
-            # capture still held for review. Stored precedence_state is fixed at
-            # admission, so a packet displaced since (A -> B) would still say
-            # "effective"; recapturing it is a possible reversion for precedence.
-            def standing(packet: EvidencePacket) -> int | None:
-                disposition = self._latest_disposition(packet.id)
-                if packet.id == effective_now.id or (
-                    disposition == "equivalent"
-                    and packet.equivalent_evidence_packet_id == effective_now.id
-                ):
-                    return 0
-                return 1 if disposition == "hold_review" else None
-
+            # A displaced packet (A -> B) is a possible reversion: precedence.
             ranked = [
                 (rank, packet)
                 for packet in same_capture
-                if (rank := standing(packet)) is not None
+                if (rank := self._standing(packet, effective_now)) is not None
             ]
             existing = min(ranked, key=lambda pair: pair[0], default=(None, None))[1]
         if existing is not None:
@@ -360,6 +360,72 @@ class EconomicSourceAdmissionService:
             reason="equivalent_evidence_admission",
             authority_epoch=authority_epoch,
         )
+
+    def add_observation_channels(
+        self,
+        *,
+        family_key: str,
+        capture_route: str,
+        route_record_id: str,
+        channels: Collection[str],
+        reason: str,
+    ) -> bool:
+        """Add lens channels for one capture observation already admitted.
+
+        The lens discovery reads is the effective packet's (equivalent captures
+        merge into it), so channels go there when the observation's packet is
+        still in force. Returns whether a revision was written; an observation
+        with no standing packet is left alone.
+        """
+        lineage = self.session.execute(
+            select(SourceLineage)
+            .join(SourceFamily, SourceFamily.id == SourceLineage.source_family_id)
+            .where(
+                SourceFamily.canonical_source_key == family_key,
+                SourceLineage.scope_suffix == "",
+            )
+        ).scalar_one_or_none()
+        effective = self.effective_packet(lineage.id) if lineage is not None else None
+        if effective is None:
+            return False
+        observed = any(
+            (packet.source_metadata or {}).get("route_record_id") == route_record_id
+            and self._standing(packet, effective) == 0
+            for packet in self.session.execute(
+                select(EvidencePacket).where(
+                    EvidencePacket.source_lineage_id == lineage.id,
+                    EvidencePacket.capture_route == capture_route,
+                )
+            ).scalars()
+        )
+        latest = self.session.scalar(
+            select(LensEligibilityRevision.evidence_channels)
+            .where(LensEligibilityRevision.evidence_packet_id == effective.id)
+            .order_by(LensEligibilityRevision.revision_number.desc())
+            .limit(1)
+        )
+        current = set(latest or ())
+        if not observed or set(channels) <= current:
+            return False
+        self.revise_lens_eligibility(
+            effective.id, evidence_channels=tuple(current | set(channels)), reason=reason
+        )
+        return True
+
+    def _standing(self, packet: EvidencePacket, effective: EvidencePacket) -> int | None:
+        """Rank a packet that still stands against the current effective one.
+
+        0: the effective packet or an equivalent of it; 1: still held for
+        review; None: displaced. Stored precedence_state is fixed at admission,
+        so standing is read from the precedence revision log instead.
+        """
+        disposition = self._latest_disposition(packet.id)
+        if packet.id == effective.id or (
+            disposition == "equivalent"
+            and packet.equivalent_evidence_packet_id == effective.id
+        ):
+            return 0
+        return 1 if disposition == "hold_review" else None
 
     def _latest_disposition(self, packet_id: UUID) -> str | None:
         return self.session.scalar(
