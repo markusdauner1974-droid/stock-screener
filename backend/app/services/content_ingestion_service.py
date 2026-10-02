@@ -19,6 +19,7 @@ import requests
 from sqlalchemy.orm import Session
 
 from ..domain.economic_taxonomy.contracts import EvidenceChannel
+from ..infra.db.models.social_signals import ContentPipelineEligibility
 from ..models.theme import ContentSource, ContentItem, ContentItemPipelineState
 from .economic_source_admission import EconomicSourceAdmissionService, EvidenceAdmission
 from .theme_evidence_eligibility_service import grant_eligibility, is_social_owned_source, legacy_sources, legacy_eligibility_exists
@@ -358,10 +359,12 @@ class ContentIngestionService:
     def backfill_economic_evidence(self, *, batch_size: int = 500, after_id: int = 0) -> dict:
         """Admit non-X items ingested before content admission existed (#471).
 
-        Re-running is safe: an already admitted item reuses its packet. Each
-        packet is dated by the item's original fetch, so the evidence is not
-        made available earlier than it was. Commits per batch; pass the last
-        reported id as ``after_id`` to resume.
+        Replays each recorded legacy observation (``ContentPipelineEligibility``):
+        one capture per observing source, with the pipelines that source granted,
+        dated by its first grant, so evidence is never available earlier than it
+        was. An item with no recorded grant falls back to its own source.
+        Re-running is safe: an already admitted observation reuses its packet.
+        Commits per batch; pass the last reported id as ``after_id`` to resume.
         """
         admitted = 0
         last_id = after_id
@@ -375,22 +378,42 @@ class ContentIngestionService:
             )
             if not items:
                 return {"admitted": admitted, "last_id": last_id}
-            for item in items:
-                source = self.db.get(ContentSource, item.source_id) if item.source_id else None
-                self._admit_economic_evidence(
-                    item,
-                    {
-                        "title": item.title,
-                        "content": item.content,
-                        "url": item.url,
-                        "author": item.author,
-                        "published_at": item.published_at,
-                    },
-                    normalize_pipelines(source.pipelines if source else None),
-                    source_id=item.source_id,
-                    source_name=source.name if source else item.source_name,
-                    captured_at=_coerce_utc_datetime(item.fetched_at),
+            # {item_id: {source_id: (pipelines, first observed_at)}}
+            observations: dict[int, dict[int, tuple[set[str], datetime]]] = {}
+            for grant in self.db.query(ContentPipelineEligibility).filter(
+                ContentPipelineEligibility.content_item_id.in_([item.id for item in items]),
+                ContentPipelineEligibility.channel == "legacy",
+            ):
+                by_source = observations.setdefault(grant.content_item_id, {})
+                pipelines, first = by_source.get(
+                    grant.originating_source_id, (set(), grant.observed_at)
                 )
+                pipelines.add(grant.pipeline)
+                by_source[grant.originating_source_id] = (pipelines, min(first, grant.observed_at))
+            for item in items:
+                item_observations = observations.get(item.id) or {
+                    item.source_id: (None, item.fetched_at)
+                }
+                for source_id, (pipelines, observed_at) in sorted(
+                    item_observations.items(), key=lambda entry: entry[1][1]
+                ):
+                    source = self.db.get(ContentSource, source_id) if source_id else None
+                    self._admit_economic_evidence(
+                        item,
+                        {
+                            "title": item.title,
+                            "content": item.content,
+                            "url": item.url,
+                            "author": item.author,
+                            "published_at": item.published_at,
+                        },
+                        sorted(pipelines) if pipelines else normalize_pipelines(
+                            source.pipelines if source else None
+                        ),
+                        source_id=source_id,
+                        source_name=source.name if source else item.source_name,
+                        captured_at=_coerce_utc_datetime(observed_at),
+                    )
                 admitted += 1
                 last_id = item.id
             self.db.commit()

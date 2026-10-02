@@ -8,8 +8,10 @@ from types import SimpleNamespace
 from sqlalchemy import func, select
 
 from app.database import SessionLocal
+from app.infra.db.models.social_signals import ContentPipelineEligibility
 from app.models.economic_taxonomy_runtime import (
     EvidencePacket,
+    LensEligibilityRevision,
     ProcessingRequest,
     SourceFamily,
     SourceLineage,
@@ -189,6 +191,41 @@ def test_backfill_admits_previously_ingested_items_once(db_session):
     assert first["admitted"] == again["admitted"] == 2
     assert len(packets) == 2
     assert {p.available_at.replace(tzinfo=timezone.utc) for p in packets} == {fetched_at}
+
+
+def test_backfill_replays_each_recorded_legacy_observation(db_session):
+    technical = ContentSource(name="Tech feed", source_type="rss",
+                              url="https://a.example.com/rss", pipelines=["technical"])
+    fundamental = ContentSource(name="Fund feed", source_type="rss",
+                                url="https://b.example.com/rss", pipelines=["technical"])
+    db_session.add_all([technical, fundamental])
+    db_session.flush()
+    observed = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    item = ContentItem(source_id=technical.id, source_type="rss", source_name="Tech feed",
+                       external_id="shared-1", title="Old", content="Old article",
+                       published_at=observed, fetched_at=observed)
+    db_session.add(item)
+    db_session.flush()
+    # The second feed's pipelines changed after it granted fundamental.
+    for source, pipeline in ((technical, "technical"), (fundamental, "fundamental")):
+        db_session.add(ContentPipelineEligibility(
+            content_item_id=item.id, pipeline=pipeline, channel="legacy",
+            originating_source_id=source.id, observed_at=observed,
+        ))
+    db_session.commit()
+
+    ContentIngestionService(db_session).backfill_economic_evidence()
+
+    packets = _packets(db_session)
+    assert {p.source_metadata["content_source_id"] for p in packets} == {
+        technical.id, fundamental.id,
+    }
+    channels = {
+        channel
+        for revision in db_session.scalars(select(LensEligibilityRevision))
+        for channel in revision.evidence_channels
+    }
+    assert channels == {"technical", "fundamental"}
 
 
 def test_unchanged_held_correction_is_not_readmitted_on_repoll(db_session):
