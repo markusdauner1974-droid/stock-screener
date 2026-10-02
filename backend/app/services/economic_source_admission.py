@@ -176,15 +176,17 @@ class EconomicSourceAdmissionService:
         # no effective packet (e.g. only a held late archive). Reuse is limited
         # to the same capture route and record, so another route or source
         # records its own (equivalent) packet and keeps its provenance.
-        if (
-            existing is None
+        effective_now = (
+            self.effective_packet(lineage.id)
+            if existing is None
             and reuse_admitted_content
             and evidence.provider_revision_id is None
             and evidence.provider_revision_order is None
             and evidence.supersedes_packet_id is None
             and evidence.equivalent_packet_id is None
-            and self.effective_packet(lineage.id) is not None
-        ):
+            else None
+        )
+        if effective_now is not None:
             same_capture = [
                 packet
                 for packet in self.session.execute(
@@ -199,12 +201,26 @@ class EconomicSourceAdmissionService:
                 if (packet.source_metadata or {}).get("route_record_id")
                 == evidence.route_record_id
             ]
-            # Prefer a packet that is in force over a held one.
-            existing = min(
-                same_capture,
-                key=lambda packet: packet.precedence_state == "hold_review",
-                default=None,
-            )
+            # Reuse only a packet that still stands against the current
+            # effective one: that packet, an equivalent of it (preferred), or a
+            # capture still held for review. Stored precedence_state is fixed at
+            # admission, so a packet displaced since (A -> B) would still say
+            # "effective"; recapturing it is a possible reversion for precedence.
+            def standing(packet: EvidencePacket) -> int | None:
+                disposition = self._latest_disposition(packet.id)
+                if packet.id == effective_now.id or (
+                    disposition == "equivalent"
+                    and packet.equivalent_evidence_packet_id == effective_now.id
+                ):
+                    return 0
+                return 1 if disposition == "hold_review" else None
+
+            ranked = [
+                (rank, packet)
+                for packet in same_capture
+                if (rank := standing(packet)) is not None
+            ]
+            existing = min(ranked, key=lambda pair: pair[0], default=(None, None))[1]
         if existing is not None:
             effective = self.effective_packet(lineage.id)
             if effective is not None and (
@@ -343,6 +359,14 @@ class EconomicSourceAdmissionService:
             evidence_channels=merged,
             reason="equivalent_evidence_admission",
             authority_epoch=authority_epoch,
+        )
+
+    def _latest_disposition(self, packet_id: UUID) -> str | None:
+        return self.session.scalar(
+            select(EvidencePrecedenceRevision.disposition)
+            .where(EvidencePrecedenceRevision.evidence_packet_id == packet_id)
+            .order_by(EvidencePrecedenceRevision.revision_number.desc())
+            .limit(1)
         )
 
     def effective_packet(self, lineage_id: UUID) -> EvidencePacket | None:

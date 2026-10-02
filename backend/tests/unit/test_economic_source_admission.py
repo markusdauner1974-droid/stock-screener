@@ -107,6 +107,26 @@ def test_recapture_reuses_the_effective_packet_not_a_held_archive(db_session):
     assert recapture.precedence_state == "effective"
 
 
+def test_recapture_does_not_reuse_a_packet_no_longer_in_force(db_session):
+    # A was effective, then B advanced; an unordered capture of A is a possible
+    # reversion and must reach precedence, not reuse A's stale packet.
+    admission = EconomicSourceAdmissionService(db_session)
+    first = admission.admit_content(_post(provider_revision_order=1))
+    advanced = admission.admit_content(
+        _post(text="Memory demand is slowing.", provider_revision_id="rev-2",
+              provider_revision_order=2)
+    )
+
+    recapture = admission.admit_content(
+        _post(provider_revision_id=None, provider_revision_order=None,
+              captured_at=NOW + timedelta(hours=1))
+    )
+
+    assert recapture.packet_id != first.packet_id
+    assert recapture.precedence_state == "hold_review"
+    assert admission.effective_packet(first.source_lineage_id).id == advanced.packet_id
+
+
 def test_ordered_reversion_to_earlier_text_is_admitted_not_collapsed(db_session):
     admission = EconomicSourceAdmissionService(db_session)
     first = admission.admit_content(_post(provider_revision_order=1))
