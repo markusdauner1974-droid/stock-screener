@@ -116,6 +116,21 @@ def test_one_session_behind_is_a_warning_not_an_error(tmp_path):
     assert "JP is 1 session(s) behind" in report.annotation(rows[0])
 
 
+def test_missing_price_manifest_is_a_warning_not_silence(tmp_path):
+    rows = report.build_freshness_rows(
+        manifest={"markets": {"US": {"as_of_date": "2026-10-01"}}},
+        markets=("US",),
+        artifacts_dir=tmp_path,
+        price_manifest_dir=tmp_path / "empty",
+        calendar=_WeekdayCalendar(date(2026, 10, 1)),
+        max_sessions_behind=3,
+    )
+
+    assert rows[0].sessions_behind == 0
+    assert rows[0].level == "warning"
+    assert "price bundle manifest unavailable" in report.annotation(rows[0])
+
+
 def test_annotation_escapes_workflow_command_characters():
     row = report.MarketFreshness(
         market="AU", served_as_of=date(2026, 9, 3), expected_session=date(2026, 10, 1),

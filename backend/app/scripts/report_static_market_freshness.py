@@ -117,7 +117,7 @@ def build_freshness_rows(
         lag = max((n for n in (behind, bundle_behind) if n is not None), default=0)
         if served_as_of is None or lag > max_sessions_behind:
             level = "error"
-        elif lag >= 1 or expected is None:
+        elif lag >= 1 or expected is None or bundle_as_of is None:
             level = "warning"
         else:
             level = "ok"
@@ -168,7 +168,9 @@ def annotation(row: MarketFreshness) -> str:
             f"{row.market} is {row.sessions_behind} session(s) behind "
             f"(served {row.served_as_of}, expected {row.expected_session})"
         )
-    if row.bundle_sessions_behind:
+    if row.price_bundle_as_of is None:
+        message += "; price bundle manifest unavailable"
+    elif row.bundle_sessions_behind:
         message += f"; price bundle {row.bundle_sessions_behind} session(s) behind ({row.price_bundle_as_of})"
     if row.reason:
         message += f"; reason: {row.reason}"
