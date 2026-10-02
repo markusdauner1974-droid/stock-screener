@@ -160,6 +160,18 @@ def test_unchanged_held_correction_is_not_readmitted_on_repoll(db_session):
     assert [p.precedence_state for p in _packets(db_session)] == ["effective", "hold_review"]
 
 
+def test_title_already_leading_the_content_is_not_repeated(db_session):
+    # RedditFetcher builds content as "title\n\nselftext".
+    source = _source(db_session, source_type="reddit")
+
+    _ingest(db_session, source, _Feed(_item(
+        title="Memory upcycle", content="Memory upcycle\n\nDRAM prices up.",
+    )))
+
+    (packet,) = _packets(db_session)
+    assert packet.original_text_ref == "Memory upcycle\n\nDRAM prices up."
+
+
 def test_x_posts_are_left_to_social_admission(db_session):
     source = _source(db_session, source_type="twitter")
 

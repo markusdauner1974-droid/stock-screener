@@ -320,15 +320,19 @@ class ContentIngestionService:
         """
         now = datetime.now(timezone.utc)
         title = item_data.get("title") or ""
+        content = item_data.get("content") or ""
+        # Some fetchers (Reddit) already lead the content with the title.
+        if title and not content.startswith(title):
+            text = f"{title}\n\n{content}" if content else title
+        else:
+            text = content
         EconomicSourceAdmissionService(self.db).admit_content(
             EvidenceAdmission(
                 provider=content_item.source_type,
                 canonical_item_id=content_item.external_id,
                 capture_route="content_ingestion",
                 route_record_id=str(content_item.id),
-                original_text="\n\n".join(
-                    part for part in (title, item_data.get("content") or "") if part
-                ),
+                original_text=text,
                 preparation_version="content-ingestion-v1",
                 source_metadata={
                     "content_item_id": content_item.id,
