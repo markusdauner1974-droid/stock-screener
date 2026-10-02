@@ -65,6 +65,17 @@ def test_same_provider_post_from_legacy_and_social_shares_family(db_session):
     assert social.packet_id != legacy.packet_id
 
 
+def test_content_recapture_of_admitted_text_reuses_the_packet(db_session):
+    # Ingestion re-polls the same item with a new capture time each run.
+    admission = EconomicSourceAdmissionService(db_session)
+    first = admission.admit_content(_post())
+
+    recapture = admission.admit_content(_post(captured_at=NOW + timedelta(hours=1)))
+
+    assert recapture.packet_id == first.packet_id
+    assert db_session.scalar(select(func.count()).select_from(EvidencePacket)) == 1
+
+
 def test_adding_lens_does_not_create_packet_or_work(db_session):
     admission = EconomicSourceAdmissionService(db_session)
     admitted = admission.admit_content(_post())

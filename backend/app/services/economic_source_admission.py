@@ -122,12 +122,19 @@ class EconomicSourceAdmissionService:
         self.session = session
 
     def admit_content(self, evidence: EvidenceAdmission) -> AdmissionResult:
-        return self.admit(evidence)
+        # Ingestion re-polls items with a fresh capture time, so a recapture of
+        # text already admitted for this lineage reuses that packet.
+        return self.admit(evidence, reuse_admitted_content=True)
 
     def admit_social_work(self, evidence: EvidenceAdmission) -> AdmissionResult:
         return self.admit(evidence)
 
-    def admit(self, evidence: EvidenceAdmission) -> AdmissionResult:
+    def admit(
+        self,
+        evidence: EvidenceAdmission,
+        *,
+        reuse_admitted_content: bool = False,
+    ) -> AdmissionResult:
         expected_epoch = self._current_epoch()
         with producer_write(
             self.session,
@@ -137,6 +144,7 @@ class EconomicSourceAdmissionService:
             return self._admit(
                 evidence,
                 authority_epoch=authority.authority_epoch,
+                reuse_admitted_content=reuse_admitted_content,
             )
 
     def _admit(
@@ -144,6 +152,7 @@ class EconomicSourceAdmissionService:
         evidence: EvidenceAdmission,
         *,
         authority_epoch: int,
+        reuse_admitted_content: bool = False,
     ) -> AdmissionResult:
         family = self._get_or_create_family(evidence)
         lineage = self._get_or_create_lineage(family, evidence)
@@ -161,6 +170,16 @@ class EconomicSourceAdmissionService:
                 EvidencePacket.packet_hash == packet_hash,
             )
         ).scalar_one_or_none()
+        if existing is None and reuse_admitted_content:
+            existing = self.session.execute(
+                select(EvidencePacket)
+                .where(
+                    EvidencePacket.source_lineage_id == lineage.id,
+                    EvidencePacket.evidence_content_fingerprint == fingerprint,
+                )
+                .order_by(EvidencePacket.evidence_revision_ordinal)
+                .limit(1)
+            ).scalar_one_or_none()
         if existing is not None:
             effective = self.effective_packet(lineage.id)
             if effective is not None and (

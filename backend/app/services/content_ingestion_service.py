@@ -18,7 +18,9 @@ import feedparser
 import requests
 from sqlalchemy.orm import Session
 
+from ..domain.economic_taxonomy.contracts import EvidenceChannel
 from ..models.theme import ContentSource, ContentItem, ContentItemPipelineState
+from .economic_source_admission import EconomicSourceAdmissionService, EvidenceAdmission
 from .theme_evidence_eligibility_service import grant_eligibility, is_social_owned_source, legacy_sources, legacy_eligibility_exists
 from ..models.app_settings import AppSetting
 from ..config import settings
@@ -299,6 +301,46 @@ class ContentIngestionService:
             created += 1
         return created
 
+    def _admit_economic_evidence(
+        self, content_item: ContentItem, item_data: dict, pipelines: list[str]
+    ) -> None:
+        """Admit the fetched text as economic taxonomy evidence.
+
+        Runs on every poll, not just for new items: an unchanged recapture
+        reuses its packet, and changed text (a correction, even to empty)
+        enters the same lineage, where the precedence policy decides it.
+        Admission shares the ingest transaction, so a failure rolls back the
+        batch and the next poll retries it.
+        """
+        now = datetime.now(timezone.utc)
+        title = item_data.get("title") or ""
+        EconomicSourceAdmissionService(self.db).admit_content(
+            EvidenceAdmission(
+                provider=content_item.source_type,
+                canonical_item_id=content_item.external_id,
+                capture_route="content_ingestion",
+                route_record_id=str(content_item.id),
+                original_text="\n\n".join(
+                    part for part in (title, item_data.get("content") or "") if part
+                ),
+                preparation_version="content-ingestion-v1",
+                source_metadata={
+                    "content_item_id": content_item.id,
+                    "content_source_id": content_item.source_id,
+                    "source_name": content_item.source_name,
+                    "title": title,
+                    "url": item_data.get("url"),
+                    "author": item_data.get("author"),
+                },
+                captured_at=now,
+                observed_at=_coerce_utc_datetime(item_data.get("published_at")),
+                available_at=now,
+                evidence_channels=tuple(
+                    p for p in pipelines if p in {c.value for c in EvidenceChannel}
+                ),
+            )
+        )
+
     def fetch_source(self, source: ContentSource, lookback_days: int | None = None) -> int:
         """Fetch new content from a single source, returns count of new items.
 
@@ -377,6 +419,11 @@ class ContentIngestionService:
 
             for pipeline in source_pipelines:
                 grant_eligibility(self.db, (existing or content_item).id, pipeline, "legacy", source_id, datetime.now(timezone.utc))
+
+            # X posts are admitted by Social, whose extraction fingerprint this
+            # route can't reproduce (#471).
+            if source_type != "twitter":
+                self._admit_economic_evidence(existing or content_item, item_data, source_pipelines)
 
         # Commit all new items
         if new_count > 0:
