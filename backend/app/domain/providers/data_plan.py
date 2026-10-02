@@ -14,7 +14,7 @@ from app.domain.markets.market import SUPPORTED_MARKET_CODES
 
 DATASET_FUNDAMENTALS = "fundamentals"
 DATASET_PRICES = "prices"
-PLAN_VERSION = "2026.09.30.1"
+PLAN_VERSION = "2026.10.02.1"
 
 PROVIDER_AKSHARE = "akshare"
 PROVIDER_ALPHAVANTAGE = "alphavantage"
@@ -189,6 +189,16 @@ def _yf(batch_size: int = 50) -> ProviderPlanStep:
     return ProviderPlanStep(PROVIDER_YFINANCE, batch_size=batch_size)
 
 
+def _yf_quote_repaired(batch_size: int = 50) -> tuple[ProviderPlanStep, ...]:
+    """Yahoo history, then Yahoo quotes for the latest session history lacks.
+
+    Yahoo's daily history publishes a completed session hours late (JP, TW, SG,
+    MY, AU indices, DE, CA) or drops it from 00:00 UTC (US); the v7 quote keeps
+    reporting it. See services/yahoo_quote_price_repair.py.
+    """
+    return (_yf(batch_size=batch_size), ProviderPlanStep(PROVIDER_YAHOO_QUOTE, batch_size=100))
+
+
 provider_data_plan_registry = ProviderDataPlanRegistry(
     plans={
         ("US", DATASET_FUNDAMENTALS): (
@@ -215,12 +225,7 @@ provider_data_plan_registry = ProviderDataPlanRegistry(
         ("SG", DATASET_FUNDAMENTALS): (_yf(),),
         ("MY", DATASET_FUNDAMENTALS): (_yf(),),
         ("AU", DATASET_FUNDAMENTALS): (_yf(),),
-        # Yahoo's daily history drops the latest US session from 00:00 UTC until
-        # its EOD publish; quotes repair it (services/yahoo_quote_price_repair.py).
-        ("US", DATASET_PRICES): (
-            _yf(batch_size=150),
-            ProviderPlanStep(PROVIDER_YAHOO_QUOTE, batch_size=100),
-        ),
+        ("US", DATASET_PRICES): _yf_quote_repaired(batch_size=150),
         # Sina only repairs the latest session Yahoo is missing; see
         # services/hk_sina_price_repair.py.
         ("HK", DATASET_PRICES): (
@@ -228,27 +233,22 @@ provider_data_plan_registry = ProviderDataPlanRegistry(
             ProviderPlanStep(PROVIDER_SINA, batch_size=1),
         ),
         ("IN", DATASET_PRICES): (_yf(batch_size=50),),
-        # Yahoo quotes only repair the latest session Yahoo history is missing;
-        # see services/yahoo_quote_price_repair.py.
-        ("JP", DATASET_PRICES): (
-            _yf(batch_size=50),
-            ProviderPlanStep(PROVIDER_YAHOO_QUOTE, batch_size=100),
-        ),
+        ("JP", DATASET_PRICES): _yf_quote_repaired(),
         ("KR", DATASET_PRICES): (
             ProviderPlanStep(PROVIDER_KRX, batch_size=200, fallback=False),
             _yf(batch_size=50),
         ),
-        ("TW", DATASET_PRICES): (_yf(batch_size=50),),
+        ("TW", DATASET_PRICES): _yf_quote_repaired(),
         ("CN", DATASET_PRICES): (
             ProviderPlanStep(PROVIDER_AKSHARE, batch_size=500, fallback=False),
             ProviderPlanStep(PROVIDER_BAOSTOCK, batch_size=500),
             _yf(batch_size=25),
         ),
-        ("CA", DATASET_PRICES): (_yf(batch_size=50),),
-        ("DE", DATASET_PRICES): (_yf(batch_size=50),),
-        ("SG", DATASET_PRICES): (_yf(batch_size=50),),
-        ("MY", DATASET_PRICES): (_yf(batch_size=50),),
-        ("AU", DATASET_PRICES): (_yf(batch_size=50),),
+        ("CA", DATASET_PRICES): _yf_quote_repaired(),
+        ("DE", DATASET_PRICES): _yf_quote_repaired(),
+        ("SG", DATASET_PRICES): _yf_quote_repaired(),
+        ("MY", DATASET_PRICES): _yf_quote_repaired(),
+        ("AU", DATASET_PRICES): _yf_quote_repaired(),
     },
     overrides={
         ("CN", "XBSE", DATASET_FUNDAMENTALS): (
