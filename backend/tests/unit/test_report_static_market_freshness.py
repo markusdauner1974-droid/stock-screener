@@ -103,6 +103,24 @@ def test_newer_fallback_over_a_rewound_current_artifact_is_labelled_fallback(tmp
     assert rows[0].source == "fallback"
 
 
+def test_selected_market_without_status_is_a_fallback_not_previous_run(tmp_path):
+    # IN was built this run but its job died before uploading status.json.
+    rows = report.build_freshness_rows(
+        manifest={"markets": {"IN": {"as_of_date": "2026-09-03"}, "HK": {"as_of_date": "2026-10-01"}}},
+        markets=("IN", "HK"),
+        artifacts_dir=tmp_path,
+        price_manifest_dir=tmp_path,
+        calendar=_WeekdayCalendar(date(2026, 10, 1)),
+        max_sessions_behind=3,
+        selected_markets={"IN"},
+    )
+    by_market = {row.market: row for row in rows}
+
+    assert by_market["IN"].source == "fallback"
+    assert by_market["IN"].reason == "no status from this run's build"
+    assert by_market["HK"].source == "previous run"
+
+
 def test_one_session_behind_is_a_warning_not_an_error(tmp_path):
     rows = report.build_freshness_rows(
         manifest={"markets": {"JP": {"as_of_date": "2026-09-30"}}},

@@ -15,12 +15,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+from app.scripts.validate_static_market_artifacts import parse_selected_markets
 from app.services.daily_price_bundle_contract import latest_daily_price_manifest_name
 from app.services.market_calendar_service import MarketCalendarService
 from app.services.static_market_artifact_contract import STATIC_MARKET_METADATA_FILENAME
@@ -82,6 +83,7 @@ def build_freshness_rows(
     price_manifest_dir: Path,
     calendar,
     max_sessions_behind: int,
+    selected_markets: Collection[str] = (),
 ) -> list[MarketFreshness]:
     served = manifest.get("markets") or {}
     rows = []
@@ -97,7 +99,9 @@ def build_freshness_rows(
         behind = _sessions_behind(calendar, market, served_as_of, expected)
         bundle_behind = _sessions_behind(calendar, market, bundle_as_of, expected)
 
-        # Status/diagnostics exist only for markets built in this run.
+        # Status/diagnostics exist only for markets built in this run, and not
+        # even then if the build job died before uploading them.
+        built_this_run = market in selected_markets
         status = _read_json(artifacts_dir / f"static-market-status-{market}" / "status.json")
         diagnostics = _read_json(
             artifacts_dir / f"static-market-diagnostics-{market}" / "snapshot-failure.json"
@@ -105,7 +109,7 @@ def build_freshness_rows(
         if served_as_of is None:
             source = "not served"
         elif status is None:
-            source = "previous run"
+            source = "fallback" if built_this_run else "previous run"
         elif status.get("has_current_artifact") and served_as_of == _current_artifact_as_of(
             artifacts_dir, market
         ):
@@ -115,6 +119,8 @@ def build_freshness_rows(
             # over a current export that rewound to an older as-of date.
             source = "fallback"
         reason = diagnostics.get("reason") or (status or {}).get("reason")
+        if reason is None and status is None and built_this_run:
+            reason = "no status from this run's build"
 
         lag = max((n for n in (behind, bundle_behind) if n is not None), default=0)
         if served_as_of is None or lag > max_sessions_behind:
@@ -187,6 +193,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--artifacts-dir", type=Path, required=True)
     parser.add_argument("--price-manifest-dir", type=Path, required=True)
     parser.add_argument("--max-sessions-behind", type=int, default=DEFAULT_MAX_SESSIONS_BEHIND)
+    parser.add_argument("--selected-markets", default="[]", help="JSON list of markets built this run")
     args = parser.parse_args(argv)
 
     rows = build_freshness_rows(
@@ -196,6 +203,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         price_manifest_dir=args.price_manifest_dir,
         calendar=MarketCalendarService(),
         max_sessions_behind=args.max_sessions_behind,
+        selected_markets=parse_selected_markets(args.selected_markets),
     )
     summary = summary_markdown(rows)
     print(summary)

@@ -849,6 +849,7 @@ jobs:
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
+          SELECTED_MARKETS: ${{ needs.select-markets.outputs.markets }}
         run: |
           mkdir -p /tmp/daily-price-manifests
           gh release download daily-price-data \
@@ -860,7 +861,8 @@ jobs:
           python -m app.scripts.report_static_market_freshness \
             --manifest ../frontend/public/static-data/manifest.json \
             --artifacts-dir /tmp/static-market-artifacts-current \
-            --price-manifest-dir /tmp/daily-price-manifests
+            --price-manifest-dir /tmp/daily-price-manifests \
+            --selected-markets "${SELECTED_MARKETS}"
 
       - name: Build static frontend
         env:

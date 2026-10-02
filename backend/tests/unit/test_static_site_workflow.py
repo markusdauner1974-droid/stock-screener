@@ -460,6 +460,7 @@ def test_static_site_reports_market_freshness_without_blocking_deploy() -> None:
     assert "continue-on-error: true" in report
     assert "app.scripts.report_static_market_freshness" in report
     assert "--pattern 'daily-price-latest-*.json'" in report
+    assert '--selected-markets "${SELECTED_MARKETS}"' in report
 
 
 def test_static_site_validation_uses_python_module_not_inline_control_plane() -> None:
