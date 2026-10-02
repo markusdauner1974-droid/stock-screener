@@ -587,6 +587,10 @@ class Settings(BaseSettings):
     market_rs_min_current_price_coverage_my: float = 0.85
     market_rs_min_current_price_coverage_sg: float = 0.55
     market_rs_min_current_price_coverage_tw: float = 0.50
+    # ASX's listed-company CSV includes listings Yahoo never prices. The
+    # 2026-09-30 and 10-01 runs both landed at 1,837/2,195 (83.7%); with
+    # securitisation trusts excluded at the source (#481), about 87.5%.
+    market_rs_min_current_price_coverage_au: float = 0.85
     market_data_source_mode: str = "github_first"  # github_first | live_only
     github_data_repository: str = "xang1234/stock-screener"
     github_data_api_base: str = "https://api.github.com"
@@ -745,6 +749,7 @@ class Settings(BaseSettings):
         'market_rs_min_current_price_coverage_my',
         'market_rs_min_current_price_coverage_sg',
         'market_rs_min_current_price_coverage_tw',
+        'market_rs_min_current_price_coverage_au',
     )
     @classmethod
     def validate_market_rs_current_price_coverage(cls, v: float) -> float:

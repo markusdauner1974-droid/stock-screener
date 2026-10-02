@@ -11,6 +11,7 @@ import pandas as pd
 import pytest
 import requests
 
+import app.services.asx_official_universe_source as asx_source_module
 from app.services.asx_official_universe_source import ASXOfficialUniverseSource
 from app.services.official_market_universe_source_service import (
     OfficialMarketUniverseSourceService,
@@ -2544,6 +2545,7 @@ def test_fetch_au_snapshot_parses_asx_live_csv(monkeypatch):
     assert snapshot.source_metadata["filters"] == {
         "source": "ASX listed companies public CSV",
         "symbol_regex": r"^[A-Z0-9]{2,6}$",
+        "excluded_name_regex": asx_source_module._AU_SECURITISATION_NAME_RE.pattern,
     }
     assert snapshot.snapshot_id.startswith("asx-listed-companies-")
     symbols = [row["symbol"] for row in snapshot.rows]
@@ -2588,6 +2590,7 @@ def test_fetch_au_snapshot_falls_back_on_http_error(monkeypatch, tmp_path):
     assert snapshot.source_metadata["filters"] == {
         "source": "ASX listed companies public CSV",
         "symbol_regex": r"^[A-Z0-9]{2,6}$",
+        "excluded_name_regex": asx_source_module._AU_SECURITISATION_NAME_RE.pattern,
     }
     assert {row["symbol"] for row in snapshot.rows} == {"BHP.AX", "A001.AX"}
     assert snapshot.snapshot_id.startswith("au-csv-fallback-")
@@ -2637,6 +2640,22 @@ def test_parse_au_asx_csv_raises_on_missing_header():
         ASXOfficialUniverseSource.parse_asx_csv(
             b"Company,Code,Industry\nBHP,BHP,Materials\n"
         )
+
+
+def test_parse_au_asx_csv_excludes_securitisation_trusts_but_keeps_equity_trusts():
+    """#481: RMBS/ABS trusts are debt Yahoo never prices."""
+    rows = ASXOfficialUniverseSource.parse_asx_csv(
+        b"Company name,ASX code,GICS industry group\n"
+        b"BHP GROUP LIMITED,BHP,Materials\n"
+        b"PUMA SERIES 2023-1 TRUST,PUT,Not Applic\n"
+        b"ALLIED CREDIT ABS TRUST 2025-1P,AC2,Not Applic\n"
+        b"MA MONEY RESIDENTIAL SECURITISATION TRUST 2025-1,ML2,Not Applic\n"
+        b"FIRSTMAC MORTGAGE FUNDING TRUST NO.4 SERIES 4-2019,FM4,Not Applic\n"
+        b"CARINDALE PROPERTY TRUST,CDP,Equity Real Estate Investment Trusts (REITs)\n"
+        b"DOMINION INCOME TRUST 1,DN1,Not Applic\n"
+    )
+
+    assert [row["symbol"] for row in rows] == ["BHP.AX", "CDP.AX", "DN1.AX"]
 
 
 def test_bundled_au_fallback_covers_broad_asx_universe():

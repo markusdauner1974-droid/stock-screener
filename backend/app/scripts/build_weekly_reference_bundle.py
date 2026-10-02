@@ -13,6 +13,7 @@ from typing import Any
 
 from app.database import SessionLocal
 from app.domain.providers.price_symbol_support import is_bse_scrip_code_yahoo_symbol
+from app.services.asx_official_universe_source import is_au_securitisation_listing
 from app.models.provider_snapshot import ProviderSnapshotRow
 from app.models.stock_universe import StockUniverse
 from app.scripts._runtime import prepare_runtime, repo_root
@@ -537,17 +538,22 @@ def _run_chunked_fundamentals_refresh(
     return stats, attempted_symbols, deadline_hit
 
 
-def _without_bse_scrip_codes(market: str, rows: list[Any]) -> list[Any]:
-    """#480: IN is NSE-only; drop BSE scrip codes seeded from prior bundles.
+def _without_excluded_listings(market: str, rows: list[Any]) -> list[Any]:
+    """Drop listings the official source now excludes but prior bundles seeded.
 
-    Yahoo no longer prices them, and ingestion does not deactivate rows that
-    are missing from a snapshot.
+    Ingestion does not deactivate rows missing from a snapshot, so without
+    this they would reach the bundle: IN BSE scrip codes (#480, IN is
+    NSE-only) and AU securitisation trusts (#481, debt Yahoo never prices).
     """
-    if market != "IN":
+    if market == "IN":
+        excluded = lambda row: is_bse_scrip_code_yahoo_symbol(row.symbol)  # noqa: E731
+    elif market == "AU":
+        excluded = lambda row: is_au_securitisation_listing(row.name)  # noqa: E731
+    else:
         return rows
-    kept = [row for row in rows if not is_bse_scrip_code_yahoo_symbol(row.symbol)]
+    kept = [row for row in rows if not excluded(row)]
     if len(kept) != len(rows):
-        print(f"[universe] IN dropping {len(rows) - len(kept)} BSE scrip-code rows", flush=True)
+        print(f"[universe] {market} dropping {len(rows) - len(kept)} excluded listings", flush=True)
     return kept
 
 
@@ -633,7 +639,7 @@ def _build_asia_bundle(
         .order_by(StockUniverse.symbol.asc())
         .all()
     )
-    active_rows = _without_bse_scrip_codes(market, active_rows)
+    active_rows = _without_excluded_listings(market, active_rows)
     if not active_rows:
         raise RuntimeError(f"No active {market} universe rows found after official-source ingest")
 
