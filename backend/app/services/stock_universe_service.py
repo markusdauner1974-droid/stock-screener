@@ -38,6 +38,7 @@ from ..schemas.universe import IndexName
 from ..config import settings
 from ..domain.markets.catalog import get_market_catalog
 from ..domain.markets.mic_aliases import mic_alias_registry
+from ..domain.providers.price_symbol_support import is_unsupported_yahoo_price_symbol
 from ..domain.universe.ingestion import (
     CanonicalUniverseIngestionResult,
     CanonicalUniverseRow,
@@ -340,11 +341,21 @@ class StockUniverseService:
         if not bse_rows:
             return normalized_rows, []
 
+        # Symbols Yahoo is never asked to price (e.g. BSE scrip codes, #480) are
+        # rejected up front: verifying them would fail every time and read as
+        # a provider-wide outage.
+        unsupported_symbols = {
+            row.symbol for row in bse_rows if is_unsupported_yahoo_price_symbol(row.symbol)
+        }
         blocked_symbols = self._india_bse_symbols_with_unresolved_yfinance_failures(
             db,
-            symbols=(row.symbol for row in bse_rows),
+            symbols=(row.symbol for row in bse_rows if row.symbol not in unsupported_symbols),
         )
-        symbols_to_verify = [row.symbol for row in bse_rows if row.symbol not in blocked_symbols]
+        symbols_to_verify = [
+            row.symbol
+            for row in bse_rows
+            if row.symbol not in blocked_symbols and row.symbol not in unsupported_symbols
+        ]
         verification_results: dict[str, dict[str, Any]] = {}
         if symbols_to_verify:
             verification_results = self._get_bulk_fetcher().fetch_prices_in_batches(
@@ -370,6 +381,16 @@ class StockUniverseService:
         for row in normalized_rows:
             if not self._is_india_bse_exchange(row.exchange):
                 accepted_rows.append(row)
+                continue
+            if row.symbol in unsupported_symbols:
+                rejected_rows.append(
+                    SimpleNamespace(
+                        source_row_number=row.source_row_number,
+                        source_symbol=row.source_symbol,
+                        symbol=row.symbol,
+                        reason="unsupported_yahoo_price_symbol",
+                    )
+                )
                 continue
             if row.symbol in blocked_symbols:
                 rejected_rows.append(

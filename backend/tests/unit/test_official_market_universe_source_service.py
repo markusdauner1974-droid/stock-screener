@@ -212,6 +212,46 @@ def test_fetch_in_snapshot_prefers_nse_for_overlapping_isin(monkeypatch):
     assert snapshot.source_metadata["nse_count"] == 2
     assert snapshot.source_metadata["bse_count"] == 2
     assert snapshot.source_metadata["overlap_isin_count"] == 1
+    assert snapshot.source_metadata["bse_unavailable"] is None
+
+
+def test_fetch_in_snapshot_falls_back_to_nse_when_bse_source_is_refused(monkeypatch):
+    """#480: BSE's scrip API returns HTTP 403; IN is built from NSE alone."""
+    service = OfficialMarketUniverseSourceService()
+    nse_row = {
+        "symbol": "RELIANCE.NS",
+        "name": "Reliance Industries Limited",
+        "exchange": "XNSE",
+        "sector": "",
+        "industry": "",
+        "market_cap": None,
+        "isin": "INE002A01018",
+    }
+    monkeypatch.setattr(
+        service,
+        "fetch_nse_snapshot",
+        lambda: OfficialMarketUniverseSnapshot(
+            market="IN",
+            source_name="nse_official",
+            snapshot_id="nse-equity-2026-10-02",
+            snapshot_as_of="2026-10-02",
+            source_metadata={},
+            rows=(nse_row,),
+        ),
+    )
+
+    def refused():
+        raise requests.exceptions.HTTPError("403 Client Error: Forbidden")
+
+    monkeypatch.setattr(service, "fetch_bse_snapshot", refused)
+
+    snapshot = service.fetch_in_snapshot()
+
+    assert [row["symbol"] for row in snapshot.rows] == ["RELIANCE.NS"]
+    assert snapshot.snapshot_as_of == "2026-10-02"
+    assert snapshot.source_metadata["bse_count"] == 0
+    assert snapshot.source_metadata["bse_snapshot_id"] is None
+    assert snapshot.source_metadata["bse_unavailable"] == "HTTPError: 403 Client Error: Forbidden"
 
 
 def test_fetch_kr_snapshot_uses_krx_provider_and_records_live_baseline_metadata(monkeypatch):

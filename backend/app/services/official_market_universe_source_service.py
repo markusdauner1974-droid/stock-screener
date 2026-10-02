@@ -690,7 +690,17 @@ class OfficialMarketUniverseSourceService:
 
     def fetch_in_snapshot(self) -> OfficialMarketUniverseSnapshot:
         nse_snapshot = self.fetch_nse_snapshot()
-        bse_snapshot = self.fetch_bse_snapshot()
+        bse_snapshot: OfficialMarketUniverseSnapshot | None = None
+        bse_unavailable: str | None = None
+        try:
+            bse_snapshot = self.fetch_bse_snapshot()
+        except (requests.exceptions.RequestException, ValueError) as exc:
+            # BSE's scrip API refuses requests (HTTP 403), and Yahoo no longer
+            # prices BSE scrip codes (#480): build IN from NSE alone rather
+            # than failing the weekly reference bundle.
+            bse_unavailable = f"{type(exc).__name__}: {exc}"[:300]
+            logger.warning("BSE universe source unavailable; building IN from NSE only: %s", bse_unavailable)
+        bse_rows = bse_snapshot.rows if bse_snapshot is not None else ()
 
         nse_by_isin = {
             str(row.get("isin") or "").strip().upper(): row
@@ -699,7 +709,7 @@ class OfficialMarketUniverseSourceService:
         }
         bse_by_isin = {
             str(row.get("isin") or "").strip().upper(): row
-            for row in bse_snapshot.rows
+            for row in bse_rows
             if str(row.get("isin") or "").strip()
         }
 
@@ -710,7 +720,10 @@ class OfficialMarketUniverseSourceService:
                 continue
             combined_rows.append(row)
 
-        snapshot_as_of = max(nse_snapshot.snapshot_as_of, bse_snapshot.snapshot_as_of)
+        snapshot_as_of = max(
+            nse_snapshot.snapshot_as_of,
+            bse_snapshot.snapshot_as_of if bse_snapshot is not None else "",
+        )
         return OfficialMarketUniverseSnapshot(
             market="IN",
             source_name=_IN_SOURCE_NAME,
@@ -722,9 +735,10 @@ class OfficialMarketUniverseSourceService:
                     settings.bse_universe_source_url,
                 ],
                 "nse_snapshot_id": nse_snapshot.snapshot_id,
-                "bse_snapshot_id": bse_snapshot.snapshot_id,
+                "bse_snapshot_id": bse_snapshot.snapshot_id if bse_snapshot is not None else None,
                 "nse_count": len(nse_snapshot.rows),
-                "bse_count": len(bse_snapshot.rows),
+                "bse_count": len(bse_rows),
+                "bse_unavailable": bse_unavailable,
                 "overlap_isin_count": len(overlap_isins),
                 "combined_count": len(combined_rows),
             },
