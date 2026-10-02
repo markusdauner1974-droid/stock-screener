@@ -1426,6 +1426,14 @@ def test_build_asia_bundle_falls_back_to_seeded_universe_when_official_fetch_fai
     assert "falling back to 2 seeded prior-week rows" in stdout
 
 
+def test_in_bundle_drops_seeded_bse_scrip_codes_only_for_in():
+    """#480: IN is NSE-only; scrip codes seeded from prior bundles are dropped."""
+    rows = [_make_universe_row(symbol) for symbol in ("RELIANCE.NS", "500325.BO", "TANFAC.BO")]
+
+    assert [r.symbol for r in build_script._without_bse_scrip_codes("IN", rows)] == ["RELIANCE.NS", "TANFAC.BO"]
+    assert build_script._without_bse_scrip_codes("JP", rows) == rows
+
+
 def test_build_asia_bundle_reraises_when_no_seeded_universe_rows(monkeypatch, tmp_path):
     """If AKShare fails AND no prior-week rows are seeded, surface the original error."""
     fake_db = _make_cn_db_mock([], seeded_count=0)
