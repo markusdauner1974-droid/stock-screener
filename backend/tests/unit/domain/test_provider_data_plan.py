@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.domain.providers.data_plan import (
     DATASET_FUNDAMENTALS,
     DATASET_PRICES,
@@ -46,14 +48,23 @@ def test_default_fundamentals_plan_records_provenance_metadata() -> None:
     }
 
 
-def test_au_provider_plan_uses_yfinance_only() -> None:
+def test_au_provider_plan_uses_yfinance_with_quote_repair_for_prices() -> None:
     fundamentals = provider_data_plan_registry.plan_for("AU", DATASET_FUNDAMENTALS)
     prices = provider_data_plan_registry.plan_for("AU", DATASET_PRICES)
 
     assert fundamentals.providers == (PROVIDER_YFINANCE,)
     assert fundamentals.step_for(PROVIDER_YFINANCE).batch_size == 50
-    assert prices.providers == (PROVIDER_YFINANCE,)
+    assert prices.providers == (PROVIDER_YFINANCE, PROVIDER_YAHOO_QUOTE)
     assert prices.step_for(PROVIDER_YFINANCE).batch_size == 50
+
+
+@pytest.mark.parametrize("market", ["US", "JP", "TW", "SG", "MY", "AU", "DE", "CA"])
+def test_yahoo_history_markets_repair_the_latest_session_from_quotes(market) -> None:
+    """#479: Yahoo history publishes these markets' latest session late; quotes repair it."""
+    prices = provider_data_plan_registry.plan_for(market, DATASET_PRICES)
+
+    assert prices.providers == (PROVIDER_YFINANCE, PROVIDER_YAHOO_QUOTE)
+    assert prices.step_for(PROVIDER_YAHOO_QUOTE).batch_size == 100
 
 
 def test_registry_applies_market_mic_dataset_override() -> None:
