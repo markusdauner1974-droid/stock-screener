@@ -23,6 +23,7 @@ from typing import Any
 
 from app.services.daily_price_bundle_contract import latest_daily_price_manifest_name
 from app.services.market_calendar_service import MarketCalendarService
+from app.services.static_market_artifact_contract import STATIC_MARKET_METADATA_FILENAME
 from app.services.static_site_export_service import STATIC_SUPPORTED_MARKETS
 
 DEFAULT_MAX_SESSIONS_BEHIND = 3
@@ -54,6 +55,15 @@ def _as_date(value: Any) -> date | None:
         return date.fromisoformat(str(value)[:10]) if value else None
     except ValueError:
         return None
+
+
+def _current_artifact_as_of(artifacts_dir: Path, market: str) -> date | None:
+    metadata_path = next(
+        (artifacts_dir / f"static-market-{market}").rglob(STATIC_MARKET_METADATA_FILENAME),
+        None,
+    )
+    entry = (_read_json(metadata_path) or {}).get("entry") if metadata_path else None
+    return _as_date(entry.get("as_of_date")) if isinstance(entry, dict) else None
 
 
 def _sessions_behind(calendar, market: str, as_of: date | None, expected: date | None) -> int | None:
@@ -94,8 +104,14 @@ def build_freshness_rows(
         ) or {}
         if status is None:
             source = "previous run"
+        elif status.get("has_current_artifact") and served_as_of == _current_artifact_as_of(
+            artifacts_dir, market
+        ):
+            source = "current"
         else:
-            source = "current" if status.get("has_current_artifact") else "fallback"
+            # No current artifact, or the combiner preferred a newer fallback
+            # over a current export that rewound to an older as-of date.
+            source = "fallback"
         reason = diagnostics.get("reason") or (status or {}).get("reason")
 
         lag = max((n for n in (behind, bundle_behind) if n is not None), default=0)

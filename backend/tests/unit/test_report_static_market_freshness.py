@@ -40,6 +40,8 @@ def test_freshness_rows_rank_current_stale_and_missing_markets(tmp_path):
     artifacts = tmp_path / "artifacts"
     _write_json(artifacts / "static-market-status-US" / "status.json",
                 {"market": "US", "has_current_artifact": True, "status": "published", "reason": None})
+    _write_json(artifacts / "static-market-US" / "manifest.market.json",
+                {"market": "US", "entry": {"as_of_date": "2026-10-01"}})
     _write_json(artifacts / "static-market-status-AU" / "status.json",
                 {"market": "AU", "has_current_artifact": False, "status": "failed", "reason": "no_current_artifact"})
     _write_json(artifacts / "static-market-diagnostics-AU" / "snapshot-failure.json",
@@ -77,6 +79,27 @@ def test_freshness_rows_rank_current_stale_and_missing_markets(tmp_path):
     # TW had no current or fallback artifact, so the site omits it.
     assert by_market["TW"].served_as_of is None
     assert by_market["TW"].level == "error"
+
+
+def test_newer_fallback_over_a_rewound_current_artifact_is_labelled_fallback(tmp_path):
+    # The TW export succeeded but rewound to 09-29; the combiner served the
+    # newer 09-30 fallback instead.
+    artifacts = tmp_path / "artifacts"
+    _write_json(artifacts / "static-market-status-TW" / "status.json",
+                {"market": "TW", "has_current_artifact": True, "status": "published"})
+    _write_json(artifacts / "static-market-TW" / "manifest.market.json",
+                {"market": "TW", "entry": {"as_of_date": "2026-09-29"}})
+
+    rows = report.build_freshness_rows(
+        manifest={"markets": {"TW": {"as_of_date": "2026-09-30"}}},
+        markets=("TW",),
+        artifacts_dir=artifacts,
+        price_manifest_dir=tmp_path,
+        calendar=_WeekdayCalendar(date(2026, 9, 30)),
+        max_sessions_behind=3,
+    )
+
+    assert rows[0].source == "fallback"
 
 
 def test_one_session_behind_is_a_warning_not_an_error(tmp_path):
