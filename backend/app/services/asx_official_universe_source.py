@@ -24,6 +24,21 @@ logger = logging.getLogger(__name__)
 _AU_SOURCE_NAME = "asx_official_public_csv"
 _AU_FALLBACK_SOURCE_NAME = "au_manual_csv"
 _AU_LIVE_TICKER_RE = re.compile(r"^[A-Z0-9]{2,6}$")
+# ASX's listed-company CSV also lists securitisation (RMBS/ABS) trusts, e.g.
+# "PUMA SERIES 2024-1 TRUST". They are debt, not equity, and Yahoo prices none
+# of them: on 2026-10-01 this matched 96 AU listings, all without Yahoo data,
+# and no priced listing (#481). ponytail: name heuristic; a few note trusts
+# with other naming (e.g. "PEPPER SPARKZ TRUST NO.6") still get through.
+_AU_SECURITISATION_NAME_RE = re.compile(
+    r"\b(?:ABS|RMBS|CMBS|SECURITISATION|MORTGAGE FUNDING)\b"
+    r"|\b(?:19|20)\d\d-\d"
+    r"|\bSERIES\s+\d+-(?:19|20)\d\d\b",
+    re.IGNORECASE,
+)
+
+
+def is_au_securitisation_listing(name: str | None) -> bool:
+    return bool(_AU_SECURITISATION_NAME_RE.search(name or ""))
 
 
 class ASXOfficialUniverseSource:
@@ -123,6 +138,7 @@ class ASXOfficialUniverseSource:
             "filters": {
                 "source": "ASX listed companies public CSV",
                 "symbol_regex": _AU_LIVE_TICKER_RE.pattern,
+                "excluded_name_regex": _AU_SECURITISATION_NAME_RE.pattern,
             },
             "row_counts": {
                 "xasx": len(rows),
@@ -193,6 +209,8 @@ class ASXOfficialUniverseSource:
             if not name or not local_code:
                 continue
             if not _AU_LIVE_TICKER_RE.fullmatch(local_code):
+                continue
+            if is_au_securitisation_listing(name):
                 continue
             if local_code in seen_codes:
                 continue

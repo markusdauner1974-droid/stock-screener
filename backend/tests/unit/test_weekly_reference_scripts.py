@@ -813,7 +813,17 @@ def test_build_weekly_reference_bundle_runs_au_official_path(monkeypatch, tmp_pa
             sector="Basic Materials",
             industry="Other Industrial Metals & Mining",
             market_cap=220.0,
-        )
+        ),
+        # Seeded from a prior bundle; the ASX source no longer emits it (#481).
+        SimpleNamespace(
+            symbol="PUT.AX",
+            market="AU",
+            exchange="XASX",
+            name="PUMA SERIES 2023-1 TRUST",
+            sector=None,
+            industry=None,
+            market_cap=None,
+        ),
     ]
     fake_query = MagicMock()
     fake_query.filter.return_value.order_by.return_value.all.return_value = active_rows
@@ -937,6 +947,8 @@ def test_build_weekly_reference_bundle_runs_au_official_path(monkeypatch, tmp_pa
     )
     assert export_calls[0]["latest_manifest_path"] == tmp_path / "weekly-reference-latest-au.json"
     assert export_calls[0]["market"] == "AU"
+    # The export re-queries active rows, so dropped listings must be passed on.
+    assert export_calls[0]["excluded_symbols"] == {"PUT.AX"}
     stdout = capsys.readouterr().out
     assert "Starting official universe refresh for AU..." in stdout
     assert "Weekly reference bundle complete for AU:" in stdout
@@ -1430,8 +1442,20 @@ def test_in_bundle_drops_seeded_bse_scrip_codes_only_for_in():
     """#480: IN is NSE-only; scrip codes seeded from prior bundles are dropped."""
     rows = [_make_universe_row(symbol) for symbol in ("RELIANCE.NS", "500325.BO", "TANFAC.BO")]
 
-    assert [r.symbol for r in build_script._without_bse_scrip_codes("IN", rows)] == ["RELIANCE.NS", "TANFAC.BO"]
-    assert build_script._without_bse_scrip_codes("JP", rows) == rows
+    assert [r.symbol for r in build_script._without_excluded_listings("IN", rows)] == ["RELIANCE.NS", "TANFAC.BO"]
+    assert build_script._without_excluded_listings("JP", rows) == rows
+
+
+def test_au_bundle_drops_seeded_securitisation_trusts():
+    """#481: securitisation trusts are debt Yahoo never prices; equity trusts stay."""
+    rows = [
+        SimpleNamespace(symbol="PUT.AX", name="PUMA SERIES 2023-1 TRUST"),
+        SimpleNamespace(symbol="HC1.AX", name="HOUSEHOLD CAPITAL 2025-1 RMBS TRUST"),
+        SimpleNamespace(symbol="CDP.AX", name="CARINDALE PROPERTY TRUST"),
+        SimpleNamespace(symbol="BHP.AX", name="BHP GROUP LIMITED"),
+    ]
+
+    assert [r.symbol for r in build_script._without_excluded_listings("AU", rows)] == ["CDP.AX", "BHP.AX"]
 
 
 def test_build_asia_bundle_reraises_when_no_seeded_universe_rows(monkeypatch, tmp_path):
