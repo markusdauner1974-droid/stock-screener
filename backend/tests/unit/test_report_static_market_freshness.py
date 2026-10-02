@@ -78,6 +78,7 @@ def test_freshness_rows_rank_current_stale_and_missing_markets(tmp_path):
 
     # TW had no current or fallback artifact, so the site omits it.
     assert by_market["TW"].served_as_of is None
+    assert by_market["TW"].source == "not served"
     assert by_market["TW"].level == "error"
 
 

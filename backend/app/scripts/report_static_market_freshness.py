@@ -102,7 +102,9 @@ def build_freshness_rows(
         diagnostics = _read_json(
             artifacts_dir / f"static-market-diagnostics-{market}" / "snapshot-failure.json"
         ) or {}
-        if status is None:
+        if served_as_of is None:
+            source = "not served"
+        elif status is None:
             source = "previous run"
         elif status.get("has_current_artifact") and served_as_of == _current_artifact_as_of(
             artifacts_dir, market
