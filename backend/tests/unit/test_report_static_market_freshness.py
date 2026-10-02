@@ -116,6 +116,18 @@ def test_one_session_behind_is_a_warning_not_an_error(tmp_path):
     assert "JP is 1 session(s) behind" in report.annotation(rows[0])
 
 
+def test_annotation_escapes_workflow_command_characters():
+    row = report.MarketFreshness(
+        market="AU", served_as_of=date(2026, 9, 3), expected_session=date(2026, 10, 1),
+        sessions_behind=20, price_bundle_as_of=None, bundle_sessions_behind=None,
+        source="fallback", reason="85% floor\n::error::injected", level="error",
+    )
+
+    line = report.annotation(row)
+    assert "\n" not in line
+    assert "85%25 floor%0A::error::injected" in line
+
+
 def test_main_writes_summary_table_and_annotations(tmp_path, monkeypatch, capsys):
     manifest_path = tmp_path / "manifest.json"
     _write_json(manifest_path, {"markets": {"US": {"as_of_date": "2026-10-01"}}})

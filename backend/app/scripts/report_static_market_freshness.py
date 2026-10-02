@@ -138,7 +138,7 @@ def build_freshness_rows(
 
 
 def _cell(value: Any) -> str:
-    return "—" if value is None else str(value)
+    return "—" if value is None else str(value).replace("|", "\\|").replace("\n", " ")
 
 
 def summary_markdown(rows: Sequence[MarketFreshness]) -> str:
@@ -172,7 +172,9 @@ def annotation(row: MarketFreshness) -> str:
         message += f"; price bundle {row.bundle_sessions_behind} session(s) behind ({row.price_bundle_as_of})"
     if row.reason:
         message += f"; reason: {row.reason}"
-    return f"::{row.level} title=Static site freshness::{message}"
+    # Workflow-command escaping: artifact text must not split or inject commands.
+    escaped = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    return f"::{row.level} title=Static site freshness::{escaped}"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
