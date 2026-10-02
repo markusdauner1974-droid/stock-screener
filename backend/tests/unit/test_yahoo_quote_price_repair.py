@@ -114,6 +114,10 @@ def test_fills_interior_hole_before_next_intraday_bar():
         _quote("7203.T", close=3010.0, state="REGULAR"),
         # Close above the high: never persist an impossible bar.
         _quote("7203.T", close=3010.0) | {"regularMarketDayHigh": 0, "regularMarketDayLow": 0},
+        # Open far outside the day range (CMCM on 2026-10-01, 7.7%): unreliable.
+        _quote("7203.T", close=100.0)
+        | {"regularMarketOpen": 108.0, "regularMarketDayHigh": 100.3, "regularMarketDayLow": 99.0},
+        _quote("7203.T", close=float("nan")),
     ],
 )
 def test_skips_quotes_that_do_not_describe_the_completed_session(quote):
@@ -123,6 +127,30 @@ def test_skips_quotes_that_do_not_describe_the_completed_session(quote):
 
     assert stats["failed"] == 1
     assert "repaired_by" not in results["7203.T"]
+
+
+@pytest.mark.parametrize(
+    ("open_", "high", "low", "close", "expected_high", "expected_low"),
+    [
+        # CP on 2026-10-01: open one cent above the quoted high.
+        (85.0, 84.99, 83.59, 84.47, 85.0, 83.59),
+        # QQQD on 2026-10-01: open below the quoted low.
+        (11.75, 11.865, 11.81, 11.855, 11.865, 11.75),
+    ],
+)
+def test_open_just_outside_the_quoted_range_widens_it(open_, high, low, close, expected_high, expected_low):
+    results = {"7203.T": _ok(_yahoo([("2026-09-28", 1, 1, 1, 1, 1, 1, 0.0)]))}
+    quote = _quote("7203.T", close=close) | {
+        "regularMarketOpen": open_,
+        "regularMarketDayHigh": high,
+        "regularMarketDayLow": low,
+    }
+
+    stats = _repair(results, [quote])
+
+    bar = results["7203.T"]["price_data"].loc["2026-09-29"]
+    assert stats["repaired"] == 1
+    assert (bar["Open"], bar["High"], bar["Low"], bar["Close"]) == (open_, expected_high, expected_low, close)
 
 
 def test_index_quote_with_zero_volume_is_repaired():

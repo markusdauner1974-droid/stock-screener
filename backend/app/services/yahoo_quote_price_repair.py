@@ -12,6 +12,7 @@ one session and nothing older.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections.abc import Callable, Iterable, Mapping
 from datetime import date, datetime, timezone
@@ -43,6 +44,11 @@ _QUOTE_FIELDS = (
 )
 # The quote describes a session still in progress; never treat it as a close.
 _LIVE_MARKET_STATES = {"REGULAR", "PRE"}
+# The quote's open often sits just outside its own day range (110 of 1,500 US
+# quotes on 2026-10-01, 107 of them within 2%; the close only twice). Within
+# this tolerance the range is widened to enclose open and close; further out
+# the quote is rejected as unreliable.
+QUOTE_RANGE_TOLERANCE = 0.02
 
 QuoteFetcher = Callable[[list[str]], list[dict[str, Any]]]
 
@@ -82,10 +88,20 @@ def quote_session_bar(
         }
     except (KeyError, TypeError, ValueError):
         return None
-    # Also rejects NaN (every comparison is False). Zero volume stays valid: indices report 0.
-    body_low, body_high = sorted((row["Open"], row["Close"]))
-    if not (0 < row["Low"] <= body_low and body_high <= row["High"]):
+    # Zero volume stays valid: indices report 0.
+    if not all(math.isfinite(row[k]) for k in ("Open", "High", "Low", "Close")):
         return None
+    body_low, body_high = sorted((row["Open"], row["Close"]))
+    if not (
+        0 < row["Low"] <= row["High"]
+        and body_low >= row["Low"] * (1 - QUOTE_RANGE_TOLERANCE)
+        and body_high <= row["High"] * (1 + QUOTE_RANGE_TOLERANCE)
+    ):
+        return None
+    # ponytail: the widened High/Low is approximate; the next refetch replaces
+    # the quote bar with Yahoo's history bar.
+    row["Low"] = min(row["Low"], body_low)
+    row["High"] = max(row["High"], body_high)
     return pd.DataFrame([row], index=pd.DatetimeIndex([pd.Timestamp(expected_session)], name="Date"))
 
 
