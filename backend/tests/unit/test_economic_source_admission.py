@@ -93,6 +93,20 @@ def test_capture_matching_only_a_held_packet_still_reaches_precedence(db_session
     assert captured.precedence_state == "effective"
 
 
+def test_recapture_reuses_the_effective_packet_not_a_held_archive(db_session):
+    admission = EconomicSourceAdmissionService(db_session)
+    unordered = {"provider_revision_id": None, "provider_revision_order": None}
+    admission.admit_content(_post(route="archive", **unordered))
+    captured = admission.admit_content(_post(**unordered))
+
+    recapture = admission.admit_content(
+        _post(captured_at=NOW + timedelta(hours=1), **unordered)
+    )
+
+    assert recapture.packet_id == captured.packet_id
+    assert recapture.precedence_state == "effective"
+
+
 def test_ordered_reversion_to_earlier_text_is_admitted_not_collapsed(db_session):
     admission = EconomicSourceAdmissionService(db_session)
     first = admission.admit_content(_post(provider_revision_order=1))

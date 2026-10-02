@@ -173,7 +173,9 @@ class EconomicSourceAdmissionService:
         # Only revisionless recaptures reuse by fingerprint: an ordered or
         # explicitly linked capture (e.g. a reversion A -> B -> A) must reach
         # the precedence policy, and so must any capture while the lineage has
-        # no effective packet (e.g. only a held late archive).
+        # no effective packet (e.g. only a held late archive). Reuse is limited
+        # to the same capture route and record, so another route or source
+        # records its own (equivalent) packet and keeps its provenance.
         if (
             existing is None
             and reuse_admitted_content
@@ -183,15 +185,26 @@ class EconomicSourceAdmissionService:
             and evidence.equivalent_packet_id is None
             and self.effective_packet(lineage.id) is not None
         ):
-            existing = self.session.execute(
-                select(EvidencePacket)
-                .where(
-                    EvidencePacket.source_lineage_id == lineage.id,
-                    EvidencePacket.evidence_content_fingerprint == fingerprint,
-                )
-                .order_by(EvidencePacket.evidence_revision_ordinal)
-                .limit(1)
-            ).scalar_one_or_none()
+            same_capture = [
+                packet
+                for packet in self.session.execute(
+                    select(EvidencePacket)
+                    .where(
+                        EvidencePacket.source_lineage_id == lineage.id,
+                        EvidencePacket.evidence_content_fingerprint == fingerprint,
+                        EvidencePacket.capture_route == evidence.capture_route,
+                    )
+                    .order_by(EvidencePacket.evidence_revision_ordinal)
+                ).scalars()
+                if (packet.source_metadata or {}).get("route_record_id")
+                == evidence.route_record_id
+            ]
+            # Prefer a packet that is in force over a held one.
+            existing = min(
+                same_capture,
+                key=lambda packet: packet.precedence_state == "hold_review",
+                default=None,
+            )
         if existing is not None:
             effective = self.effective_packet(lineage.id)
             if effective is not None and (

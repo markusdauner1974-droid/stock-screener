@@ -307,8 +307,9 @@ class ContentIngestionService:
         item_data: dict,
         pipelines: list[str],
         *,
-        source_id: int,
-        source_name: str,
+        source_id: int | None,
+        source_name: str | None,
+        captured_at: datetime | None = None,
     ) -> None:
         """Admit the fetched text as economic taxonomy evidence.
 
@@ -318,7 +319,7 @@ class ContentIngestionService:
         Admission shares the ingest transaction, so a failure rolls back the
         batch and the next poll retries it.
         """
-        now = datetime.now(timezone.utc)
+        now = captured_at or datetime.now(timezone.utc)
         title = item_data.get("title") or ""
         content = item_data.get("content") or ""
         # Some fetchers (Reddit) already lead the content with the title.
@@ -331,7 +332,9 @@ class ContentIngestionService:
                 provider=content_item.source_type,
                 canonical_item_id=content_item.external_id,
                 capture_route="content_ingestion",
-                route_record_id=str(content_item.id),
+                # One record per (item, source) observation: a mirror feed
+                # gets its own packet instead of reusing the first feed's.
+                route_record_id=f"{content_item.id}:{source_id}",
                 original_text=text,
                 preparation_version="content-ingestion-v1",
                 source_metadata={
@@ -351,6 +354,47 @@ class ContentIngestionService:
                 ),
             )
         )
+
+    def backfill_economic_evidence(self, *, batch_size: int = 500, after_id: int = 0) -> dict:
+        """Admit non-X items ingested before content admission existed (#471).
+
+        Re-running is safe: an already admitted item reuses its packet. Each
+        packet is dated by the item's original fetch, so the evidence is not
+        made available earlier than it was. Commits per batch; pass the last
+        reported id as ``after_id`` to resume.
+        """
+        admitted = 0
+        last_id = after_id
+        while True:
+            items = (
+                self.db.query(ContentItem)
+                .filter(ContentItem.id > last_id, ContentItem.source_type != "twitter")
+                .order_by(ContentItem.id)
+                .limit(batch_size)
+                .all()
+            )
+            if not items:
+                return {"admitted": admitted, "last_id": last_id}
+            for item in items:
+                source = self.db.get(ContentSource, item.source_id) if item.source_id else None
+                self._admit_economic_evidence(
+                    item,
+                    {
+                        "title": item.title,
+                        "content": item.content,
+                        "url": item.url,
+                        "author": item.author,
+                        "published_at": item.published_at,
+                    },
+                    normalize_pipelines(source.pipelines if source else None),
+                    source_id=item.source_id,
+                    source_name=source.name if source else item.source_name,
+                    captured_at=_coerce_utc_datetime(item.fetched_at),
+                )
+                admitted += 1
+                last_id = item.id
+            self.db.commit()
+            logger.info("Economic evidence backfill: %d items admitted through id %d", admitted, last_id)
 
     def fetch_source(self, source: ContentSource, lookback_days: int | None = None) -> int:
         """Fetch new content from a single source, returns count of new items.

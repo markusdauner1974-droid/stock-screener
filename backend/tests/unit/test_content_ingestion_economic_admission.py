@@ -149,6 +149,48 @@ def test_capture_is_attributed_to_the_polled_source(db_session):
     assert corrected.source_metadata["source_name"] == "Mirror feed"
 
 
+def test_unchanged_capture_from_a_mirror_feed_keeps_its_own_provenance(db_session):
+    first = _source(db_session)
+    mirror = ContentSource(
+        name="Mirror feed", source_type="rss", url="https://mirror.example.com/rss",
+        pipelines=["technical"],
+    )
+    db_session.add(mirror)
+    db_session.commit()
+    _ingest(db_session, first, _Feed(_item()))
+
+    _ingest(db_session, mirror, _Feed(_item()))
+    _ingest(db_session, mirror, _Feed(_item()))  # re-poll
+
+    original, mirrored = _packets(db_session)
+    assert mirrored.precedence_state == "equivalent"
+    assert mirrored.source_metadata["content_source_id"] == mirror.id
+    assert original.source_metadata["content_source_id"] == first.id
+
+
+def test_backfill_admits_previously_ingested_items_once(db_session):
+    source = _source(db_session)
+    twitter = _source(db_session, source_type="twitter")
+    fetched_at = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    for item_source, external_id in ((source, "old-1"), (source, "old-2"), (twitter, "tw-old")):
+        db_session.add(ContentItem(
+            source_id=item_source.id, source_type=item_source.source_type,
+            source_name=item_source.name, external_id=external_id, title="Old",
+            content=f"Old article {external_id}", published_at=fetched_at,
+            fetched_at=fetched_at,
+        ))
+    db_session.commit()
+    service = ContentIngestionService(db_session)
+
+    first = service.backfill_economic_evidence(batch_size=1)
+    again = service.backfill_economic_evidence(batch_size=1)
+
+    packets = _packets(db_session)
+    assert first["admitted"] == again["admitted"] == 2
+    assert len(packets) == 2
+    assert {p.available_at.replace(tzinfo=timezone.utc) for p in packets} == {fetched_at}
+
+
 def test_unchanged_held_correction_is_not_readmitted_on_repoll(db_session):
     source = _source(db_session)
     _ingest(db_session, source, _Feed(_item()))

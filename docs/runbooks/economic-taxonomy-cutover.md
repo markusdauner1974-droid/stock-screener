@@ -203,7 +203,16 @@ Record all three values. Never reopen a sealed snapshot.
 
 ## 4. Enter shadow, catch up, and benchmark
 
-First register the tested reader capability. This command reruns the PostgreSQL
+Admit the news, RSS, Substack and Reddit content ingested before this release,
+so shadow comparisons include it. New items are admitted at ingest; X posts
+come only from Social. Re-running is safe, and `--after-id` resumes from the
+`last_id` a previous run printed:
+
+```bash
+./venv/bin/python scripts/backfill_content_economic_evidence.py
+```
+
+Then register the tested reader capability. This command reruns the PostgreSQL
 gate, backend reader contract, focused frontend tests, and the production build
 before inserting the immutable capability manifest:
 
