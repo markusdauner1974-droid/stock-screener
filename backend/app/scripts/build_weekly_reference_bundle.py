@@ -630,7 +630,7 @@ def _build_asia_bundle(
             flush=True,
         )
 
-    active_rows = (
+    db_active_rows = (
         db.query(StockUniverse)
         .filter(
             StockUniverse.active_filter(),
@@ -639,7 +639,9 @@ def _build_asia_bundle(
         .order_by(StockUniverse.symbol.asc())
         .all()
     )
-    active_rows = _without_excluded_listings(market, active_rows)
+    active_rows = _without_excluded_listings(market, db_active_rows)
+    # The export re-queries active rows, so it must be told what was dropped.
+    excluded_symbols = {row.symbol for row in db_active_rows} - {row.symbol for row in active_rows}
     if not active_rows:
         raise RuntimeError(f"No active {market} universe rows found after official-source ingest")
 
@@ -774,6 +776,7 @@ def _build_asia_bundle(
         latest_manifest_path=latest_manifest_path,
         snapshot_key=snapshot_key,
         market=market,
+        excluded_symbols=excluded_symbols,
     )
 
     summary.update(

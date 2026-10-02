@@ -813,7 +813,17 @@ def test_build_weekly_reference_bundle_runs_au_official_path(monkeypatch, tmp_pa
             sector="Basic Materials",
             industry="Other Industrial Metals & Mining",
             market_cap=220.0,
-        )
+        ),
+        # Seeded from a prior bundle; the ASX source no longer emits it (#481).
+        SimpleNamespace(
+            symbol="PUT.AX",
+            market="AU",
+            exchange="XASX",
+            name="PUMA SERIES 2023-1 TRUST",
+            sector=None,
+            industry=None,
+            market_cap=None,
+        ),
     ]
     fake_query = MagicMock()
     fake_query.filter.return_value.order_by.return_value.all.return_value = active_rows
@@ -937,6 +947,8 @@ def test_build_weekly_reference_bundle_runs_au_official_path(monkeypatch, tmp_pa
     )
     assert export_calls[0]["latest_manifest_path"] == tmp_path / "weekly-reference-latest-au.json"
     assert export_calls[0]["market"] == "AU"
+    # The export re-queries active rows, so dropped listings must be passed on.
+    assert export_calls[0]["excluded_symbols"] == {"PUT.AX"}
     stdout = capsys.readouterr().out
     assert "Starting official universe refresh for AU..." in stdout
     assert "Weekly reference bundle complete for AU:" in stdout

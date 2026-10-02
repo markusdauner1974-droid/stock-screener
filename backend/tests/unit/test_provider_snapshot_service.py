@@ -2890,3 +2890,60 @@ def test_import_snapshot_row_preserves_non_default_currency_and_timezone(tmp_pat
     assert stored["currency"] == "USD"               # not flattened to TWD
     assert stored["timezone"] == "America/New_York"   # not flattened to Asia/Taipei
     db.close()
+
+
+def test_export_weekly_reference_bundle_omits_excluded_symbols(tmp_path):
+    """#481: listings the weekly build drops stay active in the DB but not in the bundle."""
+    TestingSessionLocal = _make_session()
+    db = TestingSessionLocal()
+    for symbol in ("AAPL", "TRUST"):
+        db.add(
+            StockUniverse(
+                symbol=symbol,
+                exchange="NASDAQ",
+                is_active=True,
+                status=UNIVERSE_STATUS_ACTIVE,
+                status_reason="active",
+            )
+        )
+    run = ProviderSnapshotRun(
+        snapshot_key=ProviderSnapshotService.SNAPSHOT_KEY_FUNDAMENTALS,
+        run_mode="publish",
+        status="published",
+        source_revision="fundamentals_v1:20261002000000",
+        symbols_total=2,
+        symbols_published=2,
+        created_at=datetime.utcnow(),
+        published_at=datetime.utcnow(),
+    )
+    db.add(run)
+    db.flush()
+    for symbol in ("AAPL", "TRUST"):
+        db.add(
+            ProviderSnapshotRow(
+                run_id=run.id,
+                symbol=symbol,
+                exchange="NASDAQ",
+                row_hash=f"{symbol}-hash",
+                normalized_payload_json=json.dumps({"symbol": symbol}),
+                raw_payload_json=None,
+            )
+        )
+    db.add(ProviderSnapshotPointer(snapshot_key=ProviderSnapshotService.SNAPSHOT_KEY_FUNDAMENTALS, run_id=run.id))
+    db.commit()
+
+    service = _make_provider_snapshot_service()
+    service.fundamentals_cache = _StubFundamentalsCache(cached={})
+    bundle_path = tmp_path / "weekly-reference.json.gz"
+    service.export_weekly_reference_bundle(
+        db,
+        output_path=bundle_path,
+        bundle_asset_name=bundle_path.name,
+        excluded_symbols={"TRUST"},
+    )
+
+    with gzip.open(bundle_path, "rt", encoding="utf-8") as fh:
+        payload = json.load(fh)
+    assert [row["symbol"] for row in payload["universe"]] == ["AAPL"]
+    assert [row["symbol"] for row in payload["snapshot"]["rows"]] == ["AAPL"]
+    db.close()

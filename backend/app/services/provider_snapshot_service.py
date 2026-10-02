@@ -1702,8 +1702,13 @@ class ProviderSnapshotService:
         latest_manifest_path: Path | None = None,
         snapshot_key: str = SNAPSHOT_KEY_FUNDAMENTALS,
         market: str | None = None,
+        excluded_symbols: Iterable[str] = (),
     ) -> Dict[str, Any]:
-        """Export the current published fundamentals snapshot + active universe bundle."""
+        """Export the current published fundamentals snapshot + active universe bundle.
+
+        ``excluded_symbols`` are active rows the caller dropped (e.g. listings an
+        official source stopped emitting, which ingestion never deactivates).
+        """
         run = self.get_published_run(db, snapshot_key=snapshot_key)
         if run is None:
             raise ValueError(f"No published snapshot for {snapshot_key}")
@@ -1722,6 +1727,8 @@ class ProviderSnapshotService:
             .order_by(StockUniverse.symbol.asc())
             .all()
         )
+        excluded = set(excluded_symbols)
+        active_universe_rows = [row for row in active_universe_rows if row.symbol not in excluded]
         active_symbols = [row.symbol for row in active_universe_rows]
         active_symbol_set = set(active_symbols)
         fundamentals_by_symbol = self.fundamentals_cache.get_many(active_symbols) if active_symbols else {}
