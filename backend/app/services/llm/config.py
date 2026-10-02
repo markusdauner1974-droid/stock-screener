@@ -119,11 +119,14 @@ PROVIDER_ENV_VARS = {
     "zai": "ZAI_API_KEY",
     "minimax": "MINIMAX_API_KEY",
     "opencode-go": "OPENCODE_GO_API_KEY",
+    "ollama": "OLLAMA_API_KEY",
 }
 
 
 AVAILABLE_MODELS = [
     {"id": "opencode-go/deepseek-v4-flash", "name": "DeepSeek V4 Flash (OpenCode Go)", "provider": "opencode-go", "category": "cloud"},
+    {"id": "ollama/deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash (Ollama Cloud)", "provider": "ollama", "category": "cloud"},
+    {"id": "ollama/deepseek-v4.1-flash:cloud", "name": "DeepSeek V4.1 Flash (Ollama, local daemon)", "provider": "ollama", "category": "local"},
     {"id": "minimax/MiniMax-M2.7", "name": "MiniMax M2.7 (Minimax)", "provider": "minimax", "category": "cloud"},
     {"id": "openai/glm-4.7-flash", "name": "GLM-4.7-Flash (Z.AI)", "provider": "zai", "category": "cloud"},
     {"id": "groq/qwen/qwen3-32b", "name": "Qwen 3 32B (Groq)", "provider": "groq", "category": "cloud"},
@@ -145,6 +148,13 @@ SUPPORTED_MODELS_BY_USE_CASE: dict[str, set[str]] = {
     },
     "extraction": {
         "opencode-go/deepseek-v4-flash",
+        "ollama/deepseek-v4.1-flash",
+        # The local-daemon form. Ollama's own documentation uses the ``:cloud``
+        # tag for a model pulled through localhost (``/api/chat``) and the bare
+        # name for a direct request to ollama.com, so the two destinations need
+        # two identifiers. Without this entry the advertised local path is
+        # rejected by the allowlist and only the cloud destination is reachable.
+        "ollama/deepseek-v4.1-flash:cloud",
         "minimax/MiniMax-M2.7",
         "openai/glm-4.7-flash",
     },
