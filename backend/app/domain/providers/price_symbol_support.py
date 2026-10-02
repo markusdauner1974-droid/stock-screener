@@ -15,6 +15,10 @@ YAHOO_ZERO_PREFIXED_JP_SYMBOL_ERROR = (
 YAHOO_UNSUPPORTED_DERIVATIVE_PRICE_SYMBOL_ERROR = (
     "Derivative-style symbol is not expected to have Yahoo price history"
 )
+YAHOO_BSE_SCRIP_CODE_SYMBOL_ERROR = (
+    "BSE scrip-code symbol (e.g. 500325.BO); Yahoo stopped serving these around "
+    "2026-09-03. Ticker-style BSE symbols (e.g. RELIANCE.BO) still work."
+)
 YAHOO_UNSUPPORTED_SUFFIXES = ("U", "UN", "UNT", "UNIT", "R", "RT")
 YAHOO_UNSUPPORTED_PREFIXES = ("W", "WS", "WT")
 
@@ -51,10 +55,24 @@ def is_derivative_style_yahoo_symbol(symbol: str | None) -> bool:
     return False
 
 
+def is_bse_scrip_code_yahoo_symbol(symbol: str | None) -> bool:
+    """A numeric BSE scrip code such as ``500325.BO``.
+
+    Yahoo returned history for 3 of 200 sampled IN scrip codes on 2026-10-02,
+    all a session behind. Sending them anyway spent the IN static refresh's
+    rate budget on dead symbols: rate-limited retries, then every NSE symbol
+    after them failed without a Yahoo error.
+    """
+    normalized = str(symbol or "").strip().upper()
+    return normalized.endswith(".BO") and normalized[:-3].isdigit()
+
+
 def yahoo_price_no_data_error_for_symbol(symbol: str | None) -> str | None:
     local_code = _jp_local_code_from_yahoo_symbol(symbol)
     if local_code is not None and is_zero_prefixed_jp_local_code(local_code):
         return YAHOO_ZERO_PREFIXED_JP_SYMBOL_ERROR
+    if is_bse_scrip_code_yahoo_symbol(symbol):
+        return YAHOO_BSE_SCRIP_CODE_SYMBOL_ERROR
     if is_derivative_style_yahoo_symbol(symbol):
         return YAHOO_UNSUPPORTED_DERIVATIVE_PRICE_SYMBOL_ERROR
     return None

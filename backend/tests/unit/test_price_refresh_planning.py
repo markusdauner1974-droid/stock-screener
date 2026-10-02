@@ -167,6 +167,22 @@ def test_price_refresh_plan_excludes_unsupported_yahoo_symbols_from_live_jobs():
     ]
 
 
+def test_bse_scrip_codes_are_unsupported_on_yahoo_but_ticker_style_bse_symbols_are_not():
+    """#480: Yahoo stopped serving numeric BSE scrip codes; never send them."""
+    from app.domain.providers.price_symbol_support import split_supported_price_symbols
+    from app.services.bulk_data_fetcher import BulkDataFetcher
+
+    supported, unsupported = split_supported_price_symbols(
+        ["500325.BO", "RELIANCE.BO", "RELIANCE.NS", "20MICRONS.NS"]
+    )
+
+    assert supported == ["RELIANCE.BO", "RELIANCE.NS", "20MICRONS.NS"]
+    assert unsupported == ["500325.BO"]
+    fetchable, skipped = BulkDataFetcher._split_fetchable_price_symbols(["500325.BO", "RELIANCE.NS"])
+    assert fetchable == ["RELIANCE.NS"]
+    assert skipped["500325.BO"]["error_kind"] == "no_price_data"
+
+
 def test_current_github_bundle_reports_unsupported_only_top_up_as_terminal_gap():
     from app.services.price_history_coverage import PriceHistoryCoverage
     from app.services.price_refresh_planning import (
