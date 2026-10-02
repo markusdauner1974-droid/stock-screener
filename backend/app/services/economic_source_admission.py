@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -40,6 +40,19 @@ def _utcnow() -> datetime:
 
 def _ordered(values) -> tuple[str, ...]:
     return tuple(sorted({str(value) for value in values}))
+
+
+# Capture route for news/RSS/Substack/Reddit content ingestion (#471).
+CONTENT_INGESTION_ROUTE = "content_ingestion"
+
+
+def post_family_key(provider: str, canonical_item_id: str) -> str:
+    return f"{provider.strip().lower()}:post:{canonical_item_id}"
+
+
+def content_route_record_id(content_item_id: int, source_id: int | None) -> str:
+    """One route record per (item, source) observation; feeds can share items."""
+    return f"{content_item_id}:{source_id}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +105,7 @@ class EvidenceAdmission:
     def family_key(self) -> str:
         if self.canonical_source_family:
             return self.canonical_source_family.strip()
-        return f"{self.provider.strip().lower()}:post:{self.canonical_item_id}"
+        return post_family_key(self.provider, self.canonical_item_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,12 +135,19 @@ class EconomicSourceAdmissionService:
         self.session = session
 
     def admit_content(self, evidence: EvidenceAdmission) -> AdmissionResult:
-        return self.admit(evidence)
+        # Ingestion re-polls items with a fresh capture time, so a recapture of
+        # text already admitted for this lineage reuses that packet.
+        return self.admit(evidence, reuse_admitted_content=True)
 
     def admit_social_work(self, evidence: EvidenceAdmission) -> AdmissionResult:
         return self.admit(evidence)
 
-    def admit(self, evidence: EvidenceAdmission) -> AdmissionResult:
+    def admit(
+        self,
+        evidence: EvidenceAdmission,
+        *,
+        reuse_admitted_content: bool = False,
+    ) -> AdmissionResult:
         expected_epoch = self._current_epoch()
         with producer_write(
             self.session,
@@ -137,6 +157,7 @@ class EconomicSourceAdmissionService:
             return self._admit(
                 evidence,
                 authority_epoch=authority.authority_epoch,
+                reuse_admitted_content=reuse_admitted_content,
             )
 
     def _admit(
@@ -144,6 +165,7 @@ class EconomicSourceAdmissionService:
         evidence: EvidenceAdmission,
         *,
         authority_epoch: int,
+        reuse_admitted_content: bool = False,
     ) -> AdmissionResult:
         family = self._get_or_create_family(evidence)
         lineage = self._get_or_create_lineage(family, evidence)
@@ -161,6 +183,44 @@ class EconomicSourceAdmissionService:
                 EvidencePacket.packet_hash == packet_hash,
             )
         ).scalar_one_or_none()
+        # Only revisionless recaptures reuse by fingerprint: an ordered or
+        # explicitly linked capture (e.g. a reversion A -> B -> A) must reach
+        # the precedence policy, and so must any capture while the lineage has
+        # no effective packet (e.g. only a held late archive). Reuse is limited
+        # to the same capture route and record, so another route or source
+        # records its own (equivalent) packet and keeps its provenance.
+        effective_now = (
+            self.effective_packet(lineage.id)
+            if existing is None
+            and reuse_admitted_content
+            and evidence.provider_revision_id is None
+            and evidence.provider_revision_order is None
+            and evidence.supersedes_packet_id is None
+            and evidence.equivalent_packet_id is None
+            else None
+        )
+        if effective_now is not None:
+            same_capture = [
+                packet
+                for packet in self.session.execute(
+                    select(EvidencePacket)
+                    .where(
+                        EvidencePacket.source_lineage_id == lineage.id,
+                        EvidencePacket.evidence_content_fingerprint == fingerprint,
+                        EvidencePacket.capture_route == evidence.capture_route,
+                    )
+                    .order_by(EvidencePacket.evidence_revision_ordinal)
+                ).scalars()
+                if (packet.source_metadata or {}).get("route_record_id")
+                == evidence.route_record_id
+            ]
+            # A displaced packet (A -> B) is a possible reversion: precedence.
+            ranked = [
+                (rank, packet)
+                for packet in same_capture
+                if (rank := self._standing(packet, effective_now)) is not None
+            ]
+            existing = min(ranked, key=lambda pair: pair[0], default=(None, None))[1]
         if existing is not None:
             effective = self.effective_packet(lineage.id)
             if effective is not None and (
@@ -299,6 +359,80 @@ class EconomicSourceAdmissionService:
             evidence_channels=merged,
             reason="equivalent_evidence_admission",
             authority_epoch=authority_epoch,
+        )
+
+    def add_observation_channels(
+        self,
+        *,
+        family_key: str,
+        capture_route: str,
+        route_record_id: str,
+        channels: Collection[str],
+        reason: str,
+    ) -> bool:
+        """Add lens channels for one capture observation already admitted.
+
+        The lens discovery reads is the effective packet's (equivalent captures
+        merge into it), so channels go there when the observation's packet is
+        still in force. Returns whether a revision was written; an observation
+        with no standing packet is left alone.
+        """
+        lineage = self.session.execute(
+            select(SourceLineage)
+            .join(SourceFamily, SourceFamily.id == SourceLineage.source_family_id)
+            .where(
+                SourceFamily.canonical_source_key == family_key,
+                SourceLineage.scope_suffix == "",
+            )
+        ).scalar_one_or_none()
+        effective = self.effective_packet(lineage.id) if lineage is not None else None
+        if effective is None:
+            return False
+        observed = any(
+            (packet.source_metadata or {}).get("route_record_id") == route_record_id
+            and self._standing(packet, effective) == 0
+            for packet in self.session.execute(
+                select(EvidencePacket).where(
+                    EvidencePacket.source_lineage_id == lineage.id,
+                    EvidencePacket.capture_route == capture_route,
+                )
+            ).scalars()
+        )
+        latest = self.session.scalar(
+            select(LensEligibilityRevision.evidence_channels)
+            .where(LensEligibilityRevision.evidence_packet_id == effective.id)
+            .order_by(LensEligibilityRevision.revision_number.desc())
+            .limit(1)
+        )
+        current = set(latest or ())
+        if not observed or set(channels) <= current:
+            return False
+        self.revise_lens_eligibility(
+            effective.id, evidence_channels=tuple(current | set(channels)), reason=reason
+        )
+        return True
+
+    def _standing(self, packet: EvidencePacket, effective: EvidencePacket) -> int | None:
+        """Rank a packet that still stands against the current effective one.
+
+        0: the effective packet or an equivalent of it; 1: still held for
+        review; None: displaced. Stored precedence_state is fixed at admission,
+        so standing is read from the precedence revision log instead.
+        """
+        disposition = self._latest_disposition(packet.id)
+        if packet.id == effective.id or (
+            disposition == "equivalent"
+            and packet.equivalent_evidence_packet_id == effective.id
+        ):
+            return 0
+        return 1 if disposition == "hold_review" else None
+
+    def _latest_disposition(self, packet_id: UUID) -> str | None:
+        return self.session.scalar(
+            select(EvidencePrecedenceRevision.disposition)
+            .where(EvidencePrecedenceRevision.evidence_packet_id == packet_id)
+            .order_by(EvidencePrecedenceRevision.revision_number.desc())
+            .limit(1)
         )
 
     def effective_packet(self, lineage_id: UUID) -> EvidencePacket | None:

@@ -65,6 +65,85 @@ def test_same_provider_post_from_legacy_and_social_shares_family(db_session):
     assert social.packet_id != legacy.packet_id
 
 
+def test_content_recapture_of_admitted_text_reuses_the_packet(db_session):
+    # Ingestion re-polls the same item with a new capture time each run.
+    admission = EconomicSourceAdmissionService(db_session)
+    unordered = {"provider_revision_id": None, "provider_revision_order": None}
+    first = admission.admit_content(_post(**unordered))
+
+    recapture = admission.admit_content(
+        _post(captured_at=NOW + timedelta(hours=1), **unordered)
+    )
+
+    assert recapture.packet_id == first.packet_id
+    assert db_session.scalar(select(func.count()).select_from(EvidencePacket)) == 1
+
+
+def test_capture_matching_only_a_held_packet_still_reaches_precedence(db_session):
+    # A late archive is held when it is the first packet; a normal capture of
+    # the same text must still become effective instead of reusing it.
+    admission = EconomicSourceAdmissionService(db_session)
+    unordered = {"provider_revision_id": None, "provider_revision_order": None}
+    archived = admission.admit_content(_post(route="archive", **unordered))
+    assert archived.precedence_state == "hold_review"
+
+    captured = admission.admit_content(_post(**unordered))
+
+    assert captured.packet_id != archived.packet_id
+    assert captured.precedence_state == "effective"
+
+
+def test_recapture_reuses_the_effective_packet_not_a_held_archive(db_session):
+    admission = EconomicSourceAdmissionService(db_session)
+    unordered = {"provider_revision_id": None, "provider_revision_order": None}
+    admission.admit_content(_post(route="archive", **unordered))
+    captured = admission.admit_content(_post(**unordered))
+
+    recapture = admission.admit_content(
+        _post(captured_at=NOW + timedelta(hours=1), **unordered)
+    )
+
+    assert recapture.packet_id == captured.packet_id
+    assert recapture.precedence_state == "effective"
+
+
+def test_recapture_does_not_reuse_a_packet_no_longer_in_force(db_session):
+    # A was effective, then B advanced; an unordered capture of A is a possible
+    # reversion and must reach precedence, not reuse A's stale packet.
+    admission = EconomicSourceAdmissionService(db_session)
+    first = admission.admit_content(_post(provider_revision_order=1))
+    advanced = admission.admit_content(
+        _post(text="Memory demand is slowing.", provider_revision_id="rev-2",
+              provider_revision_order=2)
+    )
+
+    recapture = admission.admit_content(
+        _post(provider_revision_id=None, provider_revision_order=None,
+              captured_at=NOW + timedelta(hours=1))
+    )
+
+    assert recapture.packet_id != first.packet_id
+    assert recapture.precedence_state == "hold_review"
+    assert admission.effective_packet(first.source_lineage_id).id == advanced.packet_id
+
+
+def test_ordered_reversion_to_earlier_text_is_admitted_not_collapsed(db_session):
+    admission = EconomicSourceAdmissionService(db_session)
+    first = admission.admit_content(_post(provider_revision_order=1))
+    admission.admit_content(
+        _post(text="Memory demand is slowing.", provider_revision_id="rev-2",
+              provider_revision_order=2)
+    )
+
+    reverted = admission.admit_content(
+        _post(provider_revision_id="rev-3", provider_revision_order=3)
+    )
+
+    assert reverted.packet_id != first.packet_id
+    assert reverted.precedence_state == "effective"
+    assert admission.effective_packet(first.source_lineage_id).id == reverted.packet_id
+
+
 def test_adding_lens_does_not_create_packet_or_work(db_session):
     admission = EconomicSourceAdmissionService(db_session)
     admitted = admission.admit_content(_post())

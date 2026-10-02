@@ -8,6 +8,12 @@ from typing import Any, Optional
 
 from sqlalchemy import and_, func
 from sqlalchemy.orm import Session, aliased
+from .economic_source_admission import (
+    CONTENT_INGESTION_ROUTE,
+    EconomicSourceAdmissionService,
+    content_route_record_id,
+    post_family_key,
+)
 from .theme_evidence_eligibility_service import legacy_eligibility_exists, grant_eligibility, is_social_owned_source
 from ..infra.db.models.social_signals import ContentPipelineEligibility
 
@@ -147,6 +153,13 @@ def reconcile_source_pipeline_change(
         cursor = item_ids[-1]
 
         if added:
+            items_by_id = {
+                row.id: row
+                for row in db.query(
+                    ContentItem.id, ContentItem.source_type, ContentItem.external_id
+                ).filter(ContentItem.id.in_(item_ids))
+            }
+            admission = EconomicSourceAdmissionService(db)
             existing_pairs = {
                 (row[0], row[1])
                 for row in db.query(
@@ -163,6 +176,17 @@ def reconcile_source_pipeline_change(
                 ).order_by(ContentPipelineEligibility.observed_at).first()[0]
                 if observed_at.tzinfo is None:
                     observed_at = observed_at.replace(tzinfo=timezone.utc)
+                item = items_by_id[item_id]
+                # Old items are rarely re-polled, so the economic lens of an
+                # admitted observation follows the new grant here (#471).
+                if item.source_type != "twitter":
+                    admission.add_observation_channels(
+                        family_key=post_family_key(item.source_type, item.external_id),
+                        capture_route=CONTENT_INGESTION_ROUTE,
+                        route_record_id=content_route_record_id(item_id, source_id),
+                        channels=added,
+                        reason="source_pipeline_added",
+                    )
                 for pipeline in added:
                     grant_eligibility(db, item_id, pipeline, "legacy", source_id, observed_at)
                     key = (item_id, pipeline)

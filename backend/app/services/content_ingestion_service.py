@@ -18,7 +18,15 @@ import feedparser
 import requests
 from sqlalchemy.orm import Session
 
+from ..domain.economic_taxonomy.contracts import EvidenceChannel
+from ..infra.db.models.social_signals import ContentPipelineEligibility
 from ..models.theme import ContentSource, ContentItem, ContentItemPipelineState
+from .economic_source_admission import (
+    CONTENT_INGESTION_ROUTE,
+    EconomicSourceAdmissionService,
+    EvidenceAdmission,
+    content_route_record_id,
+)
 from .theme_evidence_eligibility_service import grant_eligibility, is_social_owned_source, legacy_sources, legacy_eligibility_exists
 from ..models.app_settings import AppSetting
 from ..config import settings
@@ -299,6 +307,122 @@ class ContentIngestionService:
             created += 1
         return created
 
+    def _admit_economic_evidence(
+        self,
+        content_item: ContentItem,
+        item_data: dict,
+        pipelines: list[str],
+        *,
+        source_id: int | None,
+        source_name: str | None,
+        captured_at: datetime | None = None,
+    ) -> None:
+        """Admit the fetched text as economic taxonomy evidence.
+
+        Runs on every poll, not just for new items: an unchanged recapture
+        reuses its packet, and changed text (a correction, even to empty)
+        enters the same lineage, where the precedence policy decides it.
+        Admission shares the ingest transaction, so a failure rolls back the
+        batch and the next poll retries it.
+        """
+        now = captured_at or datetime.now(timezone.utc)
+        title = item_data.get("title") or ""
+        content = item_data.get("content") or ""
+        # Some fetchers (Reddit) already lead the content with the title.
+        if title and not content.startswith(title):
+            text = f"{title}\n\n{content}" if content else title
+        else:
+            text = content
+        EconomicSourceAdmissionService(self.db).admit_content(
+            EvidenceAdmission(
+                provider=content_item.source_type,
+                canonical_item_id=content_item.external_id,
+                capture_route=CONTENT_INGESTION_ROUTE,
+                # A mirror feed gets its own packet instead of the first feed's.
+                route_record_id=content_route_record_id(content_item.id, source_id),
+                original_text=text,
+                preparation_version="content-ingestion-v1",
+                source_metadata={
+                    "content_item_id": content_item.id,
+                    # The polled source: an item can be shared by two feeds.
+                    "content_source_id": source_id,
+                    "source_name": source_name,
+                    "title": title,
+                    "url": item_data.get("url"),
+                    "author": item_data.get("author"),
+                },
+                captured_at=now,
+                observed_at=_coerce_utc_datetime(item_data.get("published_at")),
+                available_at=now,
+                evidence_channels=tuple(
+                    p for p in pipelines if p in {c.value for c in EvidenceChannel}
+                ),
+            )
+        )
+
+    def backfill_economic_evidence(self, *, batch_size: int = 500, after_id: int = 0) -> dict:
+        """Admit non-X items ingested before content admission existed (#471).
+
+        Replays each recorded legacy observation (``ContentPipelineEligibility``):
+        one capture per observing source, with the pipelines that source granted,
+        dated by its first grant, so evidence is never available earlier than it
+        was. An item with no recorded grant falls back to its own source.
+        Re-running is safe: an already admitted observation reuses its packet.
+        Commits per batch; pass the last reported id as ``after_id`` to resume.
+        """
+        admitted = 0
+        last_id = after_id
+        while True:
+            items = (
+                self.db.query(ContentItem)
+                .filter(ContentItem.id > last_id, ContentItem.source_type != "twitter")
+                .order_by(ContentItem.id)
+                .limit(batch_size)
+                .all()
+            )
+            if not items:
+                return {"admitted": admitted, "last_id": last_id}
+            # {item_id: {source_id: (pipelines, first observed_at)}}
+            observations: dict[int, dict[int, tuple[set[str], datetime]]] = {}
+            for grant in self.db.query(ContentPipelineEligibility).filter(
+                ContentPipelineEligibility.content_item_id.in_([item.id for item in items]),
+                ContentPipelineEligibility.channel == "legacy",
+            ):
+                by_source = observations.setdefault(grant.content_item_id, {})
+                pipelines, first = by_source.get(
+                    grant.originating_source_id, (set(), grant.observed_at)
+                )
+                pipelines.add(grant.pipeline)
+                by_source[grant.originating_source_id] = (pipelines, min(first, grant.observed_at))
+            for item in items:
+                item_observations = observations.get(item.id) or {
+                    item.source_id: (None, item.fetched_at)
+                }
+                for source_id, (pipelines, observed_at) in sorted(
+                    item_observations.items(), key=lambda entry: entry[1][1]
+                ):
+                    source = self.db.get(ContentSource, source_id) if source_id else None
+                    self._admit_economic_evidence(
+                        item,
+                        {
+                            "title": item.title,
+                            "content": item.content,
+                            "url": item.url,
+                            "author": item.author,
+                            "published_at": item.published_at,
+                        },
+                        sorted(pipelines) if pipelines else normalize_pipelines(
+                            source.pipelines if source else None
+                        ),
+                        source_id=source_id,
+                        source_name=source.name if source else item.source_name,
+                        captured_at=_coerce_utc_datetime(observed_at),
+                    )
+                admitted += 1
+                last_id = item.id
+            self.db.commit()
+            logger.info("Economic evidence backfill: %d items admitted through id %d", admitted, last_id)
+
     def fetch_source(self, source: ContentSource, lookback_days: int | None = None) -> int:
         """Fetch new content from a single source, returns count of new items.
 
@@ -377,6 +501,17 @@ class ContentIngestionService:
 
             for pipeline in source_pipelines:
                 grant_eligibility(self.db, (existing or content_item).id, pipeline, "legacy", source_id, datetime.now(timezone.utc))
+
+            # X posts are admitted by Social, whose extraction fingerprint this
+            # route can't reproduce (#471).
+            if source_type != "twitter":
+                self._admit_economic_evidence(
+                    existing or content_item,
+                    item_data,
+                    source_pipelines,
+                    source_id=source_id,
+                    source_name=source_name,
+                )
 
         # Commit all new items
         if new_count > 0:
