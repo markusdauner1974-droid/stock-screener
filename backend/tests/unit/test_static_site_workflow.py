@@ -447,6 +447,21 @@ def test_static_site_restores_breadth_history_before_export_and_publishes_after(
     assert "steps.export-market.outputs.has_artifact == 'true'" in publish
 
 
+def test_static_site_reports_market_freshness_without_blocking_deploy() -> None:
+    combine_job = _combine_and_build_job()
+    report = combine_job.split("      - name: Report market freshness\n", 1)[1].split(
+        "      - name:", 1
+    )[0]
+
+    # Reads the combined manifest, so it must run after the combine step.
+    assert combine_job.index("- name: Combine static data bundle") < combine_job.index(
+        "- name: Report market freshness"
+    )
+    assert "continue-on-error: true" in report
+    assert "app.scripts.report_static_market_freshness" in report
+    assert "--pattern 'daily-price-latest-*.json'" in report
+
+
 def test_static_site_validation_uses_python_module_not_inline_control_plane() -> None:
     combine_job = _combine_and_build_job()
     validation_step = combine_job.split("      - name: Validate market artifacts\n", 1)[

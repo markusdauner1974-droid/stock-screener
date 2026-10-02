@@ -843,6 +843,25 @@ jobs:
             --fallback-cot-artifacts-dir /tmp/static-cot-fallback \
             --rs-formula-overrides-json "$RS_FORMULA_OVERRIDES"
 
+      # Reporting only (#484): never blocks the deploy. Stale or missing markets
+      # surface as annotations and a table on the run summary.
+      - name: Report market freshness
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/daily-price-manifests
+          gh release download daily-price-data \
+            --repo "${{ github.repository }}" \
+            --pattern 'daily-price-latest-*.json' \
+            --dir /tmp/daily-price-manifests \
+            || echo "Daily price manifests unavailable; bundle freshness will be blank."
+          cd backend
+          python -m app.scripts.report_static_market_freshness \
+            --manifest ../frontend/public/static-data/manifest.json \
+            --artifacts-dir /tmp/static-market-artifacts-current \
+            --price-manifest-dir /tmp/daily-price-manifests
+
       - name: Build static frontend
         env:
           VITE_STATIC_SITE: "true"
