@@ -130,6 +130,36 @@ def test_corrections_including_to_empty_go_through_the_same_lineage(db_session):
     assert corrected.precedence_state == emptied.precedence_state == "hold_review"
 
 
+def test_capture_is_attributed_to_the_polled_source(db_session):
+    # Two feeds of one type share a ContentItem; the second one's changed
+    # capture must name the second feed, not the item's first source.
+    first = _source(db_session)
+    second = ContentSource(
+        name="Mirror feed", source_type="rss", url="https://mirror.example.com/rss",
+        pipelines=["technical"],
+    )
+    db_session.add(second)
+    db_session.commit()
+    _ingest(db_session, first, _Feed(_item()))
+
+    _ingest(db_session, second, _Feed(_item(content="Memory demand is slowing.")))
+
+    corrected = _packets(db_session)[-1]
+    assert corrected.source_metadata["content_source_id"] == second.id
+    assert corrected.source_metadata["source_name"] == "Mirror feed"
+
+
+def test_unchanged_held_correction_is_not_readmitted_on_repoll(db_session):
+    source = _source(db_session)
+    _ingest(db_session, source, _Feed(_item()))
+    corrected = _Feed(_item(content="Memory demand is slowing."))
+
+    _ingest(db_session, source, corrected)
+    _ingest(db_session, source, corrected)
+
+    assert [p.precedence_state for p in _packets(db_session)] == ["effective", "hold_review"]
+
+
 def test_x_posts_are_left_to_social_admission(db_session):
     source = _source(db_session, source_type="twitter")
 

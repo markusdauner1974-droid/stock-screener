@@ -79,6 +79,20 @@ def test_content_recapture_of_admitted_text_reuses_the_packet(db_session):
     assert db_session.scalar(select(func.count()).select_from(EvidencePacket)) == 1
 
 
+def test_capture_matching_only_a_held_packet_still_reaches_precedence(db_session):
+    # A late archive is held when it is the first packet; a normal capture of
+    # the same text must still become effective instead of reusing it.
+    admission = EconomicSourceAdmissionService(db_session)
+    unordered = {"provider_revision_id": None, "provider_revision_order": None}
+    archived = admission.admit_content(_post(route="archive", **unordered))
+    assert archived.precedence_state == "hold_review"
+
+    captured = admission.admit_content(_post(**unordered))
+
+    assert captured.packet_id != archived.packet_id
+    assert captured.precedence_state == "effective"
+
+
 def test_ordered_reversion_to_earlier_text_is_admitted_not_collapsed(db_session):
     admission = EconomicSourceAdmissionService(db_session)
     first = admission.admit_content(_post(provider_revision_order=1))

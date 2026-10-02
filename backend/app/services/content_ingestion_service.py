@@ -302,7 +302,13 @@ class ContentIngestionService:
         return created
 
     def _admit_economic_evidence(
-        self, content_item: ContentItem, item_data: dict, pipelines: list[str]
+        self,
+        content_item: ContentItem,
+        item_data: dict,
+        pipelines: list[str],
+        *,
+        source_id: int,
+        source_name: str,
     ) -> None:
         """Admit the fetched text as economic taxonomy evidence.
 
@@ -326,8 +332,9 @@ class ContentIngestionService:
                 preparation_version="content-ingestion-v1",
                 source_metadata={
                     "content_item_id": content_item.id,
-                    "content_source_id": content_item.source_id,
-                    "source_name": content_item.source_name,
+                    # The polled source: an item can be shared by two feeds.
+                    "content_source_id": source_id,
+                    "source_name": source_name,
                     "title": title,
                     "url": item_data.get("url"),
                     "author": item_data.get("author"),
@@ -423,7 +430,13 @@ class ContentIngestionService:
             # X posts are admitted by Social, whose extraction fingerprint this
             # route can't reproduce (#471).
             if source_type != "twitter":
-                self._admit_economic_evidence(existing or content_item, item_data, source_pipelines)
+                self._admit_economic_evidence(
+                    existing or content_item,
+                    item_data,
+                    source_pipelines,
+                    source_id=source_id,
+                    source_name=source_name,
+                )
 
         # Commit all new items
         if new_count > 0:

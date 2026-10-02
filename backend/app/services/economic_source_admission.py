@@ -172,7 +172,8 @@ class EconomicSourceAdmissionService:
         ).scalar_one_or_none()
         # Only revisionless recaptures reuse by fingerprint: an ordered or
         # explicitly linked capture (e.g. a reversion A -> B -> A) must reach
-        # the precedence policy.
+        # the precedence policy, and so must any capture while the lineage has
+        # no effective packet (e.g. only a held late archive).
         if (
             existing is None
             and reuse_admitted_content
@@ -180,6 +181,7 @@ class EconomicSourceAdmissionService:
             and evidence.provider_revision_order is None
             and evidence.supersedes_packet_id is None
             and evidence.equivalent_packet_id is None
+            and self.effective_packet(lineage.id) is not None
         ):
             existing = self.session.execute(
                 select(EvidencePacket)
