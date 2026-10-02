@@ -170,7 +170,17 @@ class EconomicSourceAdmissionService:
                 EvidencePacket.packet_hash == packet_hash,
             )
         ).scalar_one_or_none()
-        if existing is None and reuse_admitted_content:
+        # Only revisionless recaptures reuse by fingerprint: an ordered or
+        # explicitly linked capture (e.g. a reversion A -> B -> A) must reach
+        # the precedence policy.
+        if (
+            existing is None
+            and reuse_admitted_content
+            and evidence.provider_revision_id is None
+            and evidence.provider_revision_order is None
+            and evidence.supersedes_packet_id is None
+            and evidence.equivalent_packet_id is None
+        ):
             existing = self.session.execute(
                 select(EvidencePacket)
                 .where(
