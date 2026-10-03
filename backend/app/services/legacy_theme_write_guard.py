@@ -55,10 +55,18 @@ def mark_legacy_theme_writer(session: Session) -> None:
     session.info[_MARK] = True
 
 
+def _current_transaction(session: Session):
+    # The innermost one: a lock taken inside a savepoint is released when that
+    # savepoint rolls back, so a fence is only known to hold for the
+    # (sub)transaction it was taken in. Writes after a savepoint ends re-take
+    # it, which is a cheap re-entrant shared lock when it is still held.
+    return session.get_nested_transaction() or session.get_transaction()
+
+
 def _fence_write(session: Session) -> None:
     if not (_LEGACY_WRITER.get() or session.info.get(_MARK)):
         return
-    transaction = session.get_transaction()
+    transaction = _current_transaction(session)
     if transaction is not None and session.info.get(_FENCED_TRANSACTION) is transaction:
         return
     with session.no_autoflush:
@@ -71,7 +79,7 @@ def _fence_write(session: Session) -> None:
             raise LegacyThemeWritesBlocked(
                 "Legacy Theme writes are disabled under economic authority."
             )
-    session.info[_FENCED_TRANSACTION] = session.get_transaction()
+    session.info[_FENCED_TRANSACTION] = _current_transaction(session)
 
 
 @event.listens_for(Session, "before_flush")

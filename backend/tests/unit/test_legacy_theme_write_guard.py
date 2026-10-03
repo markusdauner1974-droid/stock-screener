@@ -6,7 +6,7 @@ import sys
 
 import httpx
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import DatabaseError
 
 from app.database import get_db
@@ -113,6 +113,27 @@ def test_marked_request_session_write_fails_closed_after_cutover(db_session):
 
     db_session.add(ThemeCluster(canonical_key="late", display_name="Late",
                                 name="Late", pipeline="technical"))
+    with pytest.raises(LegacyThemeWritesBlocked):
+        db_session.flush()
+
+
+def test_fence_rechecks_after_a_rolled_back_savepoint(db_session):
+    # PostgreSQL drops a lock taken inside a savepoint when it rolls back, so
+    # the next write in the outer transaction must take the fence again.
+    _authority(db_session, "legacy")
+    mark_legacy_theme_writer(db_session)
+    savepoint = db_session.begin_nested()
+    db_session.add(ThemeCluster(canonical_key="first", display_name="First",
+                                name="First", pipeline="technical"))
+    db_session.flush()
+    savepoint.rollback()
+    # Raw connection write: bypasses the ORM hooks, same transaction.
+    db_session.connection().execute(
+        text("UPDATE taxonomy_authority SET mode = 'economic' WHERE id = 1")
+    )
+
+    db_session.add(ThemeCluster(canonical_key="second", display_name="Second",
+                                name="Second", pipeline="technical"))
     with pytest.raises(LegacyThemeWritesBlocked):
         db_session.flush()
 
