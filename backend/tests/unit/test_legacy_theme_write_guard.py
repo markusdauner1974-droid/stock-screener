@@ -87,23 +87,51 @@ def _switch_to_economic():
 
 def test_task_write_after_a_mid_run_cutover_fails_closed(db_session):
     # The entry check passes in legacy mode; cutover happens before the body
-    # commits, so its first write re-checks under the fence and is refused.
+    # commits, so its first write re-checks under the fence and is refused,
+    # and the task is skipped as if the entry check had caught it.
     _authority(db_session, "legacy")
     from app.database import SessionLocal
 
-    @skip_in_economic_authority
-    def body():
+    skipped = []
+
+    @skip_in_economic_authority(on_skip=lambda run_id: skipped.append(run_id))
+    def body(run_id):
         _switch_to_economic()
         with SessionLocal() as session:
             session.add(ThemeCluster(canonical_key="late", display_name="Late",
                                      name="Late", pipeline="technical"))
             session.commit()
 
-    with pytest.raises(LegacyThemeWritesBlocked):
-        body()
+    result = body("run-1")
 
+    assert result["reason"] == ECONOMIC_AUTHORITY_SKIP_REASON
+    assert skipped == ["run-1"]
     db_session.expire_all()
     assert _clusters(db_session) == 1
+
+
+def test_pipeline_run_fenced_mid_run_is_recorded_as_skipped(db_session, monkeypatch):
+    # Its own `failed` write is refused by the same fence, so the skip hook
+    # must give the run its terminal state.
+    from app.models.theme import ThemePipelineRun
+
+    _authority(db_session, "legacy")
+    db_session.add(ThemePipelineRun(run_id="run-1", pipeline="technical", status="queued"))
+    db_session.commit()
+
+    def cutover_then_ingest(*args, **kwargs):
+        _switch_to_economic()
+        return {}
+
+    monkeypatch.setattr(theme_discovery_tasks, "ingest_content", cutover_then_ingest)
+    monkeypatch.setattr(theme_discovery_tasks.run_full_pipeline, "update_state", lambda **kw: None)
+
+    result = theme_discovery_tasks.run_full_pipeline(run_id="run-1", pipeline="technical")
+
+    db_session.expire_all()
+    run = db_session.query(ThemePipelineRun).filter_by(run_id="run-1").one()
+    assert result["reason"] == ECONOMIC_AUTHORITY_SKIP_REASON
+    assert run.status == "skipped"
 
 
 def test_marked_request_session_write_fails_closed_after_cutover(db_session):
@@ -260,6 +288,37 @@ async def test_pipeline_run_is_recorded_as_queued_before_dispatch(db_session, mo
     assert response.status_code == 200, response.text
     assert seen["status"] == "queued"
     assert seen["task_id"] == seen["dispatched"] == response.json()["task_id"]
+
+
+@pytest.mark.asyncio
+async def test_failed_dispatch_after_cutover_is_recorded_as_failed(db_session, monkeypatch):
+    # The request session is fenced; the failed status must still land, or the
+    # run stays queued for a task that was never sent.
+    from app.models.theme import ThemePipelineRun
+    from app.services import server_auth
+
+    monkeypatch.setattr(server_auth.settings, "server_auth_enabled", False)
+    _authority(db_session, "legacy")
+
+    def cutover_then_fail(*, kwargs, task_id):
+        _switch_to_economic()
+        raise RuntimeError("broker down")
+
+    monkeypatch.setattr(theme_discovery_tasks.run_full_pipeline, "apply_async", cutover_then_fail)
+    app.dependency_overrides[get_db] = lambda: db_session
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post("/api/v1/themes/pipeline/run")
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 503, response.text
+    db_session.expire_all()
+    run = db_session.query(ThemePipelineRun).one()
+    assert run.status == "failed"
+    assert "broker down" in run.error_message
 
 
 def _load(path):

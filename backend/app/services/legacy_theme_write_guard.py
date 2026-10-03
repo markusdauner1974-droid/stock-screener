@@ -106,8 +106,9 @@ def skip_in_economic_authority(task=None, *, on_skip=None):
     """Task decorator: skip in economic mode on entry, and fence every write.
 
     Place it below ``@celery_app.task``; bound tasks pass ``self`` through.
-    ``on_skip(*args, **kwargs)`` runs when the task is skipped, e.g. to record
-    a terminal state for work the task would have updated.
+    ``on_skip(*args, **kwargs)`` runs when the task is skipped, on entry or
+    because a cutover fenced a write mid-run, e.g. to record a terminal state
+    for work the task would have updated. It runs unfenced.
     """
 
     def decorate(func):
@@ -117,16 +118,18 @@ def skip_in_economic_authority(task=None, *, on_skip=None):
 
             with SessionLocal() as db:
                 blocked = legacy_theme_writes_blocked(db)
-            if blocked:
-                logger.info("Skipping %s: %s", func.__name__, ECONOMIC_AUTHORITY_SKIP_REASON)
-                if on_skip is not None:
-                    on_skip(*args, **kwargs)
-                return economic_authority_skip_payload()
-            token = _LEGACY_WRITER.set(True)
-            try:
-                return func(*args, **kwargs)
-            finally:
-                _LEGACY_WRITER.reset(token)
+            if not blocked:
+                token = _LEGACY_WRITER.set(True)
+                try:
+                    return func(*args, **kwargs)
+                except LegacyThemeWritesBlocked:
+                    pass  # cutover landed mid-run; skip like an entry check
+                finally:
+                    _LEGACY_WRITER.reset(token)
+            logger.info("Skipping %s: %s", func.__name__, ECONOMIC_AUTHORITY_SKIP_REASON)
+            if on_skip is not None:
+                on_skip(*args, **kwargs)
+            return economic_authority_skip_payload()
 
         return wrapper
 

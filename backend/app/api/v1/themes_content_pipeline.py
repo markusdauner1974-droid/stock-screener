@@ -21,7 +21,6 @@ from ...services.theme_pipeline_state_service import (
 )
 from ...theme_platform.content_browser_queries import render_content_items_csv_chunk
 from ...theme_platform.contracts import PipelineRunStatusPayload
-from ...services.legacy_theme_write_guard import LegacyThemeWritesBlocked
 from .themes_common import _VALID_THEME_PIPELINES, reject_legacy_theme_writes, resolve_source_ids_for_pipeline
 
 logger = logging.getLogger(__name__)
@@ -67,13 +66,14 @@ def run_pipeline_async(
             task_id=task_id,
         )
     except Exception as exc:
-        pipeline_run.status = "failed"
-        pipeline_run.error_message = f"Failed to queue pipeline task: {exc}"
-        try:
-            db.commit()
-        except LegacyThemeWritesBlocked:
-            # Cutover landed after the queued commit; nothing was dispatched.
-            db.rollback()
+        # Run bookkeeping, not a legacy Theme write: record it on an unmarked
+        # session so a cutover since the queued commit can't strand it queued.
+        with Session(bind=db.get_bind()) as status_db:
+            status_db.query(ThemePipelineRun).filter(ThemePipelineRun.run_id == run_id).update({
+                "status": "failed",
+                "error_message": f"Failed to queue pipeline task: {exc}",
+            })
+            status_db.commit()
         raise HTTPException(status_code=503, detail="Failed to queue theme discovery pipeline") from exc
 
     pipeline_desc = pipeline if pipeline else "both (technical + fundamental)"
