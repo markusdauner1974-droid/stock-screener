@@ -16,7 +16,8 @@ How it decides, per entry point:
   Celery dispatch (``task.delay``) is not followed; the task is its own entry
   point.
 - **A legacy read** is a reference to a legacy model class (outside type
-  annotations) or a SQL string naming one of their tables.
+  annotations) or a SQL string naming one of their tables, across f-string and
+  ``+`` fragments.
 - **Routing:** code an authority check controls is routed, and the walk does
   not follow it. What a check controls depends on its kind:
   ``PREDICATE_MARKERS`` route the branches of an ``if`` whose test uses them
@@ -24,7 +25,7 @@ How it decides, per entry point:
   body exits, everything after it; merely constructing a reader routes nothing.
   ``RAISING_MARKERS`` route what follows an unconditional call;
   ``CONTEXT_MARKERS`` route their ``with`` body; ``DECORATOR_MARKERS`` route the
-  whole function. Annotations never route. A route is also routed when it
+  function body (not the decorator's own arguments, e.g. ``on_skip``). Annotations never route. A route is also routed when it
   depends on ``GUARD_DEPENDENCIES`` (409 in economic mode).
 
 ponytail: a static over/under-approximation, not a proof. Calls on objects it
@@ -545,9 +546,10 @@ class Index:
             position = (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
             if any(low <= position <= high for low, high in routed):
                 continue
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                if self._table_pattern and _SQL_VERB.search(node.value):
-                    models.update(f"table:{t.lower()}" for t in self._table_pattern.findall(node.value))
+            text = _static_text(node)
+            if text is not None:
+                if self._table_pattern and _SQL_VERB.search(text):
+                    models.update(f"table:{t.lower()}" for t in self._table_pattern.findall(text))
                 continue
             for target in targets.get(id(node), ()):
                 if isinstance(target, Class):
@@ -573,6 +575,12 @@ class Index:
     def _value_classes(self, expr, scope, types):
         if isinstance(expr, ast.Name) and isinstance(types.get(expr.id), _Candidates):
             return list(types[expr.id])
+        if isinstance(expr, (ast.BoolOp, ast.IfExp)):  # any option may be the value
+            options = expr.values if isinstance(expr, ast.BoolOp) else [expr.body, expr.orelse]
+            found = []
+            for option in options:
+                found.extend(c for c in self._value_classes(option, scope, types) if c not in found)
+            return found
         if isinstance(expr, ast.Attribute):
             owners = self._value_classes(expr.value, scope, types)
             if owners:
@@ -654,14 +662,37 @@ class Index:
 
         everything_after = (10**9, 0)
         if any(uses(decorator, DECORATOR_MARKERS) for decorator in func.node.decorator_list):
-            return [((0, 0), everything_after)]
-        authority_vars = typed_authority | {
-            target.id
+            # Only the body: an ``on_skip=`` callback runs in economic mode.
+            return [(_start(func.node.body[0]), everything_after)]
+
+        def is_authority_value(expr):
+            """A reader variable, a marker call such as ``_economic_reader(db)`` or
+            ``legacy_theme_writes_blocked(db)``, or an attribute of one. A reader
+            merely passed into another call, ``is_ready(reader)``, is not."""
+            if isinstance(expr, ast.Name):
+                return expr.id in authority_vars
+            if isinstance(expr, ast.Call):
+                return uses(expr.func, PREDICATE_MARKERS)
+            if isinstance(expr, ast.Attribute):
+                return is_authority_value(expr.value)
+            return False
+
+        authority_vars = set(typed_authority)
+        assigned = [
+            (target.id, node.value)
             for node in func.nodes
-            if isinstance(node, ast.Assign) and uses(node.value, PREDICATE_MARKERS)
+            if isinstance(node, ast.Assign)
             for target in node.targets
             if isinstance(target, ast.Name)
-        }
+        ]
+        grew = True
+        while grew:  # ``reader = _economic_reader(db); source = reader.source_name``
+            grew = False
+            for name, value in assigned:
+                if name not in authority_vars and is_authority_value(value):
+                    authority_vars.add(name)
+                    grew = True
+
         def is_predicate(expr):
             return uses(expr, PREDICATE_MARKERS) or any(
                 isinstance(child, ast.Name) and child.id in authority_vars
@@ -685,18 +716,6 @@ class Index:
             if atom is None:
                 return None
             return atom if truth else _FLIP[atom]
-
-        def is_authority_value(expr):
-            """A reader variable, a marker call such as ``_economic_reader(db)`` or
-            ``legacy_theme_writes_blocked(db)``, or an attribute of one. A reader
-            merely passed into another call, ``is_ready(reader)``, is not."""
-            if isinstance(expr, ast.Name):
-                return expr.id in authority_vars
-            if isinstance(expr, ast.Call):
-                return uses(expr.func, PREDICATE_MARKERS)
-            if isinstance(expr, ast.Attribute):
-                return is_authority_value(expr.value)
-            return False
 
         def atom_authority(expr):
             """The authority a true predicate ``expr`` implies, or None."""
@@ -820,6 +839,21 @@ def _annotation_nodes(nodes):
     for root in roots:
         ids.update(id(child) for child in ast.walk(root))
     return ids
+
+
+def _static_text(node):
+    """The literal text of a string expression, its dynamic parts dropped:
+    ``f"FROM {schema}.theme_clusters"`` or ``"SELECT * FROM " + table_prefix + "theme_clusters"``."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        parts = node.values
+    elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        parts = [node.left, node.right]
+    else:
+        return None
+    texts = [text for part in parts if (text := _static_text(part)) is not None]
+    return " ".join(texts) if texts else None
 
 
 def _param_names(func):

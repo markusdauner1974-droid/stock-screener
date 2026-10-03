@@ -331,10 +331,15 @@ _FIXTURE = {
     """,
     "services/legacy_theme_write_guard.py": """
         def ensure_legacy_theme_writes_allowed(db, force=False): ...
+
+        def skip_in_economic_authority(task=None, *, on_skip=None): ...
     """,
     "entry.py": """
         from app.api.v1.themes_taxonomy import _reject_economic_mode
-        from app.services.legacy_theme_write_guard import ensure_legacy_theme_writes_allowed
+        from app.services.legacy_theme_write_guard import (
+            ensure_legacy_theme_writes_allowed,
+            skip_in_economic_authority,
+        )
         from app.services.economic_theme_read_service import EconomicThemeReader
         from app.services.readers import build_use_case, read_clusters, read_raw
 
@@ -459,6 +464,31 @@ _FIXTURE = {
         def injected(db):
             return build_use_case(db).run()
 
+        def conditional_value(db, flag):
+            from app.services.readers import SafeReader, SqlClusterReader
+            reader = SafeReader() if flag else SqlClusterReader(db)
+            return reader.load()
+
+        def ready_from_reader(db):
+            ready = is_ready(EconomicThemeReader(db))  # not an authority value
+            if ready:
+                return []
+            return read_clusters(db)
+
+        @skip_in_economic_authority
+        def skipped_task_body(db):
+            return read_clusters(db)
+
+        @skip_in_economic_authority(on_skip=read_clusters)  # runs in economic mode
+        def skip_callback(db):
+            return []
+
+        def raw_sql_fstring(db, schema):
+            return db.execute(f"SELECT id FROM {schema}.theme_clusters")
+
+        def raw_sql_concat(db, schema):
+            return db.execute("SELECT id FROM " + schema + ".theme_clusters")
+
         def task_body(db):
             return read_clusters(db)
 
@@ -490,7 +520,7 @@ def test_gate_reports_an_unrouted_read_with_its_call_path(fixture_index):
     assert finding.path == ["app.entry.unrouted", "app.services.readers.read_clusters"]
 
 
-@pytest.mark.parametrize("name", ["raw_sql", "raw_sql_upper"])  # unquoted SQL names fold case
+@pytest.mark.parametrize("name", ["raw_sql", "raw_sql_upper", "raw_sql_fstring", "raw_sql_concat"])  # unquoted SQL names fold case
 def test_gate_reports_raw_sql_naming_a_legacy_table(fixture_index, name):
     assert [f.model for f in _reads(fixture_index, name)] == ["table:theme_clusters"]
 
@@ -517,6 +547,9 @@ def test_gate_accepts_reads_routed_by_authority(fixture_index):
         "reader_passed_to_helper",  # a reader in an unrelated call is not a check
         "forced_raising_check",  # force=True skips the rejection
         "finally_after_raising_check",  # finally runs as the exception unwinds
+        "conditional_value",  # either branch of a conditional may be the value
+        "ready_from_reader",  # a variable merely derived from a reader is not a check
+        "skip_callback",  # the decorator's on_skip callback runs when skipped
     ],
 )
 def test_gate_counts_reads_the_authority_check_does_not_cover(fixture_index, name):
@@ -524,7 +557,14 @@ def test_gate_counts_reads_the_authority_check_does_not_cover(fixture_index, nam
 
 
 @pytest.mark.parametrize(
-    "name", ["reader_parameter_branch", "read_in_legacy_arm", "raising_check", "unforced_raising_check"]
+    "name",
+    [
+        "reader_parameter_branch",
+        "read_in_legacy_arm",
+        "raising_check",
+        "unforced_raising_check",
+        "skipped_task_body",
+    ],
 )
 def test_gate_accepts_a_branch_on_a_reader_parameter(fixture_index, name):
     assert _reads(fixture_index, name) == []
