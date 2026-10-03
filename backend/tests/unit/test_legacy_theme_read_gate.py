@@ -21,8 +21,14 @@ _INTELLIGENCE = "Audit 'Readers with no routing': equivalence and development GE
 _WATCHLIST_ALERTS = "Audit 'Readers with no routing': watchlist stewardship serves ThemeAlert."
 _VALIDATION_ALERTS = "Audit 'Readers with no routing': validation_service serves ThemeAlert."
 _MCP_ALERTS = (
-    "Audit 'Readers with no routing': MCP market_overview reads ThemeAlert (_recent_alerts). "
-    "Assistant and /mcp routes reach it through MarketCopilotService's tool table."
+    "Audit 'Readers with no routing': MCP market_overview reads ThemeAlert (_recent_alerts), "
+    "and daily_digest reaches validation_service. Assistant and /mcp routes reach both "
+    "through MarketCopilotService's tool table."
+)
+_DIGEST_VALIDATION = (
+    "Audit 'Readers with no routing': validation_service. The daily digest routes its "
+    "theme section by authority, but builds its validation section from ThemeAlert in "
+    "every mode."
 )
 _TELEMETRY = "Audit 'Readers with no routing': matching telemetry serves legacy ThemeMention stats."
 _DEVELOPMENTS = "Audit 'Readers with no routing': development preparation reads ThemeMention and links."
@@ -93,6 +99,18 @@ ALLOWLIST: dict[str, tuple[str, set[str]]] = {
         _VALIDATION_ALERTS,
         {"ThemeAlert", "ThemeCluster"},
     ),
+    "GET /api/v1/digest/daily": (
+        _DIGEST_VALIDATION,
+        {"ThemeAlert", "ThemeCluster"},
+    ),
+    "GET /api/v1/digest/daily/markdown": (
+        _DIGEST_VALIDATION,
+        {"ThemeAlert", "ThemeCluster"},
+    ),
+    "mcp daily_digest": (
+        _DIGEST_VALIDATION,
+        {"ThemeAlert", "ThemeCluster"},
+    ),
     "GET /api/v1/stocks/{symbol}/validation": (
         _VALIDATION_ALERTS,
         {"ThemeAlert", "ThemeCluster"},
@@ -103,31 +121,31 @@ ALLOWLIST: dict[str, tuple[str, set[str]]] = {
     ),
     "POST /mcp/": (
         _MCP_ALERTS,
-        {"ThemeAlert"},
+        {"ThemeAlert", "ThemeCluster"},
     ),
     "GET /api/v1/assistant/health": (
         _MCP_ALERTS,
-        {"ThemeAlert"},
+        {"ThemeAlert", "ThemeCluster"},
     ),
     "GET /api/v1/assistant/conversations": (
         _MCP_ALERTS,
-        {"ThemeAlert"},
+        {"ThemeAlert", "ThemeCluster"},
     ),
     "POST /api/v1/assistant/conversations": (
         _MCP_ALERTS,
-        {"ThemeAlert"},
+        {"ThemeAlert", "ThemeCluster"},
     ),
     "GET /api/v1/assistant/conversations/{conversation_id}": (
         _MCP_ALERTS,
-        {"ThemeAlert"},
+        {"ThemeAlert", "ThemeCluster"},
     ),
     "POST /api/v1/assistant/conversations/{conversation_id}/messages": (
         _MCP_ALERTS,
-        {"ThemeAlert"},
+        {"ThemeAlert", "ThemeCluster"},
     ),
     "POST /api/v1/assistant/watchlist-add-preview": (
         _MCP_ALERTS,
-        {"ThemeAlert"},
+        {"ThemeAlert", "ThemeCluster"},
     ),
     "GET /api/v1/themes/matching/telemetry": (
         _TELEMETRY,
@@ -229,9 +247,13 @@ def test_no_new_unrouted_legacy_theme_reads(findings):
 
 
 def test_allowlist_has_no_stale_entries(findings):
+    from app.config.settings import settings
+
     stale = {
         entry: sorted(models - {f.model for f in findings.get(entry, [])})
         for entry, (_, models) in ALLOWLIST.items()
+        # POST /mcp/ exists only when the MCP HTTP transport is enabled.
+        if entry != "POST /mcp/" or settings.mcp_http_enabled
     }
     stale = {entry: models for entry, models in stale.items() if models}
     assert not stale, (
@@ -278,6 +300,10 @@ _FIXTURE = {
 
         def build_use_case(db):
             return UseCase(reader=SqlClusterReader(db))
+
+        class SafeReader:
+            def load(self):
+                return []
     """,
     "entry.py": """
         from app.services.economic_theme_read_service import EconomicThemeReader
@@ -307,6 +333,22 @@ _FIXTURE = {
             if flag:
                 EconomicThemeReader(db)
             return read_clusters(db)
+
+        def reader_built_not_checked(db):
+            reader = EconomicThemeReader(db)
+            read_clusters(db)
+            return reader
+
+        def reader_parameter_branch(db, reader: EconomicThemeReader):
+            if reader.source_name == "economic":
+                return []
+            return read_clusters(db)
+
+        def every_injected_implementation(db):
+            from app.services.readers import SafeReader, UseCase, SqlClusterReader
+            UseCase(reader=SafeReader())
+            UseCase(reader=SqlClusterReader(db))
+            return UseCase(reader=SafeReader()).run()
 
         def injected(db):
             return build_use_case(db).run()
@@ -351,10 +393,21 @@ def test_gate_accepts_reads_routed_by_authority(fixture_index):
 
 
 @pytest.mark.parametrize(
-    "name", ["read_before_check", "check_only_annotated", "check_in_other_branch"]
+    "name",
+    [
+        "read_before_check",
+        "check_only_annotated",
+        "check_in_other_branch",
+        "reader_built_not_checked",
+        "every_injected_implementation",
+    ],
 )
 def test_gate_counts_reads_the_authority_check_does_not_cover(fixture_index, name):
     assert [f.model for f in _reads(fixture_index, name)] == ["ThemeCluster"]
+
+
+def test_gate_accepts_a_branch_on_a_reader_parameter(fixture_index):
+    assert _reads(fixture_index, "reader_parameter_branch") == []
 
 
 def test_gate_follows_injected_protocol_dependencies(fixture_index):

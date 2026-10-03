@@ -17,13 +17,15 @@ How it decides, per entry point:
   point.
 - **A legacy read** is a reference to a legacy model class (outside type
   annotations) or a SQL string naming one of their tables.
-- **Routing:** an authority check in ``ROUTING_MARKERS`` decides by mode, so
-  what a function reads or calls after its first check is routed and the walk
-  does not follow it. Only checks that run unconditionally count: in
-  straight-line code, a ``with`` item, a decorator or an ``if`` test, but not
-  inside a branch, loop or handler body, nor in an annotation. Reads before the
-  check stay unrouted. A route is also routed when it depends on
-  ``GUARD_DEPENDENCIES`` (409 in economic mode).
+- **Routing:** code an authority check controls is routed, and the walk does
+  not follow it. What a check controls depends on its kind:
+  ``PREDICATE_MARKERS`` route the branches of an ``if`` whose test uses them
+  (directly or through a variable assigned from them) and, when that ``if``'s
+  body exits, everything after it; merely constructing a reader routes nothing.
+  ``RAISING_MARKERS`` route what follows an unconditional call;
+  ``CONTEXT_MARKERS`` route their ``with`` body; ``DECORATOR_MARKERS`` route the
+  whole function. Annotations never route. A route is also routed when it
+  depends on ``GUARD_DEPENDENCIES`` (409 in economic mode).
 
 ponytail: a static over/under-approximation, not a proof. Calls on objects it
 cannot type are not followed, ORM relationship loads are invisible, and a check
@@ -50,21 +52,30 @@ LEGACY_MODELS = frozenset({
     "SocialThemeAssociation", "SocialThemeDecision",
 })
 
-ROUTING_MARKERS = frozenset({
-    # Authority-routed reads.
+# Authority checks, by how they route (see the module docstring).
+PREDICATE_MARKERS = frozenset({
     "app.services.economic_theme_read_service.EconomicThemeReader",
     "app.api.v1.themes_queries._economic_reader",
-    "app.api.v1.themes_taxonomy._reject_economic_mode",
-    # Writers that are skipped, refused or fenced outside legacy write modes (#472).
     "app.services.legacy_theme_write_guard.legacy_theme_writes_blocked",
-    "app.services.legacy_theme_write_guard.skip_in_economic_authority",
+})
+RAISING_MARKERS = frozenset({
+    "app.api.v1.themes_taxonomy._reject_economic_mode",
+    "app.api.v1.themes_queries._economic_endpoint_required",
     "app.services.legacy_theme_write_guard.ensure_legacy_theme_writes_allowed",
     "app.services.legacy_theme_write_guard.exit_if_legacy_theme_writes_blocked",
+})
+CONTEXT_MARKERS = frozenset({  # fenced writers: refused outside legacy write modes (#472)
     "app.services.theme_discovery_service.ThemeDiscoveryService._fenced_legacy_mutation",
     "app.services.economic_taxonomy_runtime.EconomicTaxonomyRuntimeService.legacy_producer_write",
 })
+DECORATOR_MARKERS = frozenset({"app.services.legacy_theme_write_guard.skip_in_economic_authority"})
+ROUTING_MARKERS = PREDICATE_MARKERS | RAISING_MARKERS | CONTEXT_MARKERS | DECORATOR_MARKERS
 
 GUARD_DEPENDENCIES = frozenset({"app.api.v1.themes_common.reject_legacy_theme_writes"})
+
+# Reported for an entry point the gate cannot map to source, so it cannot pass
+# unchecked; exempt one only through ALLOWLIST, with a reason.
+UNRESOLVED = "<unresolved entry point>"
 
 _CELERY_DISPATCH = frozenset({"delay", "apply_async", "s", "si", "signature", "map", "starmap", "chunks"})
 _SQL_VERB = re.compile(r"\b(FROM|JOIN|UPDATE|INTO|TABLE)\b", re.IGNORECASE)
@@ -103,7 +114,7 @@ class Class:
     methods: dict[str, Func] = field(default_factory=dict)
     bases: list[Class] = field(default_factory=list)
     subclasses: list[Class] = field(default_factory=list)
-    attr_types: dict[str, Class] = field(default_factory=dict)
+    attr_types: dict[str, list[Class]] = field(default_factory=dict)  # every injected type
     is_protocol: bool = False
 
     def mro(self):
@@ -122,10 +133,21 @@ class Class:
         return None
 
     def attr_type(self, name):
+        candidates = self.attr_candidates(name)
+        return candidates[0] if candidates else None
+
+    def attr_candidates(self, name):
+        found = []
         for cls in self.mro():
-            if name in cls.attr_types:
-                return cls.attr_types[name]
-        return None
+            for typed in cls.attr_types.get(name, ()):
+                if typed not in found:
+                    found.append(typed)
+        return found
+
+    def add_attr_type(self, name, typed):
+        known = self.attr_types.setdefault(name, [])
+        if typed not in known:
+            known.append(typed)
 
 
 @dataclass
@@ -234,7 +256,7 @@ class Index:
             if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
                 typed = self._annotation_class(item.annotation, scope)
                 if typed:
-                    cls.attr_types[item.target.id] = typed
+                    cls.add_attr_type(item.target.id, typed)
 
     def resolve(self, dotted, _depth=0):
         """Resolve a dotted name to a Module, Class or Func in app/."""
@@ -363,6 +385,7 @@ class Index:
                 typed = self._annotation_class(arg.annotation, scope)
                 if typed:
                     types[arg.arg] = typed
+        self_attrs = []
         for node in func.nodes:
             if isinstance(node, ast.Assign) and len(node.targets) == 1:
                 typed = self._resolve_expr(node.value, scope, types)
@@ -378,7 +401,7 @@ class Index:
                         and isinstance(target.value, ast.Name)
                         and target.value.id == "self"
                     ):
-                        func.cls.attr_types.setdefault(target.attr, typed)
+                        self_attrs.append((node, target.attr, typed))
             elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
                 typed = self._annotation_class(node.annotation, scope)
                 if typed:
@@ -389,12 +412,47 @@ class Index:
                         typed = self._resolve_expr(item.context_expr, scope, types)
                         if isinstance(typed, Class):
                             types[item.optional_vars.id] = typed
+        if self_attrs:
+            # An implementation picked inside an authority branch is selected
+            # by mode, so it does not join the attribute's unconditional types.
+            selected = self._authority_branch_nodes(func, scope, types)
+            for node, attr, typed in self_attrs:
+                if id(node) not in selected:
+                    func.cls.add_attr_type(attr, typed)
         for node in func.nodes:
             if isinstance(node, ast.Call):
                 cls = self._resolve_expr(node.func, scope, types)
                 if isinstance(cls, Class) and not isinstance(node.func, ast.Call):
                     self._bind_constructor_args(cls, node, scope, types)
         return types
+
+    def _authority_branch_nodes(self, func, scope, types):
+        """Nodes inside the branches of an ``if`` that tests authority mode."""
+
+        def is_authority(expr):
+            return any(
+                getattr(self._resolve_expr(child, scope, types), "qualname", None)
+                in PREDICATE_MARKERS
+                for child in ast.walk(expr)
+                if isinstance(child, (ast.Name, ast.Attribute))
+            )
+
+        authority_vars = {
+            target.id
+            for node in func.nodes
+            if isinstance(node, ast.Assign) and is_authority(node.value)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        branch: set[int] = set()
+        for node in func.nodes:
+            if isinstance(node, ast.If) and (
+                is_authority(node.test)
+                or any(isinstance(c, ast.Name) and c.id in authority_vars for c in ast.walk(node.test))
+            ):
+                for part in [*node.body, *node.orelse]:
+                    branch.update(id(child) for child in ast.walk(part))
+        return branch
 
     def _bind_constructor_args(self, cls, call, scope, types):
         """``Cls(writer=Writer(...))`` types ``Cls.writer`` when ``__init__``
@@ -422,68 +480,136 @@ class Index:
                 continue
             typed = self._resolve_expr(value, scope, types)
             if isinstance(typed, Class):
-                cls.attr_types.setdefault(attr, typed)
+                cls.add_attr_type(attr, typed)
 
     # -- per-function facts -----------------------------------------------
 
     def facts(self, func):
-        """(callees, legacy models read, routing point).
-
-        Callees and models map to the source position where they first occur;
-        the routing point is the position of the first unconditional authority
-        check, or None.
-        """
+        """(callees, legacy models) the function reaches outside routed code."""
         if func.qualname in self._edges:
             return self._edges[func.qualname]
         scope = self._scope(func.module, func)
         types = self._local_types(func, scope)
         annotations = _annotation_nodes(func.nodes)
-        conditional = _conditional_nodes(func.node)
         dispatched = {
             id(node.value) for node in func.nodes
             if isinstance(node, ast.Attribute) and node.attr in _CELERY_DISPATCH
         }
-        callees: dict[str, tuple] = {}
-        models: dict[str, tuple] = {}
-        routing: tuple | None = None
+        targets: dict[int, list] = {}  # node id -> what it refers to
+        for node in func.nodes:
+            if (
+                not isinstance(node, (ast.Name, ast.Attribute))
+                or id(node) in dispatched
+                or id(node) in annotations
+                or (isinstance(node, ast.Name) and node.id in types)  # a typed local value
+            ):
+                continue
+            found = self._method_targets(node, scope, types) if isinstance(node, ast.Attribute) else []
+            if not found:
+                resolved = self._resolve_expr(node, scope, types)
+                found = [resolved] if isinstance(resolved, (Func, Class)) else []
+            if found:
+                targets[id(node)] = found
+        routed = self._routed_ranges(func, targets, types)
 
-        def note(found, key, position):
-            if key not in found or position < found[key]:
-                found[key] = position
-
+        callees: set[str] = set()
+        models: set[str] = set()
         for node in func.nodes:
             position = (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+            if any(low <= position <= high for low, high in routed):
+                continue
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 if self._table_pattern and _SQL_VERB.search(node.value):
-                    for table in self._table_pattern.findall(node.value):
-                        note(models, f"table:{table}", position)
+                    models.update(f"table:{t}" for t in self._table_pattern.findall(node.value))
                 continue
-            if not isinstance(node, (ast.Name, ast.Attribute)) or id(node) in dispatched:
-                continue
-            if isinstance(node, ast.Name) and node.id in types:
-                continue  # a typed local value, not a reference to a definition
-            resolved = self._resolve_expr(node, scope, types)
-            if resolved is None:
-                continue
-            if id(node) in annotations:
-                continue  # type hints neither read nor route
-            qualname = resolved.qualname if isinstance(resolved, (Func, Class)) else None
-            if qualname in ROUTING_MARKERS and id(node) not in conditional:
-                routing = position if routing is None else min(routing, position)
-            if isinstance(resolved, Class):
-                if resolved.qualname in self.legacy_models:
-                    note(models, resolved.node.name, position)
-                    continue
-                for ctor in ("__init__", "__post_init__"):
-                    method = resolved.method(ctor)
-                    if method:
-                        note(callees, method.qualname, position)
-            elif isinstance(resolved, Func) and resolved is not func:
-                note(callees, resolved.qualname, position)
-                for override in self.overrides(resolved):
-                    note(callees, override.qualname, position)
-        self._edges[func.qualname] = (callees, models, routing)
+            for target in targets.get(id(node), ()):
+                if isinstance(target, Class):
+                    if target.qualname in self.legacy_models:
+                        models.add(target.node.name)
+                        continue
+                    for ctor in ("__init__", "__post_init__"):
+                        method = target.method(ctor)
+                        if method:
+                            callees.add(method.qualname)
+                elif target is not func and target.qualname not in ROUTING_MARKERS:
+                    # Authority checks are trusted boundaries: not walked into.
+                    callees.add(target.qualname)
+                    callees.update(override.qualname for override in self.overrides(target))
+        self._edges[func.qualname] = (callees, models)
         return self._edges[func.qualname]
+
+    def _method_targets(self, node, scope, types):
+        """Methods an attribute call may reach, across every injected type."""
+        owners = self._value_classes(node.value, scope, types)
+        return [method for owner in owners if (method := owner.method(node.attr))]
+
+    def _value_classes(self, expr, scope, types):
+        if isinstance(expr, ast.Attribute):
+            owners = self._value_classes(expr.value, scope, types)
+            if owners:
+                return [typed for owner in owners for typed in owner.attr_candidates(expr.attr)]
+        resolved = self._resolve_expr(expr, scope, types)
+        return [resolved] if isinstance(resolved, Class) else []
+
+    def _routed_ranges(self, func, targets, types):
+        """Source ranges an authority check controls, as (start, end) positions."""
+        # Locals and parameters whose value is an authority reader, e.g.
+        # ``theme_reader: EconomicThemeReader`` passed into a helper.
+        typed_authority = {
+            name for name, typed in types.items()
+            if getattr(typed, "qualname", None) in PREDICATE_MARKERS
+        }
+        if not typed_authority and not any(
+            getattr(target, "qualname", None) in ROUTING_MARKERS
+            for found in targets.values()
+            for target in found
+        ):
+            return []  # most functions: no check, nothing routed
+
+        def uses(node, kinds):
+            return any(
+                getattr(target, "qualname", None) in kinds
+                for child in ast.walk(node)
+                for target in targets.get(id(child), ())
+            )
+
+        def diverts(body):
+            last = body[-1]
+            return isinstance(last, (ast.Return, ast.Raise, ast.Continue, ast.Break)) or (
+                isinstance(last, ast.Expr) and uses(last.value, RAISING_MARKERS)
+            )
+
+        conditional = _conditional_nodes(func.node)
+        everything_after = (10**9, 0)
+        if any(uses(decorator, DECORATOR_MARKERS) for decorator in func.node.decorator_list):
+            return [((0, 0), everything_after)]
+        authority_vars = typed_authority | {
+            target.id
+            for node in func.nodes
+            if isinstance(node, ast.Assign) and uses(node.value, PREDICATE_MARKERS)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        ranges = []
+        for node in func.nodes:
+            if isinstance(node, (ast.With, ast.AsyncWith)):
+                if any(uses(item.context_expr, CONTEXT_MARKERS) for item in node.items):
+                    ranges.append((_start(node.body[0]), _end(node.body[-1])))
+            elif isinstance(node, ast.If):
+                if uses(node.test, PREDICATE_MARKERS) or any(
+                    isinstance(child, ast.Name) and child.id in authority_vars
+                    for child in ast.walk(node.test)
+                ):
+                    ranges.append((_start(node.body[0]), _end((node.orelse or node.body)[-1])))
+                    if id(node) not in conditional and diverts(node.body):
+                        ranges.append((_end(node), everything_after))
+            elif (
+                isinstance(node, ast.Expr)
+                and id(node) not in conditional
+                and uses(node.value, RAISING_MARKERS)
+            ):
+                ranges.append((_end(node), everything_after))
+        return ranges
 
     def overrides(self, method):
         """Virtual dispatch: the method's overrides in app subclasses and, for a
@@ -500,10 +626,14 @@ class Index:
                     found.append(cls.methods[name])
             if owner.is_protocol:
                 required = set(owner.methods) - {"__init__"}
+                signature = _param_names(method)
                 for cls in self.classes.values():
-                    if not cls.is_protocol and name in cls.methods and required <= {
-                        m for c in cls.mro() for m in c.methods
-                    }:
+                    if (
+                        not cls.is_protocol
+                        and name in cls.methods
+                        and _param_names(cls.methods[name]) == signature
+                        and required <= {m for c in cls.mro() for m in c.methods}
+                    ):
                         found.append(cls.methods[name])
             self._overrides[method.qualname] = found
         return self._overrides[method.qualname]
@@ -519,13 +649,11 @@ class Index:
                 queue.append(root.qualname)
         while queue:
             qualname = queue.popleft()
-            callees, models, routing = self.facts(self.funcs[qualname])
-            for model, position in models.items():
-                if model not in found and (routing is None or position < routing):
+            callees, models = self.facts(self.funcs[qualname])
+            for model in models:
+                if model not in found:
                     found[model] = _path(parents, qualname)
-            for callee, position in callees.items():
-                if routing is not None and position >= routing:
-                    continue  # reached only after the authority check
+            for callee in callees:
                 if callee not in parents:
                     parents[callee] = qualname
                     queue.append(callee)
@@ -537,7 +665,10 @@ class Index:
         qualname = getattr(target, "__qualname__", "")
         if module is None or "<locals>" in qualname:
             return None
-        return self.funcs.get(f"{module}.{qualname}")
+        key = f"{module}.{qualname}"
+        if key in self.classes:  # a class used as a dependency
+            return self.classes[key].method("__call__") or self.classes[key].method("__init__")
+        return self.funcs.get(key)
 
 
 def _annotation_nodes(nodes):
@@ -553,6 +684,21 @@ def _annotation_nodes(nodes):
     for root in roots:
         ids.update(id(child) for child in ast.walk(root))
     return ids
+
+
+def _param_names(func):
+    """Positional parameter names after self/cls: how a Protocol port is
+    matched to its implementations, beyond the method name."""
+    args = func.node.args
+    return [a.arg for a in [*args.posonlyargs, *args.args][1:]]
+
+
+def _start(node):
+    return (node.lineno, node.col_offset)
+
+
+def _end(node):
+    return (node.end_lineno, node.end_col_offset)
 
 
 def _conditional_nodes(func_node):
@@ -604,12 +750,10 @@ def api_entry_points(index, app):
             dependant = stack.pop()
             dependency_calls.append(dependant.call)
             stack.extend(dependant.dependencies)
-        roots = [index.func_for(call) for call in [route.endpoint, *dependency_calls] if call]
-        guarded = any(
-            func is not None and func.qualname in GUARD_DEPENDENCIES
-            for func in roots
-        )
-        yield entry, [f for f in roots if f is not None], guarded
+        dependencies = [index.func_for(call) for call in dependency_calls if call]
+        guarded = any(f is not None and f.qualname in GUARD_DEPENDENCIES for f in dependencies)
+        # The endpoint first (None when unresolvable); dependencies outside app/ are skipped.
+        yield entry, [index.func_for(route.endpoint), *(f for f in dependencies if f)], guarded
 
 
 def celery_entry_points(index, celery_app):
@@ -617,9 +761,7 @@ def celery_entry_points(index, celery_app):
     for name, task in sorted(celery_app.tasks.items()):
         if name.startswith("celery."):
             continue
-        func = index.func_for(task.run)
-        if func is not None:
-            yield f"task {name}", [func], False
+        yield f"task {name}", [index.func_for(task.run)], False
 
 
 def mcp_entry_points(index):
@@ -629,8 +771,8 @@ def mcp_entry_points(index):
             continue
         keywords = {kw.arg: kw.value for kw in node.keywords}
         handler = keywords.get("handler")
-        if isinstance(handler, ast.Attribute) and handler.attr in service.methods:
-            yield f"mcp {keywords['name'].value}", [service.methods[handler.attr]], False
+        method = service.methods.get(getattr(handler, "attr", None))
+        yield f"mcp {keywords['name'].value}", [method], False
 
 
 def unrouted_legacy_reads(app, celery_app):
@@ -651,5 +793,8 @@ def unrouted_legacy_reads(app, celery_app):
         *celery_entry_points(index, celery_app),
         *mcp_entry_points(index),
     ]:
-        results[entry] = [] if guarded else index.legacy_reads(entry, roots)
+        if roots[0] is None:
+            results[entry] = [Finding(entry, UNRESOLVED, [])]
+        else:
+            results[entry] = [] if guarded else index.legacy_reads(entry, roots)
     return results

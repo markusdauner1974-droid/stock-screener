@@ -263,7 +263,9 @@ that a route, task or MCP tool reaches, with these differences:
   Social taxonomy adapter); and the Social association decision endpoint, whose
   economic-mode branch (`_decide_economic`) still reads and revises the bridged
   `SocialThemeAssociation` row, so "mode-aware" above does not mean "no legacy
-  read".
+  read"; and the daily digest (`/digest/daily`, its markdown variant and the MCP
+  `daily_digest` tool), which routes its theme section but builds its
+  validation section through `validation_service` in every mode.
 - Not listed: the MCP `theme_state` alert read (`market_copilot.py:719`) runs
   only in the legacy branch, after the tool's economic-mode return, so it is
   routed. `theme_pipeline_state_backfill_service` runs only from a CLI script,
