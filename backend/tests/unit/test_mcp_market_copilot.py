@@ -11,6 +11,7 @@ from app.interfaces.mcp.market_copilot import MarketCopilotService
 from app.infra.db.models.feature_store import FeatureRun
 from app.models.theme import ThemeMetrics
 from tests.helpers.mcp_fixture import create_mcp_test_session_factory, seed_market_copilot_data
+from tests.helpers.taxonomy_authority import set_economic_authority
 
 
 @pytest.fixture()
@@ -67,6 +68,15 @@ def test_market_overview_returns_expected_sections(read_only_service):
     assert "daily-market-pipeline-cn" in task_names
     assert payload["top_candidates"][0]["symbol"] == "NVDA"
     assert payload["citations"][2]["as_of"] == "2026-03-29"
+
+
+def test_market_overview_serves_no_legacy_theme_alerts_in_economic_mode(session_factory, read_only_service):
+    with session_factory() as db:
+        set_economic_authority(db)
+
+    payload = _tool_payload(read_only_service.call_tool("market_overview", {}))
+
+    assert payload["alerts"] == []
 
 
 def test_find_candidates_applies_filters(read_only_service):

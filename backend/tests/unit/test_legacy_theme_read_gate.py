@@ -18,18 +18,6 @@ from tests.helpers.legacy_theme_read_gate import Index, api_entry_points, unrout
 
 _REVIEW = "Audit 'Readers with no routing': review/merge GETs serve legacy clusters and suggestions."
 _INTELLIGENCE = "Audit 'Readers with no routing': equivalence and development GETs serve legacy identities."
-_WATCHLIST_ALERTS = "Audit 'Readers with no routing': watchlist stewardship serves ThemeAlert."
-_VALIDATION_ALERTS = "Audit 'Readers with no routing': validation_service serves ThemeAlert."
-_MCP_ALERTS = (
-    "Audit 'Readers with no routing': MCP market_overview reads ThemeAlert (_recent_alerts), "
-    "and daily_digest reaches validation_service. Assistant and /mcp routes reach both "
-    "through MarketCopilotService's tool table."
-)
-_DIGEST_VALIDATION = (
-    "Audit 'Readers with no routing': validation_service. The daily digest routes its "
-    "theme section by authority, but builds its validation section from ThemeAlert in "
-    "every mode."
-)
 _TELEMETRY = "Audit 'Readers with no routing': matching telemetry serves legacy ThemeMention stats."
 _DEVELOPMENTS = "Audit 'Readers with no routing': development preparation reads ThemeMention and links."
 _CONTENT = "Audit 'Readers with no routing': content listing annotates items with ThemeMention."
@@ -90,62 +78,6 @@ ALLOWLIST: dict[str, tuple[str, set[str]]] = {
     "GET /api/v1/themes/{theme_id}/developments": (
         _INTELLIGENCE,
         {"ThemeCluster", "ThemeDevelopmentTheme", "ThemeEquivalenceOperation", "ThemeMention"},
-    ),
-    "GET /api/v1/user-watchlists/{watchlist_id}/stewardship": (
-        _WATCHLIST_ALERTS,
-        {"ThemeAlert"},
-    ),
-    "GET /api/v1/validation/overview": (
-        _VALIDATION_ALERTS,
-        {"ThemeAlert", "ThemeCluster"},
-    ),
-    "GET /api/v1/digest/daily": (
-        _DIGEST_VALIDATION,
-        {"ThemeAlert", "ThemeCluster"},
-    ),
-    "GET /api/v1/digest/daily/markdown": (
-        _DIGEST_VALIDATION,
-        {"ThemeAlert", "ThemeCluster"},
-    ),
-    "mcp daily_digest": (
-        _DIGEST_VALIDATION,
-        {"ThemeAlert", "ThemeCluster"},
-    ),
-    "GET /api/v1/stocks/{symbol}/validation": (
-        _VALIDATION_ALERTS,
-        {"ThemeAlert", "ThemeCluster"},
-    ),
-    "mcp market_overview": (
-        _MCP_ALERTS,
-        {"ThemeAlert"},
-    ),
-    "POST /mcp/": (
-        _MCP_ALERTS,
-        {"ThemeAlert", "ThemeCluster"},
-    ),
-    "GET /api/v1/assistant/health": (
-        _MCP_ALERTS,
-        {"ThemeAlert", "ThemeCluster"},
-    ),
-    "GET /api/v1/assistant/conversations": (
-        _MCP_ALERTS,
-        {"ThemeAlert", "ThemeCluster"},
-    ),
-    "POST /api/v1/assistant/conversations": (
-        _MCP_ALERTS,
-        {"ThemeAlert", "ThemeCluster"},
-    ),
-    "GET /api/v1/assistant/conversations/{conversation_id}": (
-        _MCP_ALERTS,
-        {"ThemeAlert", "ThemeCluster"},
-    ),
-    "POST /api/v1/assistant/conversations/{conversation_id}/messages": (
-        _MCP_ALERTS,
-        {"ThemeAlert", "ThemeCluster"},
-    ),
-    "POST /api/v1/assistant/watchlist-add-preview": (
-        _MCP_ALERTS,
-        {"ThemeAlert", "ThemeCluster"},
     ),
     "GET /api/v1/themes/matching/telemetry": (
         _TELEMETRY,

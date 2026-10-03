@@ -23,6 +23,7 @@ from app.services.validation_service import (
     ThemeAlertValidationSource,
     ValidationService,
 )
+from tests.helpers.taxonomy_authority import set_economic_authority
 
 FIXED_TODAY = date(2026, 4, 5)
 FIXED_NOW = datetime(2026, 4, 5, 14, 0, tzinfo=UTC)
@@ -245,6 +246,34 @@ def test_validation_service_freshness_uses_eastern_day_bounds_for_theme_alerts(s
 
     assert payload.freshness.latest_theme_alert_at == "2026-04-05T01:30:00+00:00"
     assert len(payload.recent_events) == 1
+
+
+def test_validation_service_serves_no_legacy_theme_alerts_in_economic_mode(session):
+    session.add(
+        ThemeAlert(
+            alert_type="breakout",
+            title="Legacy breakout",
+            severity="warning",
+            related_tickers=["NVDA"],
+            triggered_at=FIXED_NOW,
+        )
+    )
+    session.commit()
+    set_economic_authority(session)
+    service = ValidationService(
+        outcome_calculator=PriceOutcomeCalculator(_FakePriceCache({"NVDA": None}))
+    )
+
+    payload = service.get_overview(
+        session,
+        source_kind=ValidationSourceKind.THEME_ALERT,
+        lookback_days=30,
+        as_of_date=FIXED_TODAY,
+    )
+
+    assert payload.recent_events == []
+    assert payload.freshness.latest_theme_alert_at is None
+    assert "economic_theme_alerts_unavailable" in payload.degraded_reasons
 
 
 def test_validation_service_uses_eastern_now_for_default_as_of_date(session, monkeypatch):

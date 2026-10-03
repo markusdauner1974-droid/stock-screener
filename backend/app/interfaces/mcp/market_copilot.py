@@ -1493,6 +1493,8 @@ class MarketCopilotService:
         return latest_breadth(db, market="US", as_of_date=as_of_date)
 
     def _recent_alerts(self, db: Session, limit: int) -> list[dict[str, Any]]:
+        if EconomicThemeReader(db).source_name == "economic":
+            return []  # legacy-only, as /themes/alerts in economic mode (#475)
         rows = (
             db.query(ThemeAlert)
             .filter(ThemeAlert.is_dismissed == False, ThemeAlert.is_read == False)

@@ -25,6 +25,7 @@ from app.schemas.validation import (
     ValidationSourceBreakdown,
     ValidationSourceKind,
 )
+from app.services.economic_theme_read_service import EconomicThemeReader
 from app.services.price_cache_service import PriceCacheService
 from app.utils.market_hours import (
     EASTERN,
@@ -230,6 +231,9 @@ class ThemeAlertValidationSource:
         until_date: date | None = None,
         symbol: str | None = None,
     ) -> tuple[list[RawValidationEvent], list[str]]:
+        if EconomicThemeReader(db).source_name == "economic":
+            # Theme alerts are legacy-only; economic mode serves none, as /themes/alerts does (#475).
+            return [], ["economic_theme_alerts_unavailable"]
         cutoff_datetime, _ = eastern_day_bounds_utc(cutoff_date)
         query = (
             db.query(ThemeAlert, ThemeCluster.display_name)
@@ -682,13 +686,15 @@ class ValidationService:
             feature_query = feature_query.filter(FeatureRun.as_of_date <= as_of_date)
         latest_feature_as_of_date = feature_query.scalar()
 
-        alert_query = db.query(func.max(ThemeAlert.triggered_at)).filter(
-            ThemeAlert.alert_type.in_(THEME_ALERT_TYPES)
-        )
-        if as_of_date is not None:
-            _, cutoff = eastern_day_bounds_utc(as_of_date)
-            alert_query = alert_query.filter(ThemeAlert.triggered_at < cutoff)
-        latest_theme_alert_at = alert_query.scalar()
+        latest_theme_alert_at = None
+        if EconomicThemeReader(db).source_name != "economic":
+            alert_query = db.query(func.max(ThemeAlert.triggered_at)).filter(
+                ThemeAlert.alert_type.in_(THEME_ALERT_TYPES)
+            )
+            if as_of_date is not None:
+                _, cutoff = eastern_day_bounds_utc(as_of_date)
+                alert_query = alert_query.filter(ThemeAlert.triggered_at < cutoff)
+            latest_theme_alert_at = alert_query.scalar()
         return ValidationFreshness(
             latest_feature_as_of_date=(
                 latest_feature_as_of_date.isoformat() if latest_feature_as_of_date else None
