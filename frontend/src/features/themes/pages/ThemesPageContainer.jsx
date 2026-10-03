@@ -34,6 +34,7 @@ import {
   getEconomicThemes,
 } from '../../../api/economicThemes';
 import EconomicTaxonomyReview from '../../../components/Themes/EconomicTaxonomyReview';
+import ManageSourcesModal from '../../../components/Themes/ManageSourcesModal';
 import ThemeSourcesModal from '../../../components/Themes/ThemeSourcesModal';
 import ThemeReviewDialog from '../../../components/Themes/ThemeReviewDialog';
 import ThemeSettingsDialog from '../../../components/Themes/ThemeSettingsDialog';
@@ -81,6 +82,7 @@ function ThemesPage() {
   const [reviewDialogTab, setReviewDialogTab] = useState(0);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [settingsDialogTab, setSettingsDialogTab] = useState(0);
+  const [sourcesManagerOpen, setSourcesManagerOpen] = useState(false);
   const [articleBrowserOpen, setArticleBrowserOpen] = useState(false);
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
   const [selectedPipeline, setSelectedPipeline] = useState('technical');
@@ -441,13 +443,19 @@ function ThemesPage() {
               Global taxonomy · generation {economicCatalog.generation_id}
             </Typography>
           </Box>
-          <Button
-            variant="outlined"
-            onClick={() => economicReviewQuery.refetch()}
-            disabled={economicReviewQuery.isFetching}
-          >
-            Refresh taxonomy review
-          </Button>
+          <Stack direction="row" spacing={1}>
+            {/* Ingested sources still feed economic evidence (#471). */}
+            <Button variant="outlined" onClick={() => setSourcesManagerOpen(true)}>
+              Content sources
+            </Button>
+            <Button
+              variant="outlined"
+              onClick={() => economicReviewQuery.refetch()}
+              disabled={economicReviewQuery.isFetching}
+            >
+              Refresh taxonomy review
+            </Button>
+          </Stack>
         </Stack>
 
         <Grid container spacing={2}>
@@ -496,6 +504,10 @@ function ThemesPage() {
           theme={selectedEconomicTheme}
           generationId={economicCatalog.generation_id}
           onClose={() => setSelectedEconomicThemeId(null)}
+        />
+        <ManageSourcesModal
+          open={sourcesManagerOpen}
+          onClose={() => setSourcesManagerOpen(false)}
         />
       </Container>
     );
