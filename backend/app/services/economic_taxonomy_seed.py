@@ -6,9 +6,12 @@ import re
 from dataclasses import dataclass
 from uuid import UUID
 
+from sqlalchemy.orm import Session
+
 from app.infra.db.repositories.economic_taxonomy_repo import (
     EconomicTaxonomyRepository,
 )
+from app.services.economic_taxonomy_fence import exclusive_publication
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,3 +172,38 @@ def seed_initial_dimensions(
                 actor=actor,
             )
 
+
+
+class SeedRefused(RuntimeError):
+    """The authority row already has a processing taxonomy or is not plain legacy."""
+
+
+def seed_governed_snapshot(session: Session, *, actor: str) -> UUID:
+    """Seed the governed V1 draft and make it the processing taxonomy.
+
+    Runs under the exclusive writer fence, whose authority lock inserts the
+    implicit ``legacy`` row when none exists. That row, or one a fenced legacy
+    write created earlier (e.g. a theme metrics run), is adopted with its epoch
+    kept (#473). Refuses a row that already has a processing taxonomy, is not
+    in legacy mode, or has writes fenced; then nothing is written.
+    """
+    with exclusive_publication(session) as authority:
+        if (
+            authority.mode != "legacy"
+            or authority.processing_taxonomy_version_id is not None
+            or authority.writes_fenced
+        ):
+            session.rollback()
+            raise SeedRefused(
+                "taxonomy authority is not an unseeded legacy row: "
+                f"mode={authority.mode} "
+                f"processing_taxonomy_version_id={authority.processing_taxonomy_version_id} "
+                f"writes_fenced={authority.writes_fenced}"
+            )
+        repository = EconomicTaxonomyRepository(session)
+        draft = repository.create_draft(actor=actor, reason="V1 governed seed")
+        seed_initial_dimensions(repository, draft.id, actor=actor)
+        authority.processing_taxonomy_version_id = draft.id
+        authority.processing_head_revision = 1
+        session.commit()
+    return draft.id
