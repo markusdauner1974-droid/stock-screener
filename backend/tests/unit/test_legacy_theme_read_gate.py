@@ -14,7 +14,7 @@ import textwrap
 
 import pytest
 
-from tests.helpers.legacy_theme_read_gate import Index, unrouted_legacy_reads
+from tests.helpers.legacy_theme_read_gate import Index, api_entry_points, unrouted_legacy_reads
 
 _REVIEW = "Audit 'Readers with no routing': review/merge GETs serve legacy clusters and suggestions."
 _INTELLIGENCE = "Audit 'Readers with no routing': equivalence and development GETs serve legacy identities."
@@ -308,6 +308,13 @@ _FIXTURE = {
             def load(self):
                 return []
 
+        class BindUseCase:
+            def __init__(self, reader):
+                self.reader = reader
+
+            def run(self):
+                return self.reader.load()
+
         class AliasUseCase:
             def __init__(self, *, reader):
                 self.reader = reader
@@ -316,7 +323,14 @@ _FIXTURE = {
                 reader = self.reader  # a local copy must keep every injected type
                 return reader.load()
     """,
+    "api/v1/themes_common.py": """
+        def reject_legacy_theme_writes(db): ...
+    """,
+    "api/v1/themes_taxonomy.py": """
+        def _reject_economic_mode(db): ...
+    """,
     "entry.py": """
+        from app.api.v1.themes_taxonomy import _reject_economic_mode
         from app.services.economic_theme_read_service import EconomicThemeReader
         from app.services.readers import build_use_case, read_clusters, read_raw
 
@@ -370,6 +384,29 @@ _FIXTURE = {
                 return read_clusters(db)
             return []
 
+        def read_in_else_of_mixed_check(db, reader: EconomicThemeReader, flag):
+            if reader.source_name == "economic" and flag:
+                return []
+            return read_clusters(db)  # economic authority with flag False lands here
+
+        def constructor_takes_every_candidate(db, flag):
+            from app.services.readers import BindUseCase, SafeReader, SqlClusterReader
+            reader = SafeReader()
+            if flag:
+                reader = SqlClusterReader(db)
+            return BindUseCase(reader).run()
+
+        def raising_check(db):
+            _reject_economic_mode(db)
+            return read_clusters(db)
+
+        def caught_raising_check(db):
+            try:
+                _reject_economic_mode(db)
+            except Exception:
+                pass
+            return read_clusters(db)
+
         def reassigned_local(db, flag):
             from app.services.readers import SafeReader, SqlClusterReader
             reader = SqlClusterReader(db)
@@ -412,7 +449,7 @@ def fixture_index(tmp_path_factory):
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(textwrap.dedent(source))
-    for package in (root, root / "models", root / "services"):
+    for package in (root, root / "models", root / "services", root / "api", root / "api" / "v1"):
         (package / "__init__.py").touch()
     return Index({"app.models.theme.ThemeCluster"}, {"theme_clusters"}, root=root)
 
@@ -448,13 +485,16 @@ def test_gate_accepts_reads_routed_by_authority(fixture_index):
         "read_after_legacy_return",  # past a legacy-arm return, only economic remains
         "alias_keeps_every_implementation",
         "reassigned_local",  # a later assignment must not hide the earlier type
+        "read_in_else_of_mixed_check",  # the else arm of `economic and flag` is not legacy-only
+        "constructor_takes_every_candidate",
+        "caught_raising_check",  # a caught raise does not divert
     ],
 )
 def test_gate_counts_reads_the_authority_check_does_not_cover(fixture_index, name):
     assert [f.model for f in _reads(fixture_index, name)] == ["ThemeCluster"]
 
 
-@pytest.mark.parametrize("name", ["reader_parameter_branch", "read_in_legacy_arm"])
+@pytest.mark.parametrize("name", ["reader_parameter_branch", "read_in_legacy_arm", "raising_check"])
 def test_gate_accepts_a_branch_on_a_reader_parameter(fixture_index, name):
     assert _reads(fixture_index, name) == []
 
@@ -469,3 +509,40 @@ def test_gate_follows_injected_protocol_dependencies(fixture_index):
 
 def test_gate_leaves_celery_dispatch_to_the_task_entry_point(fixture_index):
     assert _reads(fixture_index, "dispatches") == []
+
+
+def _named(module, qualname):
+    """A live callable the gate maps to fixture source by module and qualname."""
+
+    def call():
+        return None
+
+    call.__module__, call.__qualname__ = module, qualname
+    return call
+
+
+def test_route_guard_covers_only_what_runs_after_it(fixture_index):
+    from fastapi import Depends, FastAPI
+
+    read = _named("app.entry", "unrouted")  # reads ThemeCluster
+    guard = _named("app.api.v1.themes_common", "reject_legacy_theme_writes")
+
+    def before(_read=Depends(read), _guard=Depends(guard)):
+        return None
+
+    def after(_guard=Depends(guard), _read=Depends(read)):
+        return None
+
+    app = FastAPI()
+    for path, endpoint in (("/before", before), ("/after", after)):
+        endpoint.__module__, endpoint.__qualname__ = "app.entry", "unrouted"
+        app.get(path)(endpoint)
+
+    reads = {
+        entry: [f.model for f in fixture_index.legacy_reads(entry, roots)]
+        for entry, _endpoint, roots in api_entry_points(fixture_index, app)
+    }
+
+    # FastAPI resolves dependencies in declaration order and the endpoint last:
+    # a read before the guard runs in economic mode; after it, only legacy.
+    assert reads == {"GET /before": ["ThemeCluster"], "GET /after": []}

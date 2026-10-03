@@ -505,8 +505,8 @@ class Index:
             attr = param if stored is None else stored.get(param)
             if attr is None:
                 continue
-            typed = self._resolve_expr(value, scope, types)
-            if isinstance(typed, Class):
+            # Every class the argument may hold, e.g. a local assigned on two paths.
+            for typed in self._value_classes(value, scope, types):
                 cls.add_attr_type(attr, typed)
 
     # -- per-function facts -----------------------------------------------
@@ -602,13 +602,19 @@ class Index:
                 for target in targets.get(id(child), ())
             )
 
-        def diverts(body):
-            last = body[-1]
-            return isinstance(last, (ast.Return, ast.Raise, ast.Continue, ast.Break)) or (
-                isinstance(last, ast.Expr) and uses(last.value, RAISING_MARKERS)
+        conditional = _conditional_nodes(func.node)
+        caught = _caught_nodes(func.node)
+
+        def raises(node):
+            # A raise inside a try body with handlers may be caught and carry on.
+            return id(node) not in caught and (
+                isinstance(node, ast.Raise)
+                or (isinstance(node, ast.Expr) and uses(node.value, RAISING_MARKERS))
             )
 
-        conditional = _conditional_nodes(func.node)
+        def diverts(body):
+            last = body[-1]
+            return isinstance(last, (ast.Return, ast.Continue, ast.Break)) or raises(last)
         everything_after = (10**9, 0)
         if any(uses(decorator, DECORATOR_MARKERS) for decorator in func.node.decorator_list):
             return [((0, 0), everything_after)]
@@ -625,16 +631,26 @@ class Index:
                 for child in ast.walk(expr)
             )
 
-        def polarity(expr):
-            """Which authority a true ``expr`` implies: "economic", "legacy" or None."""
+        def implies(expr, truth):
+            """The authority ``expr`` evaluating to ``truth`` implies, or None."""
             if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not):
-                return _FLIP.get(polarity(expr.operand))
+                return implies(expr.operand, not truth)
             if isinstance(expr, ast.BoolOp):
-                known = {polarity(value) for value in expr.values}
-                if isinstance(expr.op, ast.And):  # true only if every operand is
+                known = {implies(value, truth) for value in expr.values}
+                if isinstance(expr.op, ast.And) == truth:
+                    # `and` true / `or` false: every operand had ``truth``,
+                    # so any operand with a known authority decides.
                     known.discard(None)
-                    return known.pop() if len(known) == 1 else None
-                return known.pop() if len(known) == 1 else None  # or: all must agree
+                # `and` false / `or` true: only some operand had it, so
+                # every operand must imply the same authority.
+                return known.pop() if len(known) == 1 else None
+            atom = atom_authority(expr)
+            if atom is None:
+                return None
+            return atom if truth else _FLIP[atom]
+
+        def atom_authority(expr):
+            """The authority a true predicate ``expr`` implies, or None."""
             if not is_predicate(expr):
                 return None
             if isinstance(expr, ast.Compare):
@@ -664,22 +680,19 @@ class Index:
                 if any(uses(item.context_expr, CONTEXT_MARKERS) for item in node.items):
                     ranges.append((_start(node.body[0]), _end(node.body[-1])))
             elif isinstance(node, ast.If) and is_predicate(node.test):
-                # Only the arm that runs under legacy authority is routed; the
-                # economic arm is scanned. With unknown polarity, neither is.
-                arms = {"legacy": node.body, "economic": node.orelse}
-                if polarity(node.test) == "economic":
-                    arms = {"legacy": node.orelse, "economic": node.body}
-                elif polarity(node.test) is None:
-                    continue
-                if arms["legacy"]:
-                    ranges.append((_start(arms["legacy"][0]), _end(arms["legacy"][-1])))
-                if id(node) not in conditional and arms["economic"] and diverts(arms["economic"]):
+                # Each arm is routed only if reaching it implies legacy
+                # authority (``economic and flag`` false is not legacy-only).
+                arms = [(node.body, implies(node.test, True)), (node.orelse, implies(node.test, False))]
+                for arm, authority in arms:
+                    if arm and authority == "legacy":
+                        ranges.append((_start(arm[0]), _end(arm[-1])))
+                # Code after the if is legacy-only when every arm that falls
+                # through to it is (an empty else falls through).
+                if id(node) not in conditional and all(
+                    authority == "legacy" or (arm and diverts(arm)) for arm, authority in arms
+                ):
                     ranges.append((_end(node), everything_after))
-            elif (
-                isinstance(node, ast.Expr)
-                and id(node) not in conditional
-                and uses(node.value, RAISING_MARKERS)
-            ):
+            elif isinstance(node, ast.Expr) and id(node) not in conditional and raises(node):
                 ranges.append((_end(node), everything_after))
         return ranges
 
@@ -797,6 +810,17 @@ def _conditional_nodes(func_node):
     return conditional
 
 
+def _caught_nodes(func_node):
+    """Nodes inside a ``try`` body that has handlers: an exception raised there
+    may be caught, so it does not necessarily leave the function."""
+    caught: set[int] = set()
+    for node in ast.walk(func_node):
+        if isinstance(node, (ast.Try, getattr(ast, "TryStar", ast.Try))) and node.handlers:
+            for statement in node.body:
+                caught.update(id(child) for child in ast.walk(statement))
+    return caught
+
+
 def _path(parents, qualname):
     path = []
     while qualname is not None:
@@ -816,16 +840,32 @@ def api_entry_points(index, app):
             continue
         methods = ",".join(sorted(getattr(route, "methods", None) or {"WS"}))
         entry = f"{methods} {route.path}"
-        dependency_calls = []
-        stack = list(route.dependant.dependencies)
-        while stack:
-            dependant = stack.pop()
-            dependency_calls.append(dependant.call)
-            stack.extend(dependant.dependencies)
-        dependencies = [index.func_for(call) for call in dependency_calls if call]
-        guarded = any(f is not None and f.qualname in GUARD_DEPENDENCIES for f in dependencies)
-        # The endpoint first (None when unresolvable); dependencies outside app/ are skipped.
-        yield entry, [index.func_for(route.endpoint), *(f for f in dependencies if f)], guarded
+        endpoint = index.func_for(route.endpoint)
+        # FastAPI resolves dependencies in declaration order (route-level ones
+        # first), each after its own sub-dependencies, and the endpoint last.
+        # A guard covers only what runs after it: dependencies resolved
+        # before it still run under economic authority.
+        roots = []
+        for call in _dependency_run_order(route.dependant):
+            func = index.func_for(call)
+            if func is None:
+                continue  # outside app/
+            if func.qualname in GUARD_DEPENDENCIES:
+                break
+            roots.append(func)
+        else:
+            roots.insert(0, endpoint)
+        yield entry, endpoint, [root for root in roots if root is not None]
+
+
+def _dependency_run_order(dependant, seen=None):
+    """Dependency callables in the order FastAPI runs them (cached ones once)."""
+    seen = set() if seen is None else seen
+    for sub in dependant.dependencies:
+        yield from _dependency_run_order(sub, seen)
+        if sub.call is not None and sub.call not in seen:
+            seen.add(sub.call)
+            yield sub.call
 
 
 def celery_entry_points(index, celery_app):
@@ -837,7 +877,8 @@ def celery_entry_points(index, celery_app):
         # point. An app/ task the gate cannot map still reports UNRESOLVED.
         if name.startswith("celery.") or not (module == "app" or module.startswith("app.")):
             continue
-        yield f"task {name}", [index.func_for(task.run)], False
+        func = index.func_for(task.run)
+        yield f"task {name}", func, [func] if func else []
 
 
 def mcp_entry_points(index):
@@ -848,7 +889,7 @@ def mcp_entry_points(index):
         keywords = {kw.arg: kw.value for kw in node.keywords}
         handler = keywords.get("handler")
         method = service.methods.get(getattr(handler, "attr", None))
-        yield f"mcp {keywords['name'].value}", [method], False
+        yield f"mcp {keywords['name'].value}", method, [method] if method else []
 
 
 def unrouted_legacy_reads(app, celery_app):
@@ -864,13 +905,13 @@ def unrouted_legacy_reads(app, celery_app):
     stale = sorted(m for m in ROUTING_MARKERS | GUARD_DEPENDENCIES if index.resolve(m) is None)
     assert not stale, f"routing markers no longer exist; update ROUTING_MARKERS: {stale}"
     results: dict[str, list[Finding]] = {}
-    for entry, roots, guarded in [
+    for entry, endpoint, roots in [
         *api_entry_points(index, app),
         *celery_entry_points(index, celery_app),
         *mcp_entry_points(index),
     ]:
-        if roots[0] is None:
+        if endpoint is None:
             results[entry] = [Finding(entry, UNRESOLVED, [])]
         else:
-            results[entry] = [] if guarded else index.legacy_reads(entry, roots)
+            results[entry] = index.legacy_reads(entry, roots)
     return results
