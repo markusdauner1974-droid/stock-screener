@@ -689,6 +689,39 @@ def test_social_work_is_live_when_legacy_x_content_was_admitted_first(db_session
     )
 
 
+def test_review_only_social_work_does_not_displace_legacy_x_content(db_session):
+    # Staged (unpublished) work is review-only; it must not supersede and
+    # become the packet discovery processes.
+    work = _saved_work(db_session, run_status="staged")
+    content = EconomicSourceAdmissionService(db_session).admit_content(
+        EvidenceAdmission(
+            provider="x",
+            canonical_source_family=f"x:post:{work.content_item_id}",
+            capture_route=CONTENT_INGESTION_ROUTE,
+            route_record_id="1:1",
+            original_text="Memory pricing rose.",
+            preparation_version="content-ingestion-v1",
+            captured_at=NOW,
+            observed_at=NOW,
+            available_at=NOW,
+            evidence_channels=("technical",),
+        )
+    )
+
+    admitted = EconomicSocialTaxonomyAdapter(db_session).admit_saved_work(
+        work.id, _evidence(work)
+    )
+
+    assert admitted.live is False
+    assert admitted.precedence_state == "hold_review"
+    assert (
+        EconomicSourceAdmissionService(db_session)
+        .effective_packet(content.source_lineage_id)
+        .id
+        == content.packet_id
+    )
+
+
 def test_unordered_late_archive_remains_review_only(db_session):
     work = _saved_work(db_session, run_status="published")
 

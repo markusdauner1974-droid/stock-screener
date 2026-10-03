@@ -979,9 +979,6 @@ class EconomicSocialTaxonomyAdapter:
                 "social_work_id": work_id,
             },
         )
-        admitted: AdmissionResult = EconomicSourceAdmissionService(
-            self.db
-        ).admit_social_work(evidence)
         published = self.db.scalar(
             select(SocialRunWork.work_id)
             .join(SocialSignalRun, SocialSignalRun.id == SocialRunWork.run_id)
@@ -992,13 +989,18 @@ class EconomicSocialTaxonomyAdapter:
             )
             .limit(1)
         )
-        live = bool(
+        # Decided before admission: only work eligible to go live may supersede
+        # a legacy X content packet (#500).
+        eligible = bool(
             work.state == "succeeded"
             and published is not None
             and policy_admitted
             and not exploratory
-            and admitted.precedence_state == "effective"
         )
+        admitted: AdmissionResult = EconomicSourceAdmissionService(
+            self.db
+        ).admit_social_work(evidence, supersede_content=eligible)
+        live = eligible and admitted.precedence_state == "effective"
         if association_id is not None:
             source_key = f"social_work:{work_id}:packet:{admitted.packet_id}"
             existing = self.db.scalar(

@@ -51,15 +51,17 @@ def post_family_key(provider: str, canonical_item_id: str) -> str:
     return f"{provider.strip().lower()}:post:{canonical_item_id}"
 
 
-def content_family_key(source_type: str, external_id: str, url: str | None) -> str | None:
-    """Source family for an ingested content item.
+def content_family_key(source_type: str, external_id: str | None, url: str | None) -> str | None:
+    """Source family for an ingested content item, or None if it has no identity.
 
-    X posts join Social's ``x:post:<tweet_id>`` family (#500); without a
-    status URL there is no tweet id to key on, so no family.
+    X posts join Social's ``x:post:<tweet_id>`` family (#500) and need a status
+    URL; other items need an external id, or unrelated rows would share one.
     """
     if source_type == "twitter":
         post_id = x_post_id_from_url(url)
         return post_family_key("x", post_id) if post_id else None
+    if not (external_id or "").strip():
+        return None
     return post_family_key(source_type, external_id)
 
 
@@ -159,14 +161,19 @@ class EconomicSourceAdmissionService:
             lend_channels=True,
         )
 
-    def admit_social_work(self, evidence: EvidenceAdmission) -> AdmissionResult:
+    def admit_social_work(
+        self, evidence: EvidenceAdmission, *, supersede_content: bool = True
+    ) -> AdmissionResult:
         # Social's prepared capture of an X post outranks the raw legacy X
         # content capture of the same post, whose fingerprint it can never
-        # match (#500). No fingerprint reuse here: Social recaptures with new
-        # metadata (e.g. membership decisions) must record equivalent packets.
+        # match (#500), but only for work eligible to go live: review-only work
+        # must not displace admitted content. No fingerprint reuse here: Social
+        # recaptures with new metadata must record equivalent packets.
         return self.admit(
             evidence,
-            supersede_routes=frozenset({CONTENT_INGESTION_ROUTE}),
+            supersede_routes=(
+                frozenset({CONTENT_INGESTION_ROUTE}) if supersede_content else frozenset()
+            ),
         )
 
     def admit(

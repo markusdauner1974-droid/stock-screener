@@ -15,6 +15,7 @@ from app.services.economic_source_admission import (
     CONTENT_INGESTION_ROUTE,
     EconomicSourceAdmissionService,
     EvidenceAdmission,
+    content_family_key,
 )
 
 NOW = datetime(2026, 9, 21, 8, 0, tzinfo=timezone.utc)
@@ -206,6 +207,13 @@ def test_social_recapture_after_superseding_content_is_equivalent(db_session):
     assert recapture.packet_id != social.packet_id
     assert recapture.precedence_state == "equivalent"
     assert db_session.get(EvidencePacket, recapture.packet_id).supersedes_evidence_packet_id is None
+
+
+def test_content_without_an_id_has_no_family():
+    # A null/empty external id must not collapse items into "news:post:None".
+    assert content_family_key("news", None, None) is None
+    assert content_family_key("news", "  ", None) is None
+    assert content_family_key("news", "abc", None) == "news:post:abc"
 
 
 def _lens(db_session, packet_id):
