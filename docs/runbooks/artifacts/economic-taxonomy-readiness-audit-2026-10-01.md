@@ -177,7 +177,9 @@ something checkable.
    Celery tasks and the MCP tools, and fails if any of them reads the legacy
    theme tables without routing through `EconomicThemeReader`. Every entry in
    the reader inventory below must be routed, moved to economic data, or
-   removed.
+   removed. *Implemented in #474 as
+   `backend/tests/unit/test_legacy_theme_read_gate.py`; its `ALLOWLIST` is the
+   enforced form of the inventory and must be empty at retirement.*
 5. **A recovery path that doesn't need legacy projections:** a documented and
    rehearsed restore, from a backup or an economic snapshot export, replaces
    "roll back to legacy". It is exercised on a disposable clone, as the
@@ -252,6 +254,17 @@ something checkable.
 
 `ContentItem` and content-source endpoints are shared ingestion inputs, not
 legacy authority. Retirement must keep them.
+
+**Reconciled with the #474 gate.** The gate's allowlist covers every row above
+that a route, task or MCP tool reaches, with these differences:
+- Also listed: the assistant routes and `POST /mcp/`, which reach the MCP
+  `market_overview` alert read; and the rollback machinery tasks
+  `deliver_taxonomy_outbox` and `process_economic_taxonomy_work` (through the
+  Social taxonomy adapter).
+- Not listed: the MCP `theme_state` alert read (`market_copilot.py:719`) runs
+  only in the legacy branch, after the tool's economic-mode return, so it is
+  routed. `theme_pipeline_state_backfill_service` runs only from a CLI script,
+  which is not a gate entry point.
 
 ### Coverage check
 
