@@ -25,6 +25,9 @@ const PipelineProgressCard = () => {
 
   const isComplete = pipelineStatus?.status === 'completed';
   const isFailed = pipelineStatus?.status === 'failed';
+  // Queued before cutover to economic authority, then skipped by the worker (#472).
+  const isSkipped = pipelineStatus?.status === 'skipped';
+  const isDone = isComplete || isFailed || isSkipped;
 
   if (!isCardVisible) return null;
 
@@ -41,7 +44,7 @@ const PipelineProgressCard = () => {
           zIndex: 1300,
           borderRadius: 3,
           overflow: 'hidden',
-          bgcolor: isComplete ? 'success.main' : isFailed ? 'error.main' : 'primary.main',
+          bgcolor: isComplete ? 'success.main' : isFailed ? 'error.main' : isSkipped ? 'warning.main' : 'primary.main',
           color: 'white',
           cursor: 'pointer',
           transition: 'transform 0.2s, box-shadow 0.2s',
@@ -62,9 +65,9 @@ const PipelineProgressCard = () => {
           }}
         >
           <Box display="flex" alignItems="center" gap={1}>
-            {!isComplete && !isFailed && <CircularProgress size={14} sx={{ color: 'white' }} />}
+            {!isDone && <CircularProgress size={14} sx={{ color: 'white' }} />}
             <Typography variant="caption" fontWeight="bold">
-              {isComplete ? 'Complete' : isFailed ? 'Failed' : `Running ${pipelineStatus?.percent?.toFixed(0) || 0}%`}
+              {isComplete ? 'Complete' : isFailed ? 'Failed' : isSkipped ? 'Skipped' : `Running ${pipelineStatus?.percent?.toFixed(0) || 0}%`}
             </Typography>
           </Box>
           <IconButton size="small" sx={{ color: 'white', p: 0.25 }}>
@@ -94,7 +97,7 @@ const PipelineProgressCard = () => {
         sx={{
           px: 2,
           py: 1.5,
-          bgcolor: isComplete ? 'success.main' : isFailed ? 'error.main' : 'primary.main',
+          bgcolor: isComplete ? 'success.main' : isFailed ? 'error.main' : isSkipped ? 'warning.main' : 'primary.main',
           color: 'white',
           display: 'flex',
           alignItems: 'center',
@@ -102,16 +105,16 @@ const PipelineProgressCard = () => {
         }}
       >
         <Box display="flex" alignItems="center">
-          {!isComplete && !isFailed && <CircularProgress size={16} sx={{ color: 'white', mr: 1 }} />}
+          {!isDone && <CircularProgress size={16} sx={{ color: 'white', mr: 1 }} />}
           <Typography variant="subtitle2" fontWeight="bold">
-            {isComplete ? 'Pipeline Complete' : isFailed ? 'Pipeline Failed' : 'Running Pipeline...'}
+            {isComplete ? 'Pipeline Complete' : isFailed ? 'Pipeline Failed' : isSkipped ? 'Pipeline Skipped' : 'Running Pipeline...'}
           </Typography>
         </Box>
         <Box display="flex" alignItems="center" gap={0.5}>
           <IconButton size="small" onClick={toggleMinimize} sx={{ color: 'white', p: 0.5 }}>
             <RemoveIcon fontSize="small" />
           </IconButton>
-          {(isComplete || isFailed) && (
+          {isDone && (
             <IconButton size="small" onClick={closePipelineCard} sx={{ color: 'white', p: 0.5 }}>
               <CloseIcon fontSize="small" />
             </IconButton>
@@ -143,7 +146,7 @@ const PipelineProgressCard = () => {
                   justifyContent: 'center',
                   fontSize: '10px',
                   fontWeight: 'bold',
-                  bgcolor: index < getActiveStep() ? 'success.main' : index === getActiveStep() && !isComplete && !isFailed ? 'primary.main' : 'grey.300',
+                  bgcolor: index < getActiveStep() ? 'success.main' : index === getActiveStep() && !isDone ? 'primary.main' : 'grey.300',
                   color: index <= getActiveStep() ? 'white' : 'text.secondary',
                 }}
               >
@@ -160,7 +163,7 @@ const PipelineProgressCard = () => {
         <LinearProgress
           variant="determinate"
           value={pipelineStatus?.percent || 0}
-          color={isComplete ? 'success' : isFailed ? 'error' : 'primary'}
+          color={isComplete ? 'success' : isFailed ? 'error' : isSkipped ? 'warning' : 'primary'}
           sx={{ height: 6, borderRadius: 3, mb: 1 }}
         />
         <Typography variant="caption" color="text.secondary" display="block" textAlign="center">
@@ -171,6 +174,11 @@ const PipelineProgressCard = () => {
         {isFailed && (
           <Alert severity="error" sx={{ mt: 1.5, py: 0.5 }}>
             <Typography variant="caption">{pipelineStatus?.error_message || 'Pipeline failed'}</Typography>
+          </Alert>
+        )}
+        {isSkipped && (
+          <Alert severity="warning" sx={{ mt: 1.5, py: 0.5 }}>
+            <Typography variant="caption">{pipelineStatus?.error_message || 'Pipeline skipped'}</Typography>
           </Alert>
         )}
 

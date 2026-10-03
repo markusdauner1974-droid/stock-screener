@@ -22,6 +22,7 @@ from ...schemas.theme import (
     UnassignedThemesResponse,
 )
 from ...services.economic_theme_read_service import EconomicThemeReader
+from .themes_common import reject_legacy_theme_writes
 
 router = APIRouter()
 
@@ -96,7 +97,7 @@ def get_l1_children(
     )
 
 
-@router.post("/taxonomy/assign")
+@router.post("/taxonomy/assign", dependencies=[Depends(reject_legacy_theme_writes)])
 def run_taxonomy_assignment(
     request: TaxonomyAssignmentRequest,
     db: Session = Depends(get_db),
@@ -116,7 +117,7 @@ def run_taxonomy_assignment(
     return report
 
 
-@router.post("/taxonomy/assign/async")
+@router.post("/taxonomy/assign/async", dependencies=[Depends(reject_legacy_theme_writes)])
 def run_taxonomy_assignment_async(
     pipeline: str = Query("technical"),
     dry_run: bool = Query(False),
@@ -131,7 +132,7 @@ def run_taxonomy_assignment_async(
     return {"task_id": task.id, "status": "queued"}
 
 
-@router.put("/taxonomy/{l2_id}/reassign")
+@router.put("/taxonomy/{l2_id}/reassign", dependencies=[Depends(reject_legacy_theme_writes)])
 def reassign_l2_to_l1(
     l2_id: int,
     request: L2ReassignRequest,

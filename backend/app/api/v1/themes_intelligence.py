@@ -9,6 +9,7 @@ from sqlalchemy import String, cast, exists, func, or_
 from sqlalchemy.orm import Session
 
 from app.api.v1.config import require_admin
+from app.api.v1.themes_common import reject_legacy_theme_writes
 from app.database import get_db
 from app.domain.economic_taxonomy.contracts import AdminPrincipal
 from app.models.theme import ContentItem, ThemeCluster, ThemeMention
@@ -52,7 +53,7 @@ def preview_equivalence(source_id: int, target_id: int, db: DbSession):
         raise HTTPException(409, str(exc)) from exc
 
 
-@router.post("/equivalence")
+@router.post("/equivalence", dependencies=[Depends(require_admin), Depends(reject_legacy_theme_writes)])
 def apply_equivalence(
     request: GroupRequest,
     db: DbSession,
@@ -108,7 +109,7 @@ def equivalence_history(
     }
 
 
-@router.post("/equivalence/{operation_id}/undo")
+@router.post("/equivalence/{operation_id}/undo", dependencies=[Depends(require_admin), Depends(reject_legacy_theme_writes)])
 def undo_equivalence(
     operation_id: int,
     request: UndoRequest,

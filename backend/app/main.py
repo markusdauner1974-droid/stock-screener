@@ -402,6 +402,19 @@ async def health_check():
     return JSONResponse(content=body, status_code=result.status_code)
 
 
+from .services.legacy_theme_write_guard import (
+    ECONOMIC_ENDPOINT_REQUIRED,
+    LegacyThemeWritesBlocked,
+)
+
+
+@app.exception_handler(LegacyThemeWritesBlocked)
+async def legacy_theme_writes_blocked_handler(request, exc):
+    # A cutover between a guarded route's entry check and its first write
+    # (#472): same 409 as the entry check, not a 500.
+    return JSONResponse(status_code=409, content={"detail": ECONOMIC_ENDPOINT_REQUIRED})
+
+
 # Include API routers
 from .api.v1.router import router as api_router
 app.include_router(api_router, prefix="/api/v1")

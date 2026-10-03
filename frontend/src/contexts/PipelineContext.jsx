@@ -3,6 +3,9 @@ import { useQueryClient } from '@tanstack/react-query';
 import { getPipelineStatus } from '../api/themes';
 import { PipelineContext } from './pipelineContextStore';
 
+// "skipped": a run queued before cutover to economic authority (#472).
+const TERMINAL_PIPELINE_STATUSES = new Set(['completed', 'failed', 'skipped']);
+
 export function PipelineProvider({ children }) {
   const queryClient = useQueryClient();
   const [pipelineRunId, setPipelineRunId] = useState(null);
@@ -20,7 +23,7 @@ export function PipelineProvider({ children }) {
           const status = await getPipelineStatus(pipelineRunId);
           setPipelineStatus(status);
 
-          if (status.status === 'completed' || status.status === 'failed') {
+          if (TERMINAL_PIPELINE_STATUSES.has(status.status)) {
             setIsPipelineRunning(false);
             clearInterval(pollInterval);
 
@@ -71,8 +74,7 @@ export function PipelineProvider({ children }) {
 
   // Check if the card should be visible
   const isCardVisible = isPipelineRunning ||
-    (pipelineStatus?.status === 'completed' && pipelineRunId !== null) ||
-    (pipelineStatus?.status === 'failed' && pipelineRunId !== null);
+    (TERMINAL_PIPELINE_STATUSES.has(pipelineStatus?.status) && pipelineRunId !== null);
 
   const value = useMemo(() => ({
     pipelineRunId,

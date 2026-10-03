@@ -17,6 +17,10 @@ from datetime import datetime
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from app.db_migrations.theme_taxonomy_migration import migrate_theme_taxonomy
+from app.services.legacy_theme_write_guard import (
+    FORCE_LEGACY_WRITES_HELP,
+    exit_if_legacy_theme_writes_blocked,
+)
 from app.services.theme_taxonomy_service import ThemeTaxonomyService
 from app.wiring.bootstrap import get_session_factory, initialize_process_runtime_services
 
@@ -26,6 +30,7 @@ def main():
     parser.add_argument("--pipeline", default="technical", choices=["technical", "fundamental"])
     parser.add_argument("--dry-run", action="store_true", help="Preview assignments without applying")
     parser.add_argument("--output", type=str, help="Write report to JSON file")
+    parser.add_argument("--force-legacy-writes", action="store_true", help=FORCE_LEGACY_WRITES_HELP)
     args = parser.parse_args()
 
     print("=" * 60)
@@ -36,6 +41,8 @@ def main():
 
     initialize_process_runtime_services()
     db = get_session_factory()()
+    if not args.dry_run:
+        exit_if_legacy_theme_writes_blocked(db, force=args.force_legacy_writes)
     try:
         # Ensure taxonomy columns exist (migration normally runs on app startup,
         # but this script bypasses FastAPI lifespan)

@@ -18,6 +18,11 @@ from typing import Any, Iterable
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from app.services.legacy_theme_write_guard import (
+    FORCE_LEGACY_WRITES_HELP,
+    exit_if_legacy_theme_writes_blocked,
+)
+
 _JP_ALPHA_SYMBOL_RE = re.compile(r"^([1-9][0-9]{2})([A-Z])\.T$")
 _ZERO_PREFIXED_JP_SYMBOL_RE = re.compile(r"^0[0-9]{3,4}\.T$")
 
@@ -338,11 +343,15 @@ def main() -> None:
         type=Path,
         help="optional source CSV with symbol/local_code/ticker column",
     )
+    parser.add_argument("--force-legacy-writes", action="store_true", help=FORCE_LEGACY_WRITES_HELP)
     args = parser.parse_args()
 
     from app.database import SessionLocal
 
     db = SessionLocal()
+    # --apply rewrites ThemeConstituent, ThemeMention and ThemeAlert rows (#472).
+    if args.apply:
+        exit_if_legacy_theme_writes_blocked(db, force=args.force_legacy_writes)
     try:
         stats = repair_jp_alpha_universe_symbols(
             db,

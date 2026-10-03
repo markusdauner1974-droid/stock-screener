@@ -28,6 +28,7 @@ from app.models.economic_taxonomy_runtime import (
 )
 from app.models.theme import ThemeCluster, ThemeConstituent
 from app.services.economic_taxonomy_fence import producer_write
+from app.services.legacy_theme_write_guard import LEGACY_WRITE_MODES
 from app.utils.datetime_utils import as_aware_utc as _utc
 from app.utils.file_hashing import canonical_json_sha256 as _payload_hash
 
@@ -869,7 +870,7 @@ class EconomicTaxonomyRuntimeService:
             with producer_write(
                 self.session,
                 expected_epoch=expected_epoch,
-                allowed_modes={"legacy", "shadow", "dual"},
+                allowed_modes=set(LEGACY_WRITE_MODES),
             ) as authority:
                 write = _LegacyWrite(self, authority, origin_representation)
                 yield write

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from sqlalchemy import func, or_, select, update
 
 from app.celery_app import celery_app
+from app.services.legacy_theme_write_guard import skip_in_economic_authority
 from app.services.live_attachment_eligibility import (
     attachment_eligibility,
     authorize_attachment,
@@ -13,6 +14,7 @@ from app.services.live_attachment_eligibility import (
 
 
 @celery_app.task(name="app.tasks.live_attachment_tasks.refresh_attachment_themes")
+@skip_in_economic_authority
 def refresh_attachment_themes(item_ids):
     from app.database import SessionLocal
     from app.services.theme_extraction_service import ThemeExtractionService

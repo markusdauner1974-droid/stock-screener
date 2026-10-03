@@ -3,6 +3,7 @@
 import os
 
 from app.celery_app import celery_app
+from app.services.legacy_theme_write_guard import skip_in_economic_authority
 
 
 def tracking_enabled():
@@ -31,6 +32,7 @@ def prepare_developments():
 
 
 @celery_app.task(name="app.tasks.theme_intelligence_tasks.refresh_groups")
+@skip_in_economic_authority
 def refresh_groups():
     from app.database import SessionLocal
     from app.models.theme_intelligence import ThemeEquivalenceOperation

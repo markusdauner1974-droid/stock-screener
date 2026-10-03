@@ -21,7 +21,7 @@ from ...services.theme_pipeline_state_service import (
 )
 from ...theme_platform.content_browser_queries import render_content_items_csv_chunk
 from ...theme_platform.contracts import PipelineRunStatusPayload
-from .themes_common import _VALID_THEME_PIPELINES, resolve_source_ids_for_pipeline
+from .themes_common import _VALID_THEME_PIPELINES, reject_legacy_theme_writes, resolve_source_ids_for_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ def _themes_api_module():
     return import_module("app.api.v1.themes")
 
 
-@router.post("/pipeline/run")
+@router.post("/pipeline/run", dependencies=[Depends(reject_legacy_theme_writes)])
 def run_pipeline_async(
     pipeline: Optional[str] = Query(None, description="Pipeline: technical, fundamental, or None for both"),
     lookback_days: Optional[int] = Query(None, ge=1, le=30, description="Re-fetch articles from the last N days (backfill mode)"),
@@ -47,32 +47,41 @@ def run_pipeline_async(
         raise HTTPException(status_code=400, detail="pipeline must be technical, fundamental, or omitted")
 
     run_id = str(uuid.uuid4())
+    # Record the run as queued, with its task id, before dispatching (#472):
+    # no fenced write follows the dispatch, so a cutover after this commit
+    # cannot strand a queued task; the worker then skips and records it.
+    task_id = str(uuid.uuid4())
     pipeline_run = ThemePipelineRun(
         run_id=run_id,
         pipeline=pipeline,
-        status="created",
+        status="queued",
+        task_id=task_id,
     )
     db.add(pipeline_run)
     db.commit()
 
     try:
-        task = run_full_pipeline.delay(run_id=run_id, pipeline=pipeline, lookback_days=lookback_days)
+        run_full_pipeline.apply_async(
+            kwargs={"run_id": run_id, "pipeline": pipeline, "lookback_days": lookback_days},
+            task_id=task_id,
+        )
     except Exception as exc:
-        pipeline_run.status = "failed"
-        pipeline_run.error_message = f"Failed to queue pipeline task: {exc}"
-        db.commit()
+        # Run bookkeeping, not a legacy Theme write: record it on an unmarked
+        # session so a cutover since the queued commit can't strand it queued.
+        with Session(bind=db.get_bind()) as status_db:
+            status_db.query(ThemePipelineRun).filter(ThemePipelineRun.run_id == run_id).update({
+                "status": "failed",
+                "error_message": f"Failed to queue pipeline task: {exc}",
+            })
+            status_db.commit()
         raise HTTPException(status_code=503, detail="Failed to queue theme discovery pipeline") from exc
 
-    pipeline_run.task_id = task.id
-    pipeline_run.status = "queued"
-    db.commit()
-
     pipeline_desc = pipeline if pipeline else "both (technical + fundamental)"
-    logger.info("Theme pipeline %s queued for %s with task ID: %s", run_id, pipeline_desc, task.id)
+    logger.info("Theme pipeline %s queued for %s with task ID: %s", run_id, pipeline_desc, task_id)
 
     return {
         "run_id": run_id,
-        "task_id": task.id,
+        "task_id": task_id,
         "status": "queued",
         "pipeline": pipeline,
         "message": f"Theme discovery pipeline queued for {pipeline_desc}",
@@ -114,7 +123,8 @@ def get_pipeline_status(
         "error_message": pipeline_run.error_message,
     }
 
-    if pipeline_run.status in ["completed", "failed"]:
+    # "skipped": the run was queued before cutover to economic authority (#472).
+    if pipeline_run.status in ["completed", "failed", "skipped"]:
         if pipeline_run.status == "completed":
             response["percent"] = 100.0
             response["step_number"] = 5

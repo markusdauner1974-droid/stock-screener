@@ -31,6 +31,7 @@ from ..config import settings
 from ..database import SessionLocal
 from ..services.redis_pool import get_redis_client
 from ..services.runtime_preferences_service import get_runtime_bootstrap_status
+from ..services.legacy_theme_write_guard import skip_in_economic_authority
 
 logger = logging.getLogger(__name__)
 
@@ -244,6 +245,7 @@ def ingest_content(lookback_days=None):
 
 
 @celery_app.task(name='app.tasks.theme_discovery_tasks.extract_themes')
+@skip_in_economic_authority
 def extract_themes(limit: int = 50, pipeline: str = None):
     """
     Extract themes from unprocessed content using LLM.
@@ -355,6 +357,7 @@ def extract_themes(limit: int = 50, pipeline: str = None):
 
 
 @celery_app.task(name='app.tasks.theme_discovery_tasks.reprocess_failed_themes')
+@skip_in_economic_authority
 def reprocess_failed_themes(limit: int = 500, pipeline: str = None):
     """
     Reprocess content items that previously failed LLM extraction.
@@ -460,6 +463,7 @@ def reprocess_failed_themes(limit: int = 500, pipeline: str = None):
 
 
 @celery_app.task(name='app.tasks.theme_discovery_tasks.calculate_theme_metrics')
+@skip_in_economic_authority
 def calculate_theme_metrics(pipeline: str = None):
     """
     Calculate and update metrics for all active themes.
@@ -602,6 +606,7 @@ def calculate_theme_metrics(pipeline: str = None):
     retry_kwargs={"max_retries": 3},
     name='app.tasks.theme_discovery_tasks.recompute_stale_theme_embeddings',
 )
+@skip_in_economic_authority
 def recompute_stale_theme_embeddings(
     self,
     pipeline: str = None,
@@ -707,6 +712,7 @@ def recompute_stale_theme_embeddings(
 
 
 @celery_app.task(name='app.tasks.theme_discovery_tasks.promote_candidate_themes')
+@skip_in_economic_authority
 def promote_candidate_themes(pipeline: str = None, limit: int = 1000):
     """
     Promote candidate themes to active based on evidence thresholds.
@@ -762,6 +768,7 @@ def promote_candidate_themes(pipeline: str = None, limit: int = 1000):
 
 
 @celery_app.task(name='app.tasks.theme_discovery_tasks.apply_lifecycle_policies')
+@skip_in_economic_authority
 def apply_lifecycle_policies(pipeline: str = None, limit: int = 1000):
     """
     Apply dormancy/reactivation lifecycle policies with explainable counters.
@@ -825,6 +832,7 @@ def apply_lifecycle_policies(pipeline: str = None, limit: int = 1000):
 
 
 @celery_app.task(name='app.tasks.theme_discovery_tasks.infer_theme_relationships')
+@skip_in_economic_authority
 def infer_theme_relationships(pipeline: str = None, max_merge_suggestions: int = 300):
     """
     Infer theme relationship edges from merge analysis and rule-based overlap checks.
@@ -875,6 +883,7 @@ def infer_theme_relationships(pipeline: str = None, max_merge_suggestions: int =
 
 
 @celery_app.task(name='app.tasks.theme_discovery_tasks.validate_themes')
+@skip_in_economic_authority
 def validate_themes(min_correlation: float = 0.5):
     """
     Validate all themes by checking internal correlations.
@@ -1014,6 +1023,7 @@ def discover_correlation_clusters(
 
 
 @celery_app.task(name='app.tasks.theme_discovery_tasks.check_alerts')
+@skip_in_economic_authority
 def check_alerts():
     """
     Check for and generate theme alerts.
@@ -1080,7 +1090,29 @@ def check_alerts():
         db.close()
 
 
+def _record_skipped_pipeline_run(*args, run_id: str = None, **kwargs) -> None:
+    """Give a run queued before cutover a terminal state instead of leaving it queued."""
+    if run_id is None:
+        return
+    from ..models.theme import ThemePipelineRun
+    from ..services.legacy_theme_write_guard import ECONOMIC_AUTHORITY_SKIP_REASON
+
+    with SessionLocal() as db:
+        run = db.query(ThemePipelineRun).filter(ThemePipelineRun.run_id == run_id).first()
+        if run is None:
+            return
+        run.status = "skipped"
+        run.current_step = "skipped"
+        run.completed_at = datetime.now(timezone.utc)
+        run.error_message = (
+            f"{ECONOMIC_AUTHORITY_SKIP_REASON}: legacy Theme pipeline is disabled "
+            "under economic authority"
+        )
+        db.commit()
+
+
 @celery_app.task(bind=True, name='app.tasks.theme_discovery_tasks.run_full_pipeline')
+@skip_in_economic_authority(on_skip=_record_skipped_pipeline_run)
 def run_full_pipeline(self, run_id: str = None, pipeline: str = None, lookback_days: int = None):
     """
     Run the complete theme discovery pipeline with progress tracking.
@@ -1419,6 +1451,7 @@ def poll_due_sources():
 
 
 @celery_app.task(name='app.tasks.theme_discovery_tasks.consolidate_themes')
+@skip_in_economic_authority
 def consolidate_themes(dry_run: bool = False):
     """
     Run theme consolidation to identify and merge duplicate themes.
@@ -1502,6 +1535,7 @@ def consolidate_themes(dry_run: bool = False):
 # ==================== L1 Taxonomy Tasks ====================
 
 @celery_app.task(name='app.tasks.theme_discovery_tasks.compute_l1_metrics')
+@skip_in_economic_authority
 def compute_l1_metrics(pipeline: str = None):
     """
     Aggregate L2 metrics → L1 metrics via batch SQL.
@@ -1549,6 +1583,7 @@ def compute_l1_metrics(pipeline: str = None):
 
 
 @celery_app.task(name='app.tasks.theme_discovery_tasks.run_taxonomy_assignment')
+@skip_in_economic_authority
 def run_taxonomy_assignment(pipeline: str = None, dry_run: bool = False):
     """
     Run full L1 taxonomy assignment: rules → HDBSCAN → LLM naming.
@@ -1605,6 +1640,7 @@ def run_taxonomy_assignment(pipeline: str = None, dry_run: bool = False):
 
 
 @celery_app.task(name='app.tasks.theme_discovery_tasks.recompute_l1_centroid_embeddings')
+@skip_in_economic_authority
 def recompute_l1_centroid_embeddings(pipeline: str = None):
     """
     Recompute L1 centroid embeddings from children's embeddings.
