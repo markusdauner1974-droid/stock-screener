@@ -319,8 +319,14 @@ class MarketCopilotService:
                 )
             )
 
-        summary_parts.append(f"{len(alerts)} recent unread theme alerts are in scope.")
-        facts.append(self._fact("unread_theme_alerts", len(alerts), "theme_alerts"))
+        unavailable = {}
+        if alerts is None:  # economic authority: not a measured zero
+            summary_parts.append("Theme alerts are unavailable under economic Theme authority.")
+            unavailable["theme_alerts"] = "not_defined_for_economic_taxonomy"
+            alerts = []
+        else:
+            summary_parts.append(f"{len(alerts)} recent unread theme alerts are in scope.")
+            facts.append(self._fact("unread_theme_alerts", len(alerts), "theme_alerts"))
         if alerts:
             next_actions.append("Review unread theme alerts for new or accelerating themes.")
             citations.extend(
@@ -372,6 +378,7 @@ class MarketCopilotService:
             alerts=alerts,
             tasks=failed_tasks or tasks[:_MARKET_OVERVIEW_TASK_LIMIT],
             top_candidates=top_candidates,
+            **({"unavailable": unavailable} if unavailable else {}),
         )
 
     def _compare_feature_runs(self, args: CompareFeatureRunsArgs) -> ToolEnvelope:
@@ -1492,9 +1499,10 @@ class MarketCopilotService:
         # Market copilot is US-scoped today.
         return latest_breadth(db, market="US", as_of_date=as_of_date)
 
-    def _recent_alerts(self, db: Session, limit: int) -> list[dict[str, Any]]:
+    def _recent_alerts(self, db: Session, limit: int) -> list[dict[str, Any]] | None:
+        """Unread legacy alerts, or None under economic authority, where they are unavailable."""
         if EconomicThemeReader(db).source_name == "economic":
-            return []  # legacy-only, as /themes/alerts in economic mode (#475)
+            return None  # legacy-only, as /themes/alerts in economic mode (#475)
         rows = (
             db.query(ThemeAlert)
             .filter(ThemeAlert.is_dismissed == False, ThemeAlert.is_read == False)

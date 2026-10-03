@@ -77,6 +77,9 @@ def test_market_overview_serves_no_legacy_theme_alerts_in_economic_mode(session_
     payload = _tool_payload(read_only_service.call_tool("market_overview", {}))
 
     assert payload["alerts"] == []
+    assert payload["unavailable"] == {"theme_alerts": "not_defined_for_economic_taxonomy"}
+    assert "unread_theme_alerts" not in {fact["key"] for fact in payload["facts"]}
+    assert "Theme alerts are unavailable" in payload["summary"]
 
 
 def test_find_candidates_applies_filters(read_only_service):
