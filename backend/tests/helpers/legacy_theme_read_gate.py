@@ -169,8 +169,10 @@ class Index:
         self.modules: dict[str, Module] = {}
         self.funcs: dict[str, Func] = {}
         self.classes: dict[str, Class] = {}
+        # Unquoted SQL identifiers fold to lowercase, so THEME_CLUSTERS is the same table.
         self._table_pattern = (
-            re.compile(r"\b(" + "|".join(sorted(legacy_tables)) + r")\b") if legacy_tables else None
+            re.compile(r"\b(" + "|".join(sorted(legacy_tables)) + r")\b", re.IGNORECASE)
+            if legacy_tables else None
         )
         for path in root.rglob("*.py"):
             parts = path.relative_to(root.parent).with_suffix("").parts
@@ -392,6 +394,17 @@ class Index:
                 typed = self._annotation_class(arg.annotation, scope)
                 if typed:
                     types[arg.arg] = typed
+        def bind(name, classes):
+            # Flow-insensitive: assignments on different paths all count, so
+            # ``reader = Legacy(); if flag: reader = Safe()`` keeps both.
+            known = types.get(name)
+            merged = _Candidates(
+                known if isinstance(known, _Candidates)
+                else [known] if isinstance(known, Class) else []
+            )
+            merged.extend(cls for cls in classes if cls not in merged)
+            types[name] = merged if len(merged) > 1 else merged[0]
+
         self_attrs = []
         for node in func.nodes:
             if isinstance(node, ast.Assign) and len(node.targets) == 1:
@@ -399,14 +412,14 @@ class Index:
                 if isinstance(target, ast.Name):
                     candidates = self._value_classes(node.value, scope, types)
                     if len(candidates) > 1:
-                        types[target.id] = _Candidates(candidates)
+                        bind(target.id, candidates)
                         continue
                 typed = self._resolve_expr(node.value, scope, types)
                 if isinstance(typed, Module) and isinstance(target, ast.Name):
                     types[target.id] = typed  # e.g. x = import_module("app....")
                 elif isinstance(typed, Class):
                     if isinstance(target, ast.Name):
-                        types[target.id] = typed
+                        bind(target.id, [typed])
                     elif (
                         func.cls is not None
                         and isinstance(target, ast.Attribute)
@@ -416,14 +429,16 @@ class Index:
                         self_attrs.append((node, target.attr, typed))
             elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
                 typed = self._annotation_class(node.annotation, scope)
-                if typed:
+                if isinstance(typed, Class):
+                    bind(node.target.id, [typed])
+                elif typed:
                     types[node.target.id] = typed
             elif isinstance(node, (ast.With, ast.AsyncWith)):
                 for item in node.items:
                     if isinstance(item.optional_vars, ast.Name):
                         typed = self._resolve_expr(item.context_expr, scope, types)
                         if isinstance(typed, Class):
-                            types[item.optional_vars.id] = typed
+                            bind(item.optional_vars.id, [typed])
         if self_attrs:
             # An implementation picked inside an authority branch is selected
             # by mode, so it does not join the attribute's unconditional types.
@@ -532,7 +547,7 @@ class Index:
                 continue
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 if self._table_pattern and _SQL_VERB.search(node.value):
-                    models.update(f"table:{t}" for t in self._table_pattern.findall(node.value))
+                    models.update(f"table:{t.lower()}" for t in self._table_pattern.findall(node.value))
                 continue
             for target in targets.get(id(node), ()):
                 if isinstance(target, Class):

@@ -281,6 +281,9 @@ _FIXTURE = {
         def read_raw(db):
             return db.execute("SELECT id FROM theme_clusters")
 
+        def read_raw_upper(db):
+            return db.execute("SELECT id FROM THEME_CLUSTERS")
+
         class ClusterPort(Protocol):
             def load(self): ...
 
@@ -367,6 +370,17 @@ _FIXTURE = {
                 return read_clusters(db)
             return []
 
+        def reassigned_local(db, flag):
+            from app.services.readers import SafeReader, SqlClusterReader
+            reader = SqlClusterReader(db)
+            if flag:
+                reader = SafeReader()
+            return reader.load()
+
+        def raw_sql_upper(db):
+            from app.services.readers import read_raw_upper
+            return read_raw_upper(db)
+
         def alias_keeps_every_implementation(db):
             from app.services.readers import AliasUseCase, SafeReader, SqlClusterReader
             AliasUseCase(reader=SafeReader())
@@ -413,8 +427,9 @@ def test_gate_reports_an_unrouted_read_with_its_call_path(fixture_index):
     assert finding.path == ["app.entry.unrouted", "app.services.readers.read_clusters"]
 
 
-def test_gate_reports_raw_sql_naming_a_legacy_table(fixture_index):
-    assert [f.model for f in _reads(fixture_index, "raw_sql")] == ["table:theme_clusters"]
+@pytest.mark.parametrize("name", ["raw_sql", "raw_sql_upper"])  # unquoted SQL names fold case
+def test_gate_reports_raw_sql_naming_a_legacy_table(fixture_index, name):
+    assert [f.model for f in _reads(fixture_index, name)] == ["table:theme_clusters"]
 
 
 def test_gate_accepts_reads_routed_by_authority(fixture_index):
@@ -432,6 +447,7 @@ def test_gate_accepts_reads_routed_by_authority(fixture_index):
         "read_in_economic_arm",  # the arm that runs under economic authority
         "read_after_legacy_return",  # past a legacy-arm return, only economic remains
         "alias_keeps_every_implementation",
+        "reassigned_local",  # a later assignment must not hide the earlier type
     ],
 )
 def test_gate_counts_reads_the_authority_check_does_not_cover(fixture_index, name):
