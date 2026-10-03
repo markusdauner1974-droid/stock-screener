@@ -31,6 +31,7 @@ def test_reset_corrupt_theme_content_storage_recreates_immediately_after_rewind(
             return _DummyBegin()
 
     monkeypatch.setattr(recovery_service, "engine", _DummyEngine())
+    monkeypatch.setattr(recovery_service, "_reset_blocked_by_authority", lambda conn: False)
     monkeypatch.setattr(
         recovery_service,
         "_acquire_theme_content_reset_lock",

@@ -22,6 +22,10 @@ from pathlib import Path
 # Add backend to path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.services.legacy_theme_write_guard import (
+    FORCE_LEGACY_WRITES_HELP,
+    exit_if_legacy_theme_writes_blocked,
+)
 from app.services.theme_extraction_service import ThemeExtractionService
 from app.wiring.bootstrap import (
     get_session_factory,
@@ -33,10 +37,13 @@ def main():
     parser = argparse.ArgumentParser(description="Identify and reset silently failed extractions")
     parser.add_argument("--dry-run", action="store_true", help="Preview without modifying data")
     parser.add_argument("--max-age-days", type=int, default=30, help="Max age of items to check (default: 30)")
+    parser.add_argument("--force-legacy-writes", action="store_true", help=FORCE_LEGACY_WRITES_HELP)
     args = parser.parse_args()
 
     initialize_process_runtime_services()
     db = get_session_factory()()
+    if not args.dry_run:
+        exit_if_legacy_theme_writes_blocked(db, force=args.force_legacy_writes)
 
     try:
         pipelines = ["technical", "fundamental"]

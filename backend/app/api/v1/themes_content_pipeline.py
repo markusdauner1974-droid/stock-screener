@@ -21,7 +21,7 @@ from ...services.theme_pipeline_state_service import (
 )
 from ...theme_platform.content_browser_queries import render_content_items_csv_chunk
 from ...theme_platform.contracts import PipelineRunStatusPayload
-from .themes_common import _VALID_THEME_PIPELINES, resolve_source_ids_for_pipeline
+from .themes_common import _VALID_THEME_PIPELINES, reject_legacy_theme_writes, resolve_source_ids_for_pipeline
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,7 @@ def _themes_api_module():
     return import_module("app.api.v1.themes")
 
 
-@router.post("/pipeline/run")
+@router.post("/pipeline/run", dependencies=[Depends(reject_legacy_theme_writes)])
 def run_pipeline_async(
     pipeline: Optional[str] = Query(None, description="Pipeline: technical, fundamental, or None for both"),
     lookback_days: Optional[int] = Query(None, ge=1, le=30, description="Re-fetch articles from the last N days (backfill mode)"),

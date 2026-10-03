@@ -52,7 +52,7 @@ from ...services.theme_correlation_service import ThemeCorrelationService
 from ...services.theme_discovery_service import ThemeDiscoveryService
 from ...services.theme_merging_service import ThemeMergingService
 from ...wiring.bootstrap import get_ui_snapshot_service
-from .themes_common import parse_csv_values, safe_theme_cluster_response
+from .themes_common import parse_csv_values, reject_legacy_theme_writes, safe_theme_cluster_response
 
 logger = logging.getLogger(__name__)
 
@@ -273,7 +273,7 @@ def get_lifecycle_transitions(
     )
 
 
-@router.post("/alerts/{alert_id}/dismiss")
+@router.post("/alerts/{alert_id}/dismiss", dependencies=[Depends(reject_legacy_theme_writes)])
 def dismiss_alert(
     alert_id: int,
     db: Session = Depends(get_db),

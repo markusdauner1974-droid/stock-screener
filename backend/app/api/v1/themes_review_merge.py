@@ -39,6 +39,7 @@ from ...services.theme_correlation_service import ThemeCorrelationService
 from ...services.theme_discovery_service import ThemeDiscoveryService
 from ...services.theme_equivalence_service import ThemeEquivalenceService
 from ...services.theme_merging_service import ThemeMergingService
+from .themes_common import reject_legacy_theme_writes
 
 router = APIRouter()
 
@@ -58,7 +59,7 @@ def get_merge_suggestions(
     )
 
 
-@router.post("/merge-suggestions/{suggestion_id}/approve", response_model=MergeActionResponse)
+@router.post("/merge-suggestions/{suggestion_id}/approve", response_model=MergeActionResponse, dependencies=[Depends(reject_legacy_theme_writes)])
 def approve_merge_suggestion(
     suggestion_id: int,
     idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key"),
@@ -79,7 +80,7 @@ def approve_merge_suggestion(
     return MergeActionResponse(**result)
 
 
-@router.post("/merge-suggestions/{suggestion_id}/reject")
+@router.post("/merge-suggestions/{suggestion_id}/reject", dependencies=[Depends(reject_legacy_theme_writes)])
 def reject_merge_suggestion(
     suggestion_id: int,
     db: Session = Depends(get_db),
@@ -113,7 +114,7 @@ def get_merge_history(
     )
 
 
-@router.post("/consolidate", response_model=ConsolidationResultResponse)
+@router.post("/consolidate", response_model=ConsolidationResultResponse, dependencies=[Depends(reject_legacy_theme_writes)])
 def run_theme_consolidation(
     dry_run: bool = Query(True, description="If true, report only without executing merges"),
     db: Session = Depends(get_db),
@@ -128,7 +129,7 @@ def run_theme_consolidation(
     return ConsolidationResultResponse(**result)
 
 
-@router.post("/consolidate/async")
+@router.post("/consolidate/async", dependencies=[Depends(reject_legacy_theme_writes)])
 def run_theme_consolidation_async(
     dry_run: bool = Query(False, description="If true, only report what would happen"),
     db: Session = Depends(get_db),
@@ -166,7 +167,7 @@ def get_merge_plan_dry_run(
     )
 
 
-@router.post("/embeddings/refresh-campaign", response_model=EmbeddingRefreshCampaignResponse)
+@router.post("/embeddings/refresh-campaign", response_model=EmbeddingRefreshCampaignResponse, dependencies=[Depends(reject_legacy_theme_writes)])
 def run_embedding_refresh_campaign(
     pipeline: Optional[str] = Query(None, pattern="^(technical|fundamental)$"),
     refresh_batch_size: int = Query(100, ge=1, le=1000, description="Missing/outdated refresh batch size per pass"),
@@ -191,7 +192,7 @@ def run_embedding_refresh_campaign(
     return EmbeddingRefreshCampaignResponse(**result)
 
 
-@router.post("/merge-wave/strict-auto", response_model=StrictAutoMergeWaveResponse)
+@router.post("/merge-wave/strict-auto", response_model=StrictAutoMergeWaveResponse, dependencies=[Depends(reject_legacy_theme_writes)])
 def run_strict_auto_merge_wave(
     pipeline: Optional[str] = Query(None, pattern="^(technical|fundamental)$"),
     limit_pairs: int = Query(200, ge=1, le=1000, description="Maximum candidate pairs to evaluate"),
@@ -212,7 +213,7 @@ def run_strict_auto_merge_wave(
     return StrictAutoMergeWaveResponse(**result)
 
 
-@router.post("/merge-wave/manual-review", response_model=ManualReviewWaveResponse)
+@router.post("/merge-wave/manual-review", response_model=ManualReviewWaveResponse, dependencies=[Depends(reject_legacy_theme_writes)])
 def run_manual_review_wave(
     payload: ManualReviewWaveRequest,
     pipeline: Optional[str] = Query(None, pattern="^(technical|fundamental)$"),
@@ -255,7 +256,7 @@ def get_candidate_theme_queue(
     )
 
 
-@router.post("/candidates/review", response_model=CandidateThemeReviewResponse)
+@router.post("/candidates/review", response_model=CandidateThemeReviewResponse, dependencies=[Depends(reject_legacy_theme_writes)])
 def review_candidate_themes(
     payload: CandidateThemeReviewRequest,
     pipeline: str = Query("technical", pattern="^(technical|fundamental)$"),
@@ -307,7 +308,7 @@ def get_relationship_graph(
     )
 
 
-@router.post("/alerts/check")
+@router.post("/alerts/check", dependencies=[Depends(reject_legacy_theme_writes)])
 def check_for_alerts(
     db: Session = Depends(get_db),
 ):
@@ -320,7 +321,7 @@ def check_for_alerts(
     }
 
 
-@router.post("/alerts/{alert_id}/read")
+@router.post("/alerts/{alert_id}/read", dependencies=[Depends(reject_legacy_theme_writes)])
 def mark_alert_read(
     alert_id: int,
     db: Session = Depends(get_db),
@@ -336,7 +337,7 @@ def mark_alert_read(
     return {"status": "marked as read"}
 
 
-@router.post("/create-from-cluster")
+@router.post("/create-from-cluster", dependencies=[Depends(reject_legacy_theme_writes)])
 def create_theme_from_cluster(
     name: str,
     symbols: list[str],
@@ -361,7 +362,7 @@ def create_theme_from_cluster(
     }
 
 
-@router.post("/{theme_id}/add-constituents")
+@router.post("/{theme_id}/add-constituents", dependencies=[Depends(reject_legacy_theme_writes)])
 def add_theme_constituents(
     theme_id: int,
     symbols: list[str],
@@ -397,7 +398,7 @@ def add_theme_constituents(
     return {"status": "success", "added": added}
 
 
-@router.delete("/{theme_id}")
+@router.delete("/{theme_id}", dependencies=[Depends(reject_legacy_theme_writes)])
 def deactivate_theme(
     theme_id: int,
     db: Session = Depends(get_db),

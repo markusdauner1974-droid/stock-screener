@@ -6,11 +6,14 @@ import logging
 from typing import Optional
 from urllib.parse import urlparse
 
+from fastapi import Depends, HTTPException
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from ...database import get_db
 from ...models.theme import ContentSource, ThemeCluster
 from ...schemas.theme import ThemeClusterResponse
+from ...services.legacy_theme_write_guard import legacy_theme_writes_blocked
 from ...services.theme_identity_normalization import (
     UNKNOWN_THEME_KEY,
     canonical_theme_key,
@@ -21,6 +24,18 @@ from ...services.theme_pipeline_state_service import normalize_pipelines
 logger = logging.getLogger(__name__)
 
 _VALID_THEME_PIPELINES = {"technical", "fundamental"}
+
+
+def reject_legacy_theme_writes(db: Session = Depends(get_db)) -> None:
+    """Route dependency: legacy Theme writers return 409 under economic authority (#472)."""
+    if legacy_theme_writes_blocked(db):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "economic_generation_endpoint_required",
+                "endpoint": "/api/v1/economic-themes",
+            },
+        )
 
 
 def detect_source_type_from_url(url: str, provided_type: str | None) -> str:

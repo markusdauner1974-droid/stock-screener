@@ -28,7 +28,7 @@ from ...services.theme_pipeline_state_service import (
     reconcile_source_pipeline_change,
     validate_pipeline_selection,
 )
-from .themes_common import detect_source_type_from_url
+from .themes_common import detect_source_type_from_url, reject_legacy_theme_writes
 
 logger = logging.getLogger(__name__)
 
@@ -222,7 +222,7 @@ def run_ingestion(
     return IngestionResponse(**result)
 
 
-@router.post("/extract", response_model=ExtractionResponse)
+@router.post("/extract", response_model=ExtractionResponse, dependencies=[Depends(reject_legacy_theme_writes)])
 def run_extraction(
     limit: int = Query(50, ge=1, le=200, description="Max items to process"),
     pipeline: str = Query("technical", pattern="^(technical|fundamental)$", description="Pipeline: technical or fundamental"),
@@ -237,7 +237,7 @@ def run_extraction(
     return ExtractionResponse(**result)
 
 
-@router.post("/calculate-metrics")
+@router.post("/calculate-metrics", dependencies=[Depends(reject_legacy_theme_writes)])
 def calculate_theme_metrics(
     pipeline: str = Query("technical", pattern="^(technical|fundamental)$", description="Pipeline: technical or fundamental"),
     db: Session = Depends(get_db),
@@ -251,7 +251,7 @@ def calculate_theme_metrics(
     return result
 
 
-@router.post("/validate-all")
+@router.post("/validate-all", dependencies=[Depends(reject_legacy_theme_writes)])
 def validate_all_themes(
     min_correlation: float = Query(0.5, ge=0.2, le=0.9),
     db: Session = Depends(get_db),

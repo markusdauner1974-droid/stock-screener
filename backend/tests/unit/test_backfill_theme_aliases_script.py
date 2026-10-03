@@ -12,6 +12,7 @@ def _args(**overrides) -> argparse.Namespace:
         "mention_limit": 0,
         "report_file": "/tmp/theme_alias_backfill_report.json",
         "yes": True,
+        "force_legacy_writes": False,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -34,6 +35,7 @@ def test_main_writes_report_for_dry_run(
     mock_build_parser.return_value = parser
 
     db = MagicMock()
+    db.get.return_value = None  # no taxonomy authority row: legacy mode
     session_factory = MagicMock(return_value=db)
     mock_get_session_factory.return_value = session_factory
 
@@ -80,6 +82,7 @@ def test_main_calls_service_with_mention_limit(
     mock_build_parser.return_value = parser
 
     db = MagicMock()
+    db.get.return_value = None  # no taxonomy authority row: legacy mode
     session_factory = MagicMock(return_value=db)
     mock_get_session_factory.return_value = session_factory
 
