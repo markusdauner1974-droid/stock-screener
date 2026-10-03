@@ -15,6 +15,7 @@ def tracking_enabled():
 
 
 @celery_app.task(name="app.tasks.theme_intelligence_tasks.prepare_developments")
+@skip_in_economic_authority  # discovery and links are legacy-only (#476)
 def prepare_developments():
     if not tracking_enabled():
         return {"status": "disabled"}

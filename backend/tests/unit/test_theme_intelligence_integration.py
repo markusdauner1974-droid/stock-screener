@@ -32,6 +32,7 @@ from app.services.theme_equivalence_service import (
     guard_grouped_merge,
 )
 from app.services.theme_group_reads import grouped_constituents
+from tests.helpers.taxonomy_authority import set_economic_authority
 
 NOW = datetime.now(timezone.utc)
 
@@ -402,6 +403,67 @@ async def test_development_backfill_apply_requires_admin_key(sessions, monkeypat
                     json={"item_ids": [item.id], "apply": True},
                 )
                 assert response.status_code == 401
+                assert db.query(ThemeDevelopmentWork).count() == 0
+        finally:
+            app.dependency_overrides.pop(get_db, None)
+
+
+def test_development_preparation_writes_no_legacy_links_in_economic_mode(
+    sessions, monkeypatch
+):
+    import app.database
+    from app.models.theme_intelligence import ThemeDevelopmentTheme
+    from app.tasks.theme_intelligence_tasks import prepare_developments
+
+    monkeypatch.setenv("THEME_DEVELOPMENT_TRACKING_ENABLED", "true")
+    monkeypatch.setattr(app.database, "SessionLocal", sessions)
+    with sessions.begin() as db:
+        seed(db)  # recent mentions that legacy discovery would queue
+    with sessions() as db:
+        set_economic_authority(db)
+
+    result = prepare_developments()
+
+    assert result["reason"] == "economic_authority"
+    with sessions() as db:
+        assert db.query(ThemeDevelopmentWork).count() == 0
+        assert db.query(ThemeDevelopmentTheme).count() == 0
+
+
+@pytest.mark.asyncio
+async def test_development_backfill_is_rejected_in_economic_mode(monkeypatch):
+    import httpx
+    from sqlalchemy.pool import StaticPool
+
+    from app.api.v1.config import settings as config_settings
+    from app.database import get_db
+    from app.main import app
+    from app.services import server_auth
+
+    # The sync route runs in a worker thread, so the in-memory DB must be shareable.
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine)
+    monkeypatch.setattr(server_auth.settings, "server_auth_enabled", False)
+    monkeypatch.setattr(config_settings, "admin_api_key", "review-secret")
+    monkeypatch.setenv("THEME_DEVELOPMENT_TRACKING_ENABLED", "true")
+    with sessions() as db:
+        item, _, _ = seed(db)
+        db.commit()
+        set_economic_authority(db)
+        app.dependency_overrides[get_db] = lambda: db
+        try:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                response = await client.post(
+                    "/api/v1/themes/developments/backfill",
+                    json={"item_ids": [item.id], "apply": True},
+                    headers={"X-Admin-Key": "review-secret"},
+                )
+                assert response.status_code == 409
                 assert db.query(ThemeDevelopmentWork).count() == 0
         finally:
             app.dependency_overrides.pop(get_db, None)

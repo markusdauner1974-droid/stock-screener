@@ -19,7 +19,6 @@ from tests.helpers.legacy_theme_read_gate import Index, api_entry_points, unrout
 _REVIEW = "Audit 'Readers with no routing': review/merge GETs serve legacy clusters and suggestions."
 _INTELLIGENCE = "Audit 'Readers with no routing': equivalence and development GETs serve legacy identities."
 _TELEMETRY = "Audit 'Readers with no routing': matching telemetry serves legacy ThemeMention stats."
-_DEVELOPMENTS = "Audit 'Readers with no routing': development preparation reads ThemeMention and links."
 _CONTENT = "Audit 'Readers with no routing': content listing annotates items with ThemeMention."
 _SOCIAL_PREPARATION = (
     "Audit 'Readers with no routing': every live Social run prepares baskets from legacy "
@@ -27,7 +26,7 @@ _SOCIAL_PREPARATION = (
 )
 _SNAPSHOT_BUILDER = (
     "Audit 'Readers with no routing': the economic snapshot builder reads legacy "
-    "ThemeDevelopmentTheme links; migrate them before retirement."
+    "ThemeDevelopmentTheme links; migrate them before retirement (#513)."
 )
 _PIPELINE_DIAGNOSTICS = "Audit 'Readers with no routing': pipeline diagnostics read legacy tables."
 _SOCIAL_OPERATIONS = "Audit 'Readers with no routing': Social operations snapshot counts legacy associations."
@@ -82,14 +81,6 @@ ALLOWLIST: dict[str, tuple[str, set[str]]] = {
     "GET /api/v1/themes/matching/telemetry": (
         _TELEMETRY,
         {"ThemeMention"},
-    ),
-    "task app.tasks.theme_intelligence_tasks.prepare_developments": (
-        _DEVELOPMENTS,
-        {"ThemeCluster", "ThemeDevelopmentTheme", "ThemeEquivalenceOperation", "ThemeMention"},
-    ),
-    "POST /api/v1/themes/developments/backfill": (
-        _DEVELOPMENTS,
-        {"ThemeCluster", "ThemeMention"},
     ),
     "GET /api/v1/themes/content": (
         _CONTENT,
