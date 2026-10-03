@@ -230,6 +230,38 @@ def test_skipped_pipeline_run_is_recorded_as_skipped(db_session):
     assert ECONOMIC_AUTHORITY_SKIP_REASON in run.error_message
 
 
+@pytest.mark.asyncio
+async def test_pipeline_run_is_recorded_as_queued_before_dispatch(db_session, monkeypatch):
+    # No fenced write follows the dispatch, so a cutover after it cannot leave
+    # a queued task with an untracked run row.
+    from app.database import SessionLocal
+    from app.models.theme import ThemePipelineRun
+    from app.services import server_auth
+
+    monkeypatch.setattr(server_auth.settings, "server_auth_enabled", False)
+    _authority(db_session, "legacy")
+    seen = {}
+
+    def fake_apply_async(*, kwargs, task_id):
+        with SessionLocal() as other:
+            row = other.query(ThemePipelineRun).filter_by(run_id=kwargs["run_id"]).one()
+            seen.update(status=row.status, task_id=row.task_id, dispatched=task_id)
+
+    monkeypatch.setattr(theme_discovery_tasks.run_full_pipeline, "apply_async", fake_apply_async)
+    app.dependency_overrides[get_db] = lambda: db_session
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post("/api/v1/themes/pipeline/run")
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 200, response.text
+    assert seen["status"] == "queued"
+    assert seen["task_id"] == seen["dispatched"] == response.json()["task_id"]
+
+
 def _load(path):
     import importlib
     import importlib.util

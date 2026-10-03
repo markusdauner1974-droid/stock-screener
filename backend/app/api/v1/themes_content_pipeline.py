@@ -21,6 +21,7 @@ from ...services.theme_pipeline_state_service import (
 )
 from ...theme_platform.content_browser_queries import render_content_items_csv_chunk
 from ...theme_platform.contracts import PipelineRunStatusPayload
+from ...services.legacy_theme_write_guard import LegacyThemeWritesBlocked
 from .themes_common import _VALID_THEME_PIPELINES, reject_legacy_theme_writes, resolve_source_ids_for_pipeline
 
 logger = logging.getLogger(__name__)
@@ -47,32 +48,40 @@ def run_pipeline_async(
         raise HTTPException(status_code=400, detail="pipeline must be technical, fundamental, or omitted")
 
     run_id = str(uuid.uuid4())
+    # Record the run as queued, with its task id, before dispatching (#472):
+    # no fenced write follows the dispatch, so a cutover after this commit
+    # cannot strand a queued task; the worker then skips and records it.
+    task_id = str(uuid.uuid4())
     pipeline_run = ThemePipelineRun(
         run_id=run_id,
         pipeline=pipeline,
-        status="created",
+        status="queued",
+        task_id=task_id,
     )
     db.add(pipeline_run)
     db.commit()
 
     try:
-        task = run_full_pipeline.delay(run_id=run_id, pipeline=pipeline, lookback_days=lookback_days)
+        run_full_pipeline.apply_async(
+            kwargs={"run_id": run_id, "pipeline": pipeline, "lookback_days": lookback_days},
+            task_id=task_id,
+        )
     except Exception as exc:
         pipeline_run.status = "failed"
         pipeline_run.error_message = f"Failed to queue pipeline task: {exc}"
-        db.commit()
+        try:
+            db.commit()
+        except LegacyThemeWritesBlocked:
+            # Cutover landed after the queued commit; nothing was dispatched.
+            db.rollback()
         raise HTTPException(status_code=503, detail="Failed to queue theme discovery pipeline") from exc
 
-    pipeline_run.task_id = task.id
-    pipeline_run.status = "queued"
-    db.commit()
-
     pipeline_desc = pipeline if pipeline else "both (technical + fundamental)"
-    logger.info("Theme pipeline %s queued for %s with task ID: %s", run_id, pipeline_desc, task.id)
+    logger.info("Theme pipeline %s queued for %s with task ID: %s", run_id, pipeline_desc, task_id)
 
     return {
         "run_id": run_id,
-        "task_id": task.id,
+        "task_id": task_id,
         "status": "queued",
         "pipeline": pipeline,
         "message": f"Theme discovery pipeline queued for {pipeline_desc}",
