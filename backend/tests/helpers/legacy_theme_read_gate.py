@@ -70,6 +70,7 @@ CONTEXT_MARKERS = frozenset({  # fenced writers: refused outside legacy write mo
 })
 DECORATOR_MARKERS = frozenset({"app.services.legacy_theme_write_guard.skip_in_economic_authority"})
 ROUTING_MARKERS = PREDICATE_MARKERS | RAISING_MARKERS | CONTEXT_MARKERS | DECORATOR_MARKERS
+_FLIP = {"economic": "legacy", "legacy": "economic"}  # authority is legacy or economic
 
 GUARD_DEPENDENCIES = frozenset({"app.api.v1.themes_common.reject_legacy_theme_writes"})
 
@@ -148,6 +149,11 @@ class Class:
         known = self.attr_types.setdefault(name, [])
         if typed not in known:
             known.append(typed)
+
+
+class _Candidates(list):
+    """Every class a local may hold, e.g. ``reader = self.reader`` when several
+    implementations are injected; method calls on it follow all of them."""
 
 
 @dataclass
@@ -302,7 +308,8 @@ class Index:
         """The Module/Class/Func an expression names, or the Class of its value."""
         if isinstance(expr, ast.Name):
             if expr.id in local_types:
-                return local_types[expr.id]
+                typed = local_types[expr.id]
+                return typed[0] if isinstance(typed, _Candidates) else typed
             if expr.id in scope:
                 return self.resolve(scope[expr.id])
             return None
@@ -388,8 +395,13 @@ class Index:
         self_attrs = []
         for node in func.nodes:
             if isinstance(node, ast.Assign) and len(node.targets) == 1:
-                typed = self._resolve_expr(node.value, scope, types)
                 target = node.targets[0]
+                if isinstance(target, ast.Name):
+                    candidates = self._value_classes(node.value, scope, types)
+                    if len(candidates) > 1:
+                        types[target.id] = _Candidates(candidates)
+                        continue
+                typed = self._resolve_expr(node.value, scope, types)
                 if isinstance(typed, Module) and isinstance(target, ast.Name):
                     types[target.id] = typed  # e.g. x = import_module("app....")
                 elif isinstance(typed, Class):
@@ -544,6 +556,8 @@ class Index:
         return [method for owner in owners if (method := owner.method(node.attr))]
 
     def _value_classes(self, expr, scope, types):
+        if isinstance(expr, ast.Name) and isinstance(types.get(expr.id), _Candidates):
+            return list(types[expr.id])
         if isinstance(expr, ast.Attribute):
             owners = self._value_classes(expr.value, scope, types)
             if owners:
@@ -590,19 +604,62 @@ class Index:
             for target in node.targets
             if isinstance(target, ast.Name)
         }
+        def is_predicate(expr):
+            return uses(expr, PREDICATE_MARKERS) or any(
+                isinstance(child, ast.Name) and child.id in authority_vars
+                for child in ast.walk(expr)
+            )
+
+        def polarity(expr):
+            """Which authority a true ``expr`` implies: "economic", "legacy" or None."""
+            if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, ast.Not):
+                return _FLIP.get(polarity(expr.operand))
+            if isinstance(expr, ast.BoolOp):
+                known = {polarity(value) for value in expr.values}
+                if isinstance(expr.op, ast.And):  # true only if every operand is
+                    known.discard(None)
+                    return known.pop() if len(known) == 1 else None
+                return known.pop() if len(known) == 1 else None  # or: all must agree
+            if not is_predicate(expr):
+                return None
+            if isinstance(expr, ast.Compare):
+                right = expr.comparators[0]
+                if len(expr.ops) != 1 or not isinstance(right, ast.Constant):
+                    return None
+                # What equality implies: ``source_name == "economic"`` is economic;
+                # ``reader is None`` / ``mode == "legacy"`` are legacy.
+                if right.value == "economic":
+                    when_equal = "economic"
+                elif right.value is None or right.value == "legacy":
+                    when_equal = "legacy"
+                else:
+                    return None
+                if isinstance(expr.ops[0], (ast.Eq, ast.Is)):
+                    return when_equal
+                if isinstance(expr.ops[0], (ast.NotEq, ast.IsNot)):
+                    return _FLIP[when_equal]
+                return None
+            if isinstance(expr, (ast.Name, ast.Call)):
+                return "economic"  # a truthy economic reader, or writes blocked
+            return None
+
         ranges = []
         for node in func.nodes:
             if isinstance(node, (ast.With, ast.AsyncWith)):
                 if any(uses(item.context_expr, CONTEXT_MARKERS) for item in node.items):
                     ranges.append((_start(node.body[0]), _end(node.body[-1])))
-            elif isinstance(node, ast.If):
-                if uses(node.test, PREDICATE_MARKERS) or any(
-                    isinstance(child, ast.Name) and child.id in authority_vars
-                    for child in ast.walk(node.test)
-                ):
-                    ranges.append((_start(node.body[0]), _end((node.orelse or node.body)[-1])))
-                    if id(node) not in conditional and diverts(node.body):
-                        ranges.append((_end(node), everything_after))
+            elif isinstance(node, ast.If) and is_predicate(node.test):
+                # Only the arm that runs under legacy authority is routed; the
+                # economic arm is scanned. With unknown polarity, neither is.
+                arms = {"legacy": node.body, "economic": node.orelse}
+                if polarity(node.test) == "economic":
+                    arms = {"legacy": node.orelse, "economic": node.body}
+                elif polarity(node.test) is None:
+                    continue
+                if arms["legacy"]:
+                    ranges.append((_start(arms["legacy"][0]), _end(arms["legacy"][-1])))
+                if id(node) not in conditional and arms["economic"] and diverts(arms["economic"]):
+                    ranges.append((_end(node), everything_after))
             elif (
                 isinstance(node, ast.Expr)
                 and id(node) not in conditional

@@ -304,6 +304,14 @@ _FIXTURE = {
         class SafeReader:
             def load(self):
                 return []
+
+        class AliasUseCase:
+            def __init__(self, *, reader):
+                self.reader = reader
+
+            def run(self):
+                reader = self.reader  # a local copy must keep every injected type
+                return reader.load()
     """,
     "entry.py": """
         from app.services.economic_theme_read_service import EconomicThemeReader
@@ -343,6 +351,27 @@ _FIXTURE = {
             if reader.source_name == "economic":
                 return []
             return read_clusters(db)
+
+        def read_in_economic_arm(db, reader: EconomicThemeReader):
+            if reader.source_name == "economic":
+                return read_clusters(db)
+            return []
+
+        def read_after_legacy_return(db, reader: EconomicThemeReader):
+            if reader.source_name != "economic":
+                return []
+            return read_clusters(db)
+
+        def read_in_legacy_arm(db, reader: EconomicThemeReader):
+            if reader.source_name != "economic":
+                return read_clusters(db)
+            return []
+
+        def alias_keeps_every_implementation(db):
+            from app.services.readers import AliasUseCase, SafeReader, SqlClusterReader
+            AliasUseCase(reader=SafeReader())
+            AliasUseCase(reader=SqlClusterReader(db))
+            return AliasUseCase(reader=SafeReader()).run()
 
         def every_injected_implementation(db):
             from app.services.readers import SafeReader, UseCase, SqlClusterReader
@@ -400,14 +429,18 @@ def test_gate_accepts_reads_routed_by_authority(fixture_index):
         "check_in_other_branch",
         "reader_built_not_checked",
         "every_injected_implementation",
+        "read_in_economic_arm",  # the arm that runs under economic authority
+        "read_after_legacy_return",  # past a legacy-arm return, only economic remains
+        "alias_keeps_every_implementation",
     ],
 )
 def test_gate_counts_reads_the_authority_check_does_not_cover(fixture_index, name):
     assert [f.model for f in _reads(fixture_index, name)] == ["ThemeCluster"]
 
 
-def test_gate_accepts_a_branch_on_a_reader_parameter(fixture_index):
-    assert _reads(fixture_index, "reader_parameter_branch") == []
+@pytest.mark.parametrize("name", ["reader_parameter_branch", "read_in_legacy_arm"])
+def test_gate_accepts_a_branch_on_a_reader_parameter(fixture_index, name):
+    assert _reads(fixture_index, name) == []
 
 
 def test_gate_follows_injected_protocol_dependencies(fixture_index):
