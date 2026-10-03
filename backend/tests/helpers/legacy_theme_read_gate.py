@@ -331,7 +331,8 @@ class Index:
             if isinstance(callee, Class):
                 return callee
             if isinstance(callee, Func):
-                return self._return_class(callee)
+                typed = self._return_class(callee)
+                return typed[0] if isinstance(typed, _Candidates) else typed
             return None
         if isinstance(expr, ast.Subscript):  # e.g. Annotated[X, ...]
             return self._resolve_expr(expr.value, scope, local_types)
@@ -344,7 +345,8 @@ class Index:
         return None
 
     def _return_class(self, func):
-        """The Class (or Module, for ``return import_module("...")``) a call returns."""
+        """The Class (or Module, for ``return import_module("...")``) a call
+        returns, or ``_Candidates`` when its branches return different classes."""
         if func.qualname not in self._returns:
             self._returns[func.qualname] = None  # recursion guard
             if func.node.returns is not None:
@@ -356,7 +358,12 @@ class Index:
                 scope = self._scope(func.module, func)
                 types = self._local_types(func, scope)
                 inferred = {id(t): t for t in (self._resolve_expr(r, scope, types) for r in returns)}
-                if len(inferred) == 1:
+                classes = _Candidates()
+                for r in returns:
+                    classes.extend(c for c in self._value_classes(r, scope, types) if c not in classes)
+                if len(classes) > 1:
+                    self._returns[func.qualname] = classes
+                elif len(inferred) == 1:
                     typed = next(iter(inferred.values()))
                     if isinstance(typed, (Class, Module)):
                         self._returns[func.qualname] = typed
@@ -415,19 +422,19 @@ class Index:
                     if len(candidates) > 1:
                         bind(target.id, candidates)
                         continue
+                elif (
+                    func.cls is not None
+                    and isinstance(target, ast.Attribute)
+                    and isinstance(target.value, ast.Name)
+                    and target.value.id == "self"
+                ):
+                    self_attrs.append((node, target.attr))  # typed once every local is known
+                    continue
                 typed = self._resolve_expr(node.value, scope, types)
                 if isinstance(typed, Module) and isinstance(target, ast.Name):
                     types[target.id] = typed  # e.g. x = import_module("app....")
-                elif isinstance(typed, Class):
-                    if isinstance(target, ast.Name):
-                        bind(target.id, [typed])
-                    elif (
-                        func.cls is not None
-                        and isinstance(target, ast.Attribute)
-                        and isinstance(target.value, ast.Name)
-                        and target.value.id == "self"
-                    ):
-                        self_attrs.append((node, target.attr, typed))
+                elif isinstance(typed, Class) and isinstance(target, ast.Name):
+                    bind(target.id, [typed])
             elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
                 typed = self._annotation_class(node.annotation, scope)
                 if isinstance(typed, Class):
@@ -441,46 +448,19 @@ class Index:
                         if isinstance(typed, Class):
                             bind(item.optional_vars.id, [typed])
         if self_attrs:
-            # An implementation picked inside an authority branch is selected
-            # by mode, so it does not join the attribute's unconditional types.
-            selected = self._authority_branch_nodes(func, scope, types)
-            for node, attr, typed in self_attrs:
-                if id(node) not in selected:
-                    func.cls.add_attr_type(attr, typed)
+            # An implementation picked only under legacy authority (e.g. in the
+            # legacy arm of a check) does not join the attribute's types.
+            routed = self._routed_ranges(func, self._targets(func, scope, types), types)
+            for node, attr in self_attrs:
+                if not any(low <= _start(node) <= high for low, high in routed):
+                    for typed in self._value_classes(node.value, scope, types):
+                        func.cls.add_attr_type(attr, typed)
         for node in func.nodes:
             if isinstance(node, ast.Call):
                 cls = self._resolve_expr(node.func, scope, types)
                 if isinstance(cls, Class) and not isinstance(node.func, ast.Call):
                     self._bind_constructor_args(cls, node, scope, types)
         return types
-
-    def _authority_branch_nodes(self, func, scope, types):
-        """Nodes inside the branches of an ``if`` that tests authority mode."""
-
-        def is_authority(expr):
-            return any(
-                getattr(self._resolve_expr(child, scope, types), "qualname", None)
-                in PREDICATE_MARKERS
-                for child in ast.walk(expr)
-                if isinstance(child, (ast.Name, ast.Attribute))
-            )
-
-        authority_vars = {
-            target.id
-            for node in func.nodes
-            if isinstance(node, ast.Assign) and is_authority(node.value)
-            for target in node.targets
-            if isinstance(target, ast.Name)
-        }
-        branch: set[int] = set()
-        for node in func.nodes:
-            if isinstance(node, ast.If) and (
-                is_authority(node.test)
-                or any(isinstance(c, ast.Name) and c.id in authority_vars for c in ast.walk(node.test))
-            ):
-                for part in [*node.body, *node.orelse]:
-                    branch.update(id(child) for child in ast.walk(part))
-        return branch
 
     def _bind_constructor_args(self, cls, call, scope, types):
         """``Cls(writer=Writer(...))`` types ``Cls.writer`` when ``__init__``
@@ -518,26 +498,7 @@ class Index:
             return self._edges[func.qualname]
         scope = self._scope(func.module, func)
         types = self._local_types(func, scope)
-        annotations = _annotation_nodes(func.nodes)
-        dispatched = {
-            id(node.value) for node in func.nodes
-            if isinstance(node, ast.Attribute) and node.attr in _CELERY_DISPATCH
-        }
-        targets: dict[int, list] = {}  # node id -> what it refers to
-        for node in func.nodes:
-            if (
-                not isinstance(node, (ast.Name, ast.Attribute))
-                or id(node) in dispatched
-                or id(node) in annotations
-                or (isinstance(node, ast.Name) and node.id in types)  # a typed local value
-            ):
-                continue
-            found = self._method_targets(node, scope, types) if isinstance(node, ast.Attribute) else []
-            if not found:
-                resolved = self._resolve_expr(node, scope, types)
-                found = [resolved] if isinstance(resolved, (Func, Class)) else []
-            if found:
-                targets[id(node)] = found
+        targets = self._targets(func, scope, types)
         routed = self._routed_ranges(func, targets, types)
 
         callees: set[str] = set()
@@ -567,6 +528,30 @@ class Index:
         self._edges[func.qualname] = (callees, models)
         return self._edges[func.qualname]
 
+    def _targets(self, func, scope, types):
+        """Node id -> the Funcs and Classes a name or attribute refers to."""
+        annotations = _annotation_nodes(func.nodes)
+        dispatched = {
+            id(node.value) for node in func.nodes
+            if isinstance(node, ast.Attribute) and node.attr in _CELERY_DISPATCH
+        }
+        targets: dict[int, list] = {}  # node id -> what it refers to
+        for node in func.nodes:
+            if (
+                not isinstance(node, (ast.Name, ast.Attribute))
+                or id(node) in dispatched
+                or id(node) in annotations
+                or (isinstance(node, ast.Name) and node.id in types)  # a typed local value
+            ):
+                continue
+            found = self._method_targets(node, scope, types) if isinstance(node, ast.Attribute) else []
+            if not found:
+                resolved = self._resolve_expr(node, scope, types)
+                found = [resolved] if isinstance(resolved, (Func, Class)) else []
+            if found:
+                targets[id(node)] = found
+        return targets
+
     def _method_targets(self, node, scope, types):
         """Methods an attribute call may reach, across every injected type."""
         owners = self._value_classes(node.value, scope, types)
@@ -575,6 +560,10 @@ class Index:
     def _value_classes(self, expr, scope, types):
         if isinstance(expr, ast.Name) and isinstance(types.get(expr.id), _Candidates):
             return list(types[expr.id])
+        if isinstance(expr, ast.Call):
+            callee = self._resolve_expr(expr.func, scope, types)
+            if isinstance(callee, Func) and isinstance(returned := self._return_class(callee), _Candidates):
+                return list(returned)
         if isinstance(expr, (ast.BoolOp, ast.IfExp)):  # any option may be the value
             options = expr.values if isinstance(expr, ast.BoolOp) else [expr.body, expr.orelse]
             found = []
@@ -842,8 +831,8 @@ def _annotation_nodes(nodes):
 
 
 def _static_text(node):
-    """The literal text of a string expression, its dynamic parts dropped:
-    ``f"FROM {schema}.theme_clusters"`` or ``"SELECT * FROM " + table_prefix + "theme_clusters"``."""
+    """The literal text of a string expression, each dynamic part a space:
+    ``f"FROM {schema}.theme_clusters"`` or ``"FROM theme_" + "clusters"``."""
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     if isinstance(node, ast.JoinedStr):
@@ -852,8 +841,10 @@ def _static_text(node):
         parts = [node.left, node.right]
     else:
         return None
-    texts = [text for part in parts if (text := _static_text(part)) is not None]
-    return " ".join(texts) if texts else None
+    texts = [_static_text(part) for part in parts]
+    if all(text is None for text in texts):
+        return None
+    return "".join(" " if text is None else text for text in texts)
 
 
 def _param_names(func):

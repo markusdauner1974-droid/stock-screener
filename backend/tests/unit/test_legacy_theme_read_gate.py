@@ -274,6 +274,7 @@ _FIXTURE = {
     "services/readers.py": """
         from typing import Protocol
         from app.models.theme import ThemeCluster
+        from app.services.economic_theme_read_service import EconomicThemeReader
 
         def read_clusters(db):
             return db.query(ThemeCluster).all()
@@ -322,6 +323,48 @@ _FIXTURE = {
             def run(self):
                 reader = self.reader  # a local copy must keep every injected type
                 return reader.load()
+
+        class ConditionalAttr:
+            def __init__(self, db, flag):
+                self.reader = SafeReader() if flag else SqlClusterReader(db)
+
+            def run(self):
+                return self.reader.load()
+
+        class ReassignedAttr:
+            def __init__(self, db, flag):
+                reader = SafeReader()
+                if flag:
+                    reader = SqlClusterReader(db)
+                self.reader = reader
+
+            def run(self):
+                return self.reader.load()
+
+        class EconomicArmAttr:
+            def __init__(self, db, reader: EconomicThemeReader):
+                if reader.source_name == "economic":
+                    self.impl = SqlClusterReader(db)  # selected under economic authority
+                else:
+                    self.impl = SafeReader()
+
+            def run(self):
+                return self.impl.load()
+
+        class LegacyArmAttr:
+            def __init__(self, db, reader: EconomicThemeReader):
+                if reader.source_name == "economic":
+                    self.impl = SafeReader()
+                else:
+                    self.impl = SqlClusterReader(db)  # legacy authority only
+
+            def run(self):
+                return self.impl.load()
+
+        def pick_reader(db, flag):
+            if flag:
+                return SafeReader()
+            return SqlClusterReader(db)
     """,
     "api/v1/themes_common.py": """
         def reject_legacy_theme_writes(db): ...
@@ -489,6 +532,29 @@ _FIXTURE = {
         def raw_sql_concat(db, schema):
             return db.execute("SELECT id FROM " + schema + ".theme_clusters")
 
+        def raw_sql_adjacent(db):
+            return db.execute("SELECT id FROM theme_" + "clusters")
+
+        def conditional_attr(db, flag):
+            from app.services.readers import ConditionalAttr
+            return ConditionalAttr(db, flag).run()
+
+        def reassigned_attr(db, flag):
+            from app.services.readers import ReassignedAttr
+            return ReassignedAttr(db, flag).run()
+
+        def economic_arm_attr(db, reader: EconomicThemeReader):
+            from app.services.readers import EconomicArmAttr
+            return EconomicArmAttr(db, reader).run()
+
+        def legacy_arm_attr(db, reader: EconomicThemeReader):
+            from app.services.readers import LegacyArmAttr
+            return LegacyArmAttr(db, reader).run()
+
+        def factory_branches(db, flag):
+            from app.services.readers import pick_reader
+            return pick_reader(db, flag).load()
+
         def task_body(db):
             return read_clusters(db)
 
@@ -520,7 +586,7 @@ def test_gate_reports_an_unrouted_read_with_its_call_path(fixture_index):
     assert finding.path == ["app.entry.unrouted", "app.services.readers.read_clusters"]
 
 
-@pytest.mark.parametrize("name", ["raw_sql", "raw_sql_upper", "raw_sql_fstring", "raw_sql_concat"])  # unquoted SQL names fold case
+@pytest.mark.parametrize("name", ["raw_sql", "raw_sql_upper", "raw_sql_fstring", "raw_sql_concat", "raw_sql_adjacent"])  # unquoted SQL names fold case
 def test_gate_reports_raw_sql_naming_a_legacy_table(fixture_index, name):
     assert [f.model for f in _reads(fixture_index, name)] == ["table:theme_clusters"]
 
@@ -550,6 +616,10 @@ def test_gate_accepts_reads_routed_by_authority(fixture_index):
         "conditional_value",  # either branch of a conditional may be the value
         "ready_from_reader",  # a variable merely derived from a reader is not a check
         "skip_callback",  # the decorator's on_skip callback runs when skipped
+        "conditional_attr",  # self.attr keeps every option
+        "reassigned_attr",  # self.attr keeps every class its local held
+        "economic_arm_attr",  # an implementation picked under economic authority
+        "factory_branches",  # every class a factory's branches return
     ],
 )
 def test_gate_counts_reads_the_authority_check_does_not_cover(fixture_index, name):
@@ -564,6 +634,7 @@ def test_gate_counts_reads_the_authority_check_does_not_cover(fixture_index, nam
         "raising_check",
         "unforced_raising_check",
         "skipped_task_body",
+        "legacy_arm_attr",  # picked only under legacy authority
     ],
 )
 def test_gate_accepts_a_branch_on_a_reader_parameter(fixture_index, name):
