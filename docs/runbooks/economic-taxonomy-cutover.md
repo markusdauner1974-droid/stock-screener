@@ -104,40 +104,26 @@ be built; entering shadow without a successful synthetic request is prohibited.
 
 ## 2. Seed the governed V1 snapshot
 
-Run this once when `taxonomy_authority.processing_taxonomy_version_id` is null.
-It creates the governed draft dimension catalog and establishes legacy authority
-at epoch 1. Keep this snapshot in draft only while reviewed legacy dispositions,
-destinations, and split allocations are being added. If authority already
-exists, inspect it instead of running the seed again.
+Run this once, while `taxonomy_authority.processing_taxonomy_version_id` is
+null. It creates the governed draft dimension catalog and makes it the
+processing taxonomy. Keep this snapshot in draft only while reviewed legacy
+dispositions, destinations, and split allocations are being added.
+
+The seed runs under the exclusive writer fence and handles each authority state:
+
+| Authority row | Seed result |
+|---|---|
+| None | Creates one in `legacy` mode at epoch 1 |
+| Implicit legacy row (no processing taxonomy) | Adopts it and keeps its epoch. The first fenced legacy write, such as a theme metrics run, creates this row. |
+| Already has a processing taxonomy | Prints `STOP:` and writes nothing |
+| Not `legacy` mode, or writes fenced | Prints `STOP:` and writes nothing |
 
 ```bash
-TAXONOMY_ACTOR="$TAXONOMY_ACTOR" ./venv/bin/python - <<'PY'
-import os
-from app.database import SessionLocal
-from app.infra.db.repositories.economic_taxonomy_repo import EconomicTaxonomyRepository
-from app.models.economic_taxonomy_runtime import TaxonomyAuthority
-from app.services.economic_taxonomy_seed import seed_initial_dimensions
-
-actor = os.environ["TAXONOMY_ACTOR"]
-with SessionLocal() as db:
-    authority = db.get(TaxonomyAuthority, 1)
-    if authority is not None:
-        raise SystemExit("STOP: taxonomy authority already exists")
-    repo = EconomicTaxonomyRepository(db)
-    draft = repo.create_draft(actor=actor, reason="V1 governed seed")
-    seed_initial_dimensions(repo, draft.id, actor=actor)
-    db.add(TaxonomyAuthority(
-        id=1, mode="legacy", processing_taxonomy_version_id=draft.id,
-        processing_head_revision=1, authority_epoch=1, writes_fenced=False,
-        semantic_invalidation_revision=0, cutover_catch_up_cursor=[],
-        rollback_state="ready",
-    ))
-    db.commit()
-    print(draft.id)
-PY
+./venv/bin/python scripts/seed_economic_taxonomy.py --actor "$TAXONOMY_ACTOR"
 ```
 
-Record the draft UUID. Never seed a second root while this draft exists.
+Record the draft UUID it prints. Never seed a second root while this draft
+exists. On `STOP:`, inspect the authority row instead of seeding again.
 
 ## 3. Capture and review legacy migration inputs
 
