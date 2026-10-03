@@ -76,14 +76,22 @@ class RSSFetcher(BaseContentFetcher):
             for entry in feed.entries:
                 # Parse published date
                 published_at = None
+                updated_at = None
+                if hasattr(entry, "updated_parsed") and entry.updated_parsed:
+                    updated_at = _coerce_utc_datetime(datetime(*entry.updated_parsed[:6]))
                 if hasattr(entry, "published_parsed") and entry.published_parsed:
                     published_at = _coerce_utc_datetime(datetime(*entry.published_parsed[:6]))
-                elif hasattr(entry, "updated_parsed") and entry.updated_parsed:
-                    published_at = _coerce_utc_datetime(datetime(*entry.updated_parsed[:6]))
+                else:
+                    published_at = updated_at
 
-                # Skip if older than since date
+                # Skip entries unchanged since the last poll. A correction keeps
+                # its publish date but bumps <updated>, so it still reaches
+                # economic admission (#501).
                 since_bound = _coerce_utc_datetime(since)
-                if since_bound and published_at and published_at < since_bound:
+                last_changed = max(
+                    (moment for moment in (published_at, updated_at) if moment), default=None
+                )
+                if since_bound and last_changed and last_changed < since_bound:
                     continue
 
                 # Extract content
@@ -238,8 +246,14 @@ class RedditFetcher(BaseContentFetcher):
                 created_utc = post_data.get("created_utc", 0)
                 published_at = _coerce_utc_datetime(datetime.utcfromtimestamp(created_utc))
 
+                # An edited post keeps created_utc; "edited" is its edit time
+                # (False if never edited), so edits still reach admission (#501).
+                edited = post_data.get("edited")
+                last_changed = published_at
+                if edited and not isinstance(edited, bool):
+                    last_changed = max(published_at, datetime.fromtimestamp(edited, tz=timezone.utc))
                 since_bound = _coerce_utc_datetime(since)
-                if since_bound and published_at < since_bound:
+                if since_bound and last_changed < since_bound:
                     continue
 
                 external_id = self.generate_external_id("reddit", post_data.get("id", ""))
