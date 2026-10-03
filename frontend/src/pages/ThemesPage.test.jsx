@@ -45,6 +45,11 @@ vi.mock('../components/Themes/ModelSettingsModal', () => ({
   default: () => null,
 }));
 
+vi.mock('../components/Themes/ManageSourcesModal', () => ({
+  default: ({ open }) => (open ? <h2>Manage Content Sources</h2> : null),
+  ManageSourcesContent: () => null,
+}));
+
 vi.mock('../features/socialSignals/SocialThemePulse', () => ({
   default: ({ enabled }) => enabled ? <div>Published Social Pulse</div> : null,
 }));
@@ -176,6 +181,20 @@ describe('ThemesPage', () => {
     expect(screen.getByText('Unavailable')).toBeInTheDocument();
     expect(screen.queryByText('Fundamental Momentum')).not.toBeInTheDocument();
     expect(screen.queryByTestId('taxonomy')).not.toBeInTheDocument();
+  });
+
+  it('keeps content-source management reachable in economic authority mode', async () => {
+    // #471: ingested sources still feed economic evidence after cutover.
+    economicApi.getEconomicThemes.mockResolvedValue({
+      generation_id: 'generation-1',
+      generation: { authority_mode: 'economic' },
+      themes: [],
+    });
+
+    renderPage();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Content sources' }));
+    expect(screen.getByRole('heading', { name: 'Manage Content Sources' })).toBeInTheDocument();
   });
 
   it('switches to a newly published economic generation while mounted', async () => {
