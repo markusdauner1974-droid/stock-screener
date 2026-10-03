@@ -816,7 +816,11 @@ def api_entry_points(index, app):
 def celery_entry_points(index, celery_app):
     celery_app.loader.import_default_modules()
     for name, task in sorted(celery_app.tasks.items()):
-        if name.startswith("celery."):
+        module = getattr(task.run, "__module__", None) or ""
+        # Celery shares tasks across apps (shared=True), so tasks a test module
+        # registers on its own app land here too; only app/ code is an entry
+        # point. An app/ task the gate cannot map still reports UNRESOLVED.
+        if name.startswith("celery.") or not (module == "app" or module.startswith("app.")):
             continue
         yield f"task {name}", [index.func_for(task.run)], False
 
