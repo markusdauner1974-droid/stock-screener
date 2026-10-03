@@ -175,6 +175,8 @@ def test_backfill_admits_previously_ingested_items_once(db_session):
     source = _source(db_session)
     twitter = _source(db_session, source_type="twitter")
     fetched_at = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    # The X item has no legacy grant (e.g. collected by Social), so it is left
+    # to Social admission.
     for item_source, external_id in ((source, "old-1"), (source, "old-2"), (twitter, "tw-old")):
         db_session.add(ContentItem(
             source_id=item_source.id, source_type=item_source.source_type,
@@ -282,10 +284,69 @@ def test_title_already_leading_the_content_is_not_repeated(db_session):
     assert packet.original_text_ref == "Memory upcycle\n\nDRAM prices up."
 
 
-def test_x_posts_are_left_to_social_admission(db_session):
+def _family_keys(db_session):
+    return set(db_session.scalars(
+        select(SourceFamily.canonical_source_key)
+        .join(SourceLineage, SourceLineage.source_family_id == SourceFamily.id)
+        .join(EvidencePacket, EvidencePacket.source_lineage_id == SourceLineage.id)
+    ))
+
+
+def test_legacy_x_post_is_admitted_under_socials_post_family(db_session):
+    # #500: the same family Social uses, keyed by the tweet id in the URL
+    # (external_id holds only its hash).
     source = _source(db_session, source_type="twitter")
 
-    _ingest(db_session, source, _Feed(_item(external_id="tw-1")))
+    _ingest(db_session, source, _Feed(_item(
+        external_id="tw-1", title="", url="https://x.com/analyst/status/1840123",
+    )))
+
+    assert _family_keys(db_session) == {"x:post:1840123"}
+
+
+def test_x_post_without_a_status_url_is_not_admitted(db_session):
+    source = _source(db_session, source_type="twitter")
+
+    _ingest(db_session, source, _Feed(_item(external_id="tw-1", url="https://x.com/analyst")))
 
     assert db_session.scalar(select(func.count()).select_from(ContentItem)) == 1
     assert db_session.scalar(select(func.count()).select_from(EvidencePacket)) == 0
+
+
+def test_backfill_does_not_count_x_posts_without_a_tweet_id(db_session):
+    source = _source(db_session, source_type="twitter")
+    observed = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    item = ContentItem(source_id=source.id, source_type="twitter", source_name=source.name,
+                       external_id="tw-hash", content="Memory demand.",
+                       url="https://x.com/analyst", published_at=observed, fetched_at=observed)
+    db_session.add(item)
+    db_session.flush()
+    db_session.add(ContentPipelineEligibility(
+        content_item_id=item.id, pipeline="technical", channel="legacy",
+        originating_source_id=source.id, observed_at=observed,
+    ))
+    db_session.commit()
+
+    result = ContentIngestionService(db_session).backfill_economic_evidence()
+
+    assert result == {"admitted": 0, "last_id": item.id}
+
+
+def test_backfill_admits_legacy_x_observations(db_session):
+    source = _source(db_session, source_type="twitter")
+    observed = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    item = ContentItem(source_id=source.id, source_type="twitter", source_name=source.name,
+                       external_id="tw-hash", content="Memory demand.",
+                       url="https://x.com/analyst/status/1840999",
+                       published_at=observed, fetched_at=observed)
+    db_session.add(item)
+    db_session.flush()
+    db_session.add(ContentPipelineEligibility(
+        content_item_id=item.id, pipeline="technical", channel="legacy",
+        originating_source_id=source.id, observed_at=observed,
+    ))
+    db_session.commit()
+
+    ContentIngestionService(db_session).backfill_economic_evidence()
+
+    assert _family_keys(db_session) == {"x:post:1840999"}

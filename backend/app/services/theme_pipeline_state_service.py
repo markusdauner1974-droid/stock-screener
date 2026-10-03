@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session, aliased
 from .economic_source_admission import (
     CONTENT_INGESTION_ROUTE,
     EconomicSourceAdmissionService,
+    content_family_key,
     content_route_record_id,
-    post_family_key,
 )
 from .theme_evidence_eligibility_service import legacy_eligibility_exists, grant_eligibility, is_social_owned_source
 from ..infra.db.models.social_signals import ContentPipelineEligibility
@@ -156,7 +156,7 @@ def reconcile_source_pipeline_change(
             items_by_id = {
                 row.id: row
                 for row in db.query(
-                    ContentItem.id, ContentItem.source_type, ContentItem.external_id
+                    ContentItem.id, ContentItem.source_type, ContentItem.external_id, ContentItem.url
                 ).filter(ContentItem.id.in_(item_ids))
             }
             admission = EconomicSourceAdmissionService(db)
@@ -179,9 +179,10 @@ def reconcile_source_pipeline_change(
                 item = items_by_id[item_id]
                 # Old items are rarely re-polled, so the economic lens of an
                 # admitted observation follows the new grant here (#471).
-                if item.source_type != "twitter":
+                family_key = content_family_key(item.source_type, item.external_id, item.url)
+                if family_key is not None:
                     admission.add_observation_channels(
-                        family_key=post_family_key(item.source_type, item.external_id),
+                        family_key=family_key,
                         capture_route=CONTENT_INGESTION_ROUTE,
                         route_record_id=content_route_record_id(item_id, source_id),
                         channels=added,

@@ -25,6 +25,7 @@ from .economic_source_admission import (
     CONTENT_INGESTION_ROUTE,
     EconomicSourceAdmissionService,
     EvidenceAdmission,
+    content_family_key,
     content_route_record_id,
 )
 from .theme_evidence_eligibility_service import grant_eligibility, is_social_owned_source, legacy_sources, legacy_eligibility_exists
@@ -316,15 +317,26 @@ class ContentIngestionService:
         source_id: int | None,
         source_name: str | None,
         captured_at: datetime | None = None,
-    ) -> None:
-        """Admit the fetched text as economic taxonomy evidence.
+    ) -> bool:
+        """Admit the fetched text as economic taxonomy evidence; return whether it was.
 
         Runs on every poll, not just for new items: an unchanged recapture
         reuses its packet, and changed text (a correction, even to empty)
         enters the same lineage, where the precedence policy decides it.
         Admission shares the ingest transaction, so a failure rolls back the
         batch and the next poll retries it.
+
+        X posts join Social's ``x:post:<tweet_id>`` family; Social's later
+        capture of the same post supersedes this one (#500). A post with no
+        status URL has no tweet id to key on and is skipped.
         """
+        family_key = content_family_key(
+            content_item.source_type,
+            content_item.external_id,
+            item_data.get("url") or content_item.url,
+        )
+        if family_key is None:
+            return False
         now = captured_at or datetime.now(timezone.utc)
         title = item_data.get("title") or ""
         content = item_data.get("content") or ""
@@ -335,8 +347,8 @@ class ContentIngestionService:
             text = content
         EconomicSourceAdmissionService(self.db).admit_content(
             EvidenceAdmission(
-                provider=content_item.source_type,
-                canonical_item_id=content_item.external_id,
+                provider="x" if content_item.source_type == "twitter" else content_item.source_type,
+                canonical_source_family=family_key,
                 capture_route=CONTENT_INGESTION_ROUTE,
                 # A mirror feed gets its own packet instead of the first feed's.
                 route_record_id=content_route_record_id(content_item.id, source_id),
@@ -359,23 +371,26 @@ class ContentIngestionService:
                 ),
             )
         )
+        return True
 
     def backfill_economic_evidence(self, *, batch_size: int = 500, after_id: int = 0) -> dict:
-        """Admit non-X items ingested before content admission existed (#471).
+        """Admit items ingested before content admission existed (#471, #500).
 
         Replays each recorded legacy observation (``ContentPipelineEligibility``):
         one capture per observing source, with the pipelines that source granted,
         dated by its first grant, so evidence is never available earlier than it
-        was. An item with no recorded grant falls back to its own source.
-        Re-running is safe: an already admitted observation reuses its packet.
-        Commits per batch; pass the last reported id as ``after_id`` to resume.
+        was. An item with no recorded grant falls back to its own source, except
+        an X post: without a legacy grant it was collected by Social, which
+        admits it. Re-running is safe: an already admitted observation reuses
+        its packet. Commits per batch; pass the last reported id as
+        ``after_id`` to resume.
         """
         admitted = 0
         last_id = after_id
         while True:
             items = (
                 self.db.query(ContentItem)
-                .filter(ContentItem.id > last_id, ContentItem.source_type != "twitter")
+                .filter(ContentItem.id > last_id)
                 .order_by(ContentItem.id)
                 .limit(batch_size)
                 .all()
@@ -395,14 +410,18 @@ class ContentIngestionService:
                 pipelines.add(grant.pipeline)
                 by_source[grant.originating_source_id] = (pipelines, min(first, grant.observed_at))
             for item in items:
-                item_observations = observations.get(item.id) or {
-                    item.source_id: (None, item.fetched_at)
-                }
+                last_id = item.id
+                item_observations = observations.get(item.id)
+                if not item_observations:
+                    if item.source_type == "twitter":
+                        continue
+                    item_observations = {item.source_id: (None, item.fetched_at)}
+                item_admitted = False
                 for source_id, (pipelines, observed_at) in sorted(
                     item_observations.items(), key=lambda entry: entry[1][1]
                 ):
                     source = self.db.get(ContentSource, source_id) if source_id else None
-                    self._admit_economic_evidence(
+                    item_admitted |= self._admit_economic_evidence(
                         item,
                         {
                             "title": item.title,
@@ -418,8 +437,7 @@ class ContentIngestionService:
                         source_name=source.name if source else item.source_name,
                         captured_at=_coerce_utc_datetime(observed_at),
                     )
-                admitted += 1
-                last_id = item.id
+                admitted += item_admitted
             self.db.commit()
             logger.info("Economic evidence backfill: %d items admitted through id %d", admitted, last_id)
 
@@ -502,16 +520,15 @@ class ContentIngestionService:
             for pipeline in source_pipelines:
                 grant_eligibility(self.db, (existing or content_item).id, pipeline, "legacy", source_id, datetime.now(timezone.utc))
 
-            # X posts are admitted by Social, whose extraction fingerprint this
-            # route can't reproduce (#471).
-            if source_type != "twitter":
-                self._admit_economic_evidence(
-                    existing or content_item,
-                    item_data,
-                    source_pipelines,
-                    source_id=source_id,
-                    source_name=source_name,
-                )
+            # Social-owned X sources never reach here (see the guard above), so
+            # an X post here is a legacy-only observation (#500).
+            self._admit_economic_evidence(
+                existing or content_item,
+                item_data,
+                source_pipelines,
+                source_id=source_id,
+                source_name=source_name,
+            )
 
         # Commit all new items
         if new_count > 0:
