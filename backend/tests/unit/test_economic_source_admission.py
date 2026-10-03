@@ -194,6 +194,53 @@ def test_social_recapture_after_superseding_content_is_equivalent(db_session):
     assert db_session.get(EvidencePacket, recapture.packet_id).supersedes_evidence_packet_id is None
 
 
+def _lens(db_session, packet_id):
+    latest = db_session.scalars(
+        select(LensEligibilityRevision)
+        .where(LensEligibilityRevision.evidence_packet_id == packet_id)
+        .order_by(LensEligibilityRevision.revision_number.desc())
+    ).first()
+    return set(latest.evidence_channels)
+
+
+def test_social_supersession_keeps_the_legacy_x_lens(db_session):
+    admission = EconomicSourceAdmissionService(db_session)
+    admission.admit_content(replace(
+        _x_capture(CONTENT_INGESTION_ROUTE, "Memory demand.", "7:3"),
+        evidence_channels=("technical",),
+    ))
+
+    social = admission.admit_social_work(_x_capture("social", "Memory demand.", "work-9"))
+
+    assert _lens(db_session, social.packet_id) == {"narrative", "technical"}
+
+
+def test_legacy_x_lens_reaches_social_packet_admitted_first(db_session):
+    admission = EconomicSourceAdmissionService(db_session)
+    social = admission.admit_social_work(_x_capture("social", "Memory demand.", "work-9"))
+
+    admission.admit_content(replace(
+        _x_capture(CONTENT_INGESTION_ROUTE, "Memory demand.", "7:3"),
+        evidence_channels=("technical",),
+    ))
+
+    assert _lens(db_session, social.packet_id) == {"narrative", "technical"}
+
+
+def test_pipeline_added_to_a_legacy_x_source_reaches_the_social_packet(db_session):
+    admission = EconomicSourceAdmissionService(db_session)
+    admission.admit_content(_x_capture(CONTENT_INGESTION_ROUTE, "Memory demand.", "7:3"))
+    social = admission.admit_social_work(_x_capture("social", "Memory demand.", "work-9"))
+
+    added = admission.add_observation_channels(
+        family_key="x:post:123", capture_route=CONTENT_INGESTION_ROUTE,
+        route_record_id="7:3", channels={"fundamental"}, reason="source_pipeline_added",
+    )
+
+    assert added is True
+    assert "fundamental" in _lens(db_session, social.packet_id)
+
+
 def test_content_capture_after_social_is_held_once(db_session):
     admission = EconomicSourceAdmissionService(db_session)
     social = admission.admit_social_work(_x_capture("social", "Memory demand.", "work-9"))

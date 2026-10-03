@@ -43,8 +43,10 @@ def _ordered(values) -> tuple[str, ...]:
     return tuple(sorted({str(value) for value in values}))
 
 
-# Capture route for news/RSS/Substack/Reddit content ingestion (#471).
+# Capture route for news/RSS/Substack/Reddit/legacy-X content ingestion (#471).
 CONTENT_INGESTION_ROUTE = "content_ingestion"
+# Capture route of Social saved-work admissions.
+SOCIAL_ROUTE = "social"
 
 
 def post_family_key(provider: str, canonical_item_id: str) -> str:
@@ -149,8 +151,13 @@ class EconomicSourceAdmissionService:
 
     def admit_content(self, evidence: EvidenceAdmission) -> AdmissionResult:
         # Ingestion re-polls items with a fresh capture time, so a recapture of
-        # text already admitted for this lineage reuses that packet.
-        return self.admit(evidence, reuse_admitted_content=True)
+        # text already admitted for this lineage reuses that packet. When Social
+        # owns the post, this capture is held but its lens still applies (#500).
+        return self.admit(
+            evidence,
+            reuse_admitted_content=True,
+            lend_channels_to_routes=frozenset({SOCIAL_ROUTE}),
+        )
 
     def admit_social_work(self, evidence: EvidenceAdmission) -> AdmissionResult:
         # Social's prepared capture of an X post outranks the raw legacy X
@@ -168,6 +175,7 @@ class EconomicSourceAdmissionService:
         *,
         reuse_admitted_content: bool = False,
         supersede_routes: frozenset[str] = frozenset(),
+        lend_channels_to_routes: frozenset[str] = frozenset(),
     ) -> AdmissionResult:
         expected_epoch = self._current_epoch()
         with producer_write(
@@ -175,12 +183,23 @@ class EconomicSourceAdmissionService:
             expected_epoch=expected_epoch,
             allowed_modes={"legacy", "shadow", "dual", "economic"},
         ) as authority:
-            return self._admit(
+            result = self._admit(
                 evidence,
                 authority_epoch=authority.authority_epoch,
                 reuse_admitted_content=reuse_admitted_content,
                 supersede_routes=supersede_routes,
             )
+            # The lens discovery reads is the effective packet's; a capture held
+            # behind an outranking route's packet lends it its channels.
+            if lend_channels_to_routes and evidence.evidence_channels:
+                effective = self.effective_packet(result.source_lineage_id)
+                if effective is not None and effective.capture_route in lend_channels_to_routes:
+                    self._merge_equivalent_eligibility(
+                        effective,
+                        evidence.evidence_channels,
+                        authority_epoch=authority.authority_epoch,
+                    )
+            return result
 
     def _admit(
         self,
@@ -209,7 +228,15 @@ class EconomicSourceAdmissionService:
         ):
             target = self._latest_effective_from_routes(lineage.id, supersede_routes)
             if target is not None:
-                superseding = replace(evidence, supersedes_packet_id=target.id)
+                # Carry the superseded capture's lens (e.g. a legacy X source's
+                # technical/fundamental grants); lens is outside the packet hash.
+                superseding = replace(
+                    evidence,
+                    supersedes_packet_id=target.id,
+                    evidence_channels=tuple(
+                        sorted(set(evidence.evidence_channels) | self._latest_channels(target.id))
+                    ),
+                )
                 current = self.effective_packet(lineage.id)
                 rerun_hash = self._packet_hash(
                     superseding, self._content_fingerprint(superseding)
@@ -419,10 +446,11 @@ class EconomicSourceAdmissionService:
     ) -> bool:
         """Add lens channels for one capture observation already admitted.
 
-        The lens discovery reads is the effective packet's (equivalent captures
-        merge into it), so channels go there when the observation's packet is
-        still in force. Returns whether a revision was written; an observation
-        with no standing packet is left alone.
+        A source's grant applies to the post, whichever packet is now in force
+        (e.g. Social's, after it superseded a legacy X capture), so channels go
+        to the lineage's effective packet once the observation has any packet.
+        Returns whether a revision was written; an observation not yet admitted
+        is left to the backfill, which replays the grants.
         """
         lineage = self.session.execute(
             select(SourceLineage)
@@ -437,7 +465,6 @@ class EconomicSourceAdmissionService:
             return False
         observed = any(
             (packet.source_metadata or {}).get("route_record_id") == route_record_id
-            and self._standing(packet, effective) == 0
             for packet in self.session.execute(
                 select(EvidencePacket).where(
                     EvidencePacket.source_lineage_id == lineage.id,
@@ -445,13 +472,7 @@ class EconomicSourceAdmissionService:
                 )
             ).scalars()
         )
-        latest = self.session.scalar(
-            select(LensEligibilityRevision.evidence_channels)
-            .where(LensEligibilityRevision.evidence_packet_id == effective.id)
-            .order_by(LensEligibilityRevision.revision_number.desc())
-            .limit(1)
-        )
-        current = set(latest or ())
+        current = self._latest_channels(effective.id)
         if not observed or set(channels) <= current:
             return False
         self.revise_lens_eligibility(
@@ -473,6 +494,15 @@ class EconomicSourceAdmissionService:
         ):
             return 0
         return 1 if disposition == "hold_review" else None
+
+    def _latest_channels(self, packet_id: UUID) -> set[str]:
+        channels = self.session.scalar(
+            select(LensEligibilityRevision.evidence_channels)
+            .where(LensEligibilityRevision.evidence_packet_id == packet_id)
+            .order_by(LensEligibilityRevision.revision_number.desc())
+            .limit(1)
+        )
+        return set(channels or ())
 
     def _latest_effective_from_routes(
         self, lineage_id: UUID, routes: frozenset[str]
