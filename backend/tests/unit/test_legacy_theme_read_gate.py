@@ -329,8 +329,12 @@ _FIXTURE = {
     "api/v1/themes_taxonomy.py": """
         def _reject_economic_mode(db): ...
     """,
+    "services/legacy_theme_write_guard.py": """
+        def ensure_legacy_theme_writes_allowed(db, force=False): ...
+    """,
     "entry.py": """
         from app.api.v1.themes_taxonomy import _reject_economic_mode
+        from app.services.legacy_theme_write_guard import ensure_legacy_theme_writes_allowed
         from app.services.economic_theme_read_service import EconomicThemeReader
         from app.services.readers import build_use_case, read_clusters, read_raw
 
@@ -406,6 +410,28 @@ _FIXTURE = {
             except Exception:
                 pass
             return read_clusters(db)
+
+        def is_ready(reader):
+            return True
+
+        def reader_passed_to_helper(db, reader: EconomicThemeReader):
+            if is_ready(reader):  # says nothing about authority
+                return []
+            return read_clusters(db)
+
+        def forced_raising_check(db):
+            ensure_legacy_theme_writes_allowed(db, force=True)  # bypasses the rejection
+            return read_clusters(db)
+
+        def unforced_raising_check(db):
+            ensure_legacy_theme_writes_allowed(db, force=False)
+            return read_clusters(db)
+
+        def finally_after_raising_check(db):
+            try:
+                _reject_economic_mode(db)
+            finally:
+                read_clusters(db)  # runs while the economic-mode exception unwinds
 
         def reassigned_local(db, flag):
             from app.services.readers import SafeReader, SqlClusterReader
@@ -488,13 +514,18 @@ def test_gate_accepts_reads_routed_by_authority(fixture_index):
         "read_in_else_of_mixed_check",  # the else arm of `economic and flag` is not legacy-only
         "constructor_takes_every_candidate",
         "caught_raising_check",  # a caught raise does not divert
+        "reader_passed_to_helper",  # a reader in an unrelated call is not a check
+        "forced_raising_check",  # force=True skips the rejection
+        "finally_after_raising_check",  # finally runs as the exception unwinds
     ],
 )
 def test_gate_counts_reads_the_authority_check_does_not_cover(fixture_index, name):
     assert [f.model for f in _reads(fixture_index, name)] == ["ThemeCluster"]
 
 
-@pytest.mark.parametrize("name", ["reader_parameter_branch", "read_in_legacy_arm", "raising_check"])
+@pytest.mark.parametrize(
+    "name", ["reader_parameter_branch", "read_in_legacy_arm", "raising_check", "unforced_raising_check"]
+)
 def test_gate_accepts_a_branch_on_a_reader_parameter(fixture_index, name):
     assert _reads(fixture_index, name) == []
 

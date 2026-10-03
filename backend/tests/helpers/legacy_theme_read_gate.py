@@ -605,16 +605,53 @@ class Index:
         conditional = _conditional_nodes(func.node)
         caught = _caught_nodes(func.node)
 
+        def raising_check(expr):
+            """A call to a raising marker that is not told to skip its rejection."""
+            if isinstance(expr, ast.Await):
+                expr = expr.value
+            if not (isinstance(expr, ast.Call) and uses(expr.func, RAISING_MARKERS)):
+                return False
+            # ``force`` (keyword-only) bypasses the economic-mode rejection;
+            # anything but a literal False, or **kwargs, may set it.
+            return not any(
+                keyword.arg is None
+                or (
+                    keyword.arg == "force"
+                    and not (isinstance(keyword.value, ast.Constant) and keyword.value.value is False)
+                )
+                for keyword in expr.keywords
+            )
+
         def raises(node):
             # A raise inside a try body with handlers may be caught and carry on.
             return id(node) not in caught and (
                 isinstance(node, ast.Raise)
-                or (isinstance(node, ast.Expr) and uses(node.value, RAISING_MARKERS))
+                or (isinstance(node, ast.Expr) and raising_check(node.value))
             )
+
+        # ``finally`` blocks run while a return or raise unwinds through them, so
+        # code "after" a diverting node never covers an enclosing finally body.
+        finally_bodies = [
+            (
+                {id(child) for part in (*t.body, *t.handlers, *t.orelse) for child in ast.walk(part)},
+                (_start(t.finalbody[0]), _end(t.finalbody[-1])),
+            )
+            for t in ast.walk(func.node)
+            if isinstance(t, ast.Try) and t.finalbody
+        ]
+
+        def after(node):
+            """Ranges of the code that only runs if ``node`` did not divert."""
+            low, spans = _end(node), []
+            for start, end in sorted(span for inside, span in finally_bodies if id(node) in inside):
+                spans.append((low, (start[0], start[1] - 1)))  # stop just before the finally
+                low = end
+            return [*spans, (low, everything_after)]
 
         def diverts(body):
             last = body[-1]
             return isinstance(last, (ast.Return, ast.Continue, ast.Break)) or raises(last)
+
         everything_after = (10**9, 0)
         if any(uses(decorator, DECORATOR_MARKERS) for decorator in func.node.decorator_list):
             return [((0, 0), everything_after)]
@@ -649,13 +686,27 @@ class Index:
                 return None
             return atom if truth else _FLIP[atom]
 
+        def is_authority_value(expr):
+            """A reader variable, a marker call such as ``_economic_reader(db)`` or
+            ``legacy_theme_writes_blocked(db)``, or an attribute of one. A reader
+            merely passed into another call, ``is_ready(reader)``, is not."""
+            if isinstance(expr, ast.Name):
+                return expr.id in authority_vars
+            if isinstance(expr, ast.Call):
+                return uses(expr.func, PREDICATE_MARKERS)
+            if isinstance(expr, ast.Attribute):
+                return is_authority_value(expr.value)
+            return False
+
         def atom_authority(expr):
             """The authority a true predicate ``expr`` implies, or None."""
-            if not is_predicate(expr):
-                return None
             if isinstance(expr, ast.Compare):
                 right = expr.comparators[0]
-                if len(expr.ops) != 1 or not isinstance(right, ast.Constant):
+                if (
+                    len(expr.ops) != 1
+                    or not isinstance(right, ast.Constant)
+                    or not is_authority_value(expr.left)
+                ):
                     return None
                 # What equality implies: ``source_name == "economic"`` is economic;
                 # ``reader is None`` / ``mode == "legacy"`` are legacy.
@@ -670,7 +721,7 @@ class Index:
                 if isinstance(expr.ops[0], (ast.NotEq, ast.IsNot)):
                     return _FLIP[when_equal]
                 return None
-            if isinstance(expr, (ast.Name, ast.Call)):
+            if isinstance(expr, (ast.Name, ast.Call)) and is_authority_value(expr):
                 return "economic"  # a truthy economic reader, or writes blocked
             return None
 
@@ -691,9 +742,9 @@ class Index:
                 if id(node) not in conditional and all(
                     authority == "legacy" or (arm and diverts(arm)) for arm, authority in arms
                 ):
-                    ranges.append((_end(node), everything_after))
+                    ranges.extend(after(node))
             elif isinstance(node, ast.Expr) and id(node) not in conditional and raises(node):
-                ranges.append((_end(node), everything_after))
+                ranges.extend(after(node))
         return ranges
 
     def overrides(self, method):
