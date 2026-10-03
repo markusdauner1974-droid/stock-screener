@@ -18,6 +18,7 @@ from app.services.legacy_theme_write_guard import (
     ECONOMIC_AUTHORITY_SKIP_REASON,
     LEGACY_WRITE_MODES,
     LegacyThemeWritesBlocked,
+    legacy_theme_writes_blocked,
     mark_legacy_theme_writer,
     skip_in_economic_authority,
 )
@@ -28,10 +29,10 @@ from app.tasks import (
 )
 
 
-def _authority(db_session, mode):
+def _authority(db_session, mode, *, writes_fenced=False):
     db_session.add(TaxonomyAuthority(
         id=1, mode=mode, processing_head_revision=1, authority_epoch=1,
-        writes_fenced=False, semantic_invalidation_revision=0,
+        writes_fenced=writes_fenced, semantic_invalidation_revision=0,
         cutover_catch_up_cursor=[], rollback_state="ready",
     ))
     db_session.add(ThemeCluster(
@@ -434,11 +435,13 @@ def test_content_storage_reset_is_refused_under_economic_authority(db_session, m
     dropped = []
     monkeypatch.setattr(recovery, "drop_theme_content_tables", lambda conn: dropped.append(conn))
 
-    with pytest.raises(LegacyThemeWritesBlocked):
+    # Its own type: corruption is a 5xx incident, not the API's cutover 409.
+    with pytest.raises(recovery.ThemeContentResetRefused) as refused:
         recovery.reset_corrupt_theme_content_storage(
             DatabaseError("SELECT 1", {}, Exception("database disk image is malformed"))
         )
 
+    assert not isinstance(refused.value, LegacyThemeWritesBlocked)
     assert dropped == []
 
 
@@ -446,3 +449,11 @@ def test_reset_check_reads_the_authority_mode(db_session):
     _authority(db_session, "economic")
 
     assert recovery._reset_blocked_by_authority(db_session.connection()) is True
+
+
+@pytest.mark.parametrize("mode", sorted(LEGACY_WRITE_MODES))
+def test_writes_fenced_blocks_legacy_writers_in_every_mode(db_session, mode):
+    # Rollback recovery fences writes without leaving a legacy write mode.
+    _authority(db_session, mode, writes_fenced=True)
+
+    assert legacy_theme_writes_blocked(db_session) is True

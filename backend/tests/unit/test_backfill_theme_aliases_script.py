@@ -35,7 +35,7 @@ def test_main_writes_report_for_dry_run(
     mock_build_parser.return_value = parser
 
     db = MagicMock()
-    db.execute.return_value.scalar_one_or_none.return_value = None  # no authority row: legacy
+    db.execute.return_value.one_or_none.return_value = None  # no authority row: legacy
     session_factory = MagicMock(return_value=db)
     mock_get_session_factory.return_value = session_factory
 
@@ -82,7 +82,7 @@ def test_main_calls_service_with_mention_limit(
     mock_build_parser.return_value = parser
 
     db = MagicMock()
-    db.execute.return_value.scalar_one_or_none.return_value = None  # no authority row: legacy
+    db.execute.return_value.one_or_none.return_value = None  # no authority row: legacy
     session_factory = MagicMock(return_value=db)
     mock_get_session_factory.return_value = session_factory
 

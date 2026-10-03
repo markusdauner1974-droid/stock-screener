@@ -51,11 +51,14 @@ class LegacyThemeWritesBlocked(RuntimeError):
 
 
 def legacy_theme_writes_blocked(db: Session) -> bool:
+    """True under economic authority, or while rollback recovery fences writes
+    (``writes_fenced``), as ``producer_write`` enforces for fenced writers."""
     # A column select, not db.get(): the identity map may hold a stale mode.
-    mode = db.execute(
-        select(TaxonomyAuthority.mode).where(TaxonomyAuthority.id == 1)
-    ).scalar_one_or_none()
-    return mode is not None and mode not in LEGACY_WRITE_MODES
+    row = db.execute(
+        select(TaxonomyAuthority.mode, TaxonomyAuthority.writes_fenced)
+        .where(TaxonomyAuthority.id == 1)
+    ).one_or_none()
+    return row is not None and (row.writes_fenced or row.mode not in LEGACY_WRITE_MODES)
 
 
 def mark_legacy_theme_writer(session: Session) -> None:
