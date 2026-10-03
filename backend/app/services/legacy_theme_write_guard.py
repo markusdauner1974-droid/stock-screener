@@ -32,8 +32,16 @@ logger = logging.getLogger(__name__)
 
 LEGACY_WRITE_MODES = frozenset({"legacy", "shadow", "dual"})
 ECONOMIC_AUTHORITY_SKIP_REASON = "economic_authority"
+# 409 detail for legacy writer APIs, on entry and when a write is fenced mid-request.
+ECONOMIC_ENDPOINT_REQUIRED = {
+    "code": "economic_generation_endpoint_required",
+    "endpoint": "/api/v1/economic-themes",
+}
 
-_LEGACY_WRITER = ContextVar("legacy_theme_writer", default=False)
+# A guarded task's run state: None outside one, else {"blocked": bool}, set
+# when the fence refuses a write so the wrapper skips even if the body
+# swallowed the exception.
+_LEGACY_WRITER: ContextVar[dict | None] = ContextVar("legacy_theme_writer", default=None)
 _MARK = "legacy_theme_writer"
 _FENCED_TRANSACTION = "legacy_theme_fenced_transaction"
 
@@ -64,7 +72,8 @@ def _current_transaction(session: Session):
 
 
 def _fence_write(session: Session) -> None:
-    if not (_LEGACY_WRITER.get() or session.info.get(_MARK)):
+    task_state = _LEGACY_WRITER.get()
+    if task_state is None and not session.info.get(_MARK):
         return
     transaction = _current_transaction(session)
     if transaction is not None and session.info.get(_FENCED_TRANSACTION) is transaction:
@@ -76,6 +85,8 @@ def _fence_write(session: Session) -> None:
                 {"key": ECONOMIC_TAXONOMY_FENCE_KEY},
             )
         if legacy_theme_writes_blocked(session):
+            if task_state is not None:
+                task_state["blocked"] = True
             raise LegacyThemeWritesBlocked(
                 "Legacy Theme writes are disabled under economic authority."
             )
@@ -119,13 +130,22 @@ def skip_in_economic_authority(task=None, *, on_skip=None):
             with SessionLocal() as db:
                 blocked = legacy_theme_writes_blocked(db)
             if not blocked:
-                token = _LEGACY_WRITER.set(True)
+                state = {"blocked": False}
+                token = _LEGACY_WRITER.set(state)
                 try:
-                    return func(*args, **kwargs)
-                except LegacyThemeWritesBlocked:
-                    pass  # cutover landed mid-run; skip like an entry check
+                    result = func(*args, **kwargs)
+                except Exception:
+                    if not state["blocked"]:
+                        raise
+                else:
+                    if not state["blocked"]:
+                        return result
                 finally:
                     _LEGACY_WRITER.reset(token)
+                # Cutover landed mid-run and the fence refused a write, whether
+                # the body raised it or swallowed it: skip like an entry check.
+                # ponytail: bodies that catch per item keep looping until their
+                # batch ends; each further write is refused, none commits.
             logger.info("Skipping %s: %s", func.__name__, ECONOMIC_AUTHORITY_SKIP_REASON)
             if on_skip is not None:
                 on_skip(*args, **kwargs)

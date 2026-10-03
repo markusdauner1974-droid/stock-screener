@@ -110,6 +110,72 @@ def test_task_write_after_a_mid_run_cutover_fails_closed(db_session):
     assert _clusters(db_session) == 1
 
 
+def test_task_that_swallows_the_fence_is_still_skipped(db_session):
+    # Many task bodies catch every exception and return an error payload.
+    _authority(db_session, "legacy")
+    from app.database import SessionLocal
+
+    skipped = []
+
+    @skip_in_economic_authority(on_skip=lambda: skipped.append(True))
+    def body():
+        _switch_to_economic()
+        try:
+            with SessionLocal() as session:
+                session.add(ThemeCluster(canonical_key="late", display_name="Late",
+                                         name="Late", pipeline="technical"))
+                session.commit()
+        except Exception as exc:  # noqa: BLE001 - mimics task bodies
+            return {"status": "error", "error": str(exc)}
+
+    result = body()
+
+    assert result["reason"] == ECONOMIC_AUTHORITY_SKIP_REASON
+    assert skipped == [True]
+
+
+def test_task_errors_unrelated_to_the_fence_still_raise(db_session):
+    _authority(db_session, "legacy")
+
+    @skip_in_economic_authority
+    def body():
+        raise ValueError("boom")
+
+    with pytest.raises(ValueError):
+        body()
+
+
+@pytest.mark.asyncio
+async def test_route_write_fenced_mid_request_returns_409(db_session, monkeypatch):
+    # The entry check passes in legacy mode; cutover lands before the first
+    # write, so the fence refuses it with the same 409 as the entry check.
+    import uuid
+    from types import SimpleNamespace
+
+    from app.api.v1 import themes_content_pipeline
+    from app.services import server_auth
+
+    monkeypatch.setattr(server_auth.settings, "server_auth_enabled", False)
+    _authority(db_session, "legacy")
+
+    def cutover_then_uuid4():
+        _switch_to_economic()
+        return uuid.uuid4()
+
+    monkeypatch.setattr(themes_content_pipeline, "uuid", SimpleNamespace(uuid4=cutover_then_uuid4))
+    app.dependency_overrides[get_db] = lambda: db_session
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.post("/api/v1/themes/pipeline/run")
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "economic_generation_endpoint_required"
+
+
 def test_pipeline_run_fenced_mid_run_is_recorded_as_skipped(db_session, monkeypatch):
     # Its own `failed` write is refused by the same fence, so the skip hook
     # must give the run its terminal state.

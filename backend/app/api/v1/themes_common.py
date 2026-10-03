@@ -14,6 +14,7 @@ from ...database import get_db
 from ...models.theme import ContentSource, ThemeCluster
 from ...schemas.theme import ThemeClusterResponse
 from ...services.legacy_theme_write_guard import (
+    ECONOMIC_ENDPOINT_REQUIRED,
     legacy_theme_writes_blocked,
     mark_legacy_theme_writer,
 )
@@ -36,13 +37,7 @@ def reject_legacy_theme_writes(db: Session = Depends(get_db)) -> None:
     publication fence through commit if a cutover lands mid-request.
     """
     if legacy_theme_writes_blocked(db):
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "economic_generation_endpoint_required",
-                "endpoint": "/api/v1/economic-themes",
-            },
-        )
+        raise HTTPException(status_code=409, detail=ECONOMIC_ENDPOINT_REQUIRED)
     mark_legacy_theme_writer(db)
 
 
