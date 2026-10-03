@@ -1090,8 +1090,29 @@ def check_alerts():
         db.close()
 
 
+def _record_skipped_pipeline_run(*args, run_id: str = None, **kwargs) -> None:
+    """Give a run queued before cutover a terminal state instead of leaving it queued."""
+    if run_id is None:
+        return
+    from ..models.theme import ThemePipelineRun
+    from ..services.legacy_theme_write_guard import ECONOMIC_AUTHORITY_SKIP_REASON
+
+    with SessionLocal() as db:
+        run = db.query(ThemePipelineRun).filter(ThemePipelineRun.run_id == run_id).first()
+        if run is None:
+            return
+        run.status = "skipped"
+        run.current_step = "skipped"
+        run.completed_at = datetime.now(timezone.utc)
+        run.error_message = (
+            f"{ECONOMIC_AUTHORITY_SKIP_REASON}: legacy Theme pipeline is disabled "
+            "under economic authority"
+        )
+        db.commit()
+
+
 @celery_app.task(bind=True, name='app.tasks.theme_discovery_tasks.run_full_pipeline')
-@skip_in_economic_authority
+@skip_in_economic_authority(on_skip=_record_skipped_pipeline_run)
 def run_full_pipeline(self, run_id: str = None, pipeline: str = None, lookback_days: int = None):
     """
     Run the complete theme discovery pipeline with progress tracking.

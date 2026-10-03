@@ -2,25 +2,40 @@
 
 Fenced legacy writers go through ``legacy_producer_write``, which admits only
 ``LEGACY_WRITE_MODES``. The writers that bypass that fence use the same mode set
-here, so in economic authority they skip (tasks), return 409 (APIs) or refuse
-(CLIs) instead of changing legacy tables with no source revision.
+here, at two points:
+
+- On entry: tasks skip, APIs return 409 and CLIs refuse, so nothing starts.
+- On write: a guarded writer (a decorated task, or a session marked with
+  ``mark_legacy_theme_writer``) takes the shared publication fence in the
+  transaction of its first write and re-checks the mode there, holding the
+  fence until commit, as ``producer_write`` does. A cutover therefore waits for
+  in-flight legacy writes, and a write after the switch fails closed. Locking
+  per transaction rather than for a whole task avoids a deadlock with nested
+  fenced writes on other connections.
 """
 
 from __future__ import annotations
 
 import logging
 import sys
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from functools import wraps
 
+from sqlalchemy import event, select, text
 from sqlalchemy.orm import Session
 
 from app.models.economic_taxonomy_runtime import TaxonomyAuthority
+from app.services.economic_taxonomy_fence import ECONOMIC_TAXONOMY_FENCE_KEY
 
 logger = logging.getLogger(__name__)
 
 LEGACY_WRITE_MODES = frozenset({"legacy", "shadow", "dual"})
 ECONOMIC_AUTHORITY_SKIP_REASON = "economic_authority"
+
+_LEGACY_WRITER = ContextVar("legacy_theme_writer", default=False)
+_MARK = "legacy_theme_writer"
+_FENCED_TRANSACTION = "legacy_theme_fenced_transaction"
 
 
 class LegacyThemeWritesBlocked(RuntimeError):
@@ -28,8 +43,46 @@ class LegacyThemeWritesBlocked(RuntimeError):
 
 
 def legacy_theme_writes_blocked(db: Session) -> bool:
-    authority = db.get(TaxonomyAuthority, 1)
-    return authority is not None and authority.mode not in LEGACY_WRITE_MODES
+    # A column select, not db.get(): the identity map may hold a stale mode.
+    mode = db.execute(
+        select(TaxonomyAuthority.mode).where(TaxonomyAuthority.id == 1)
+    ).scalar_one_or_none()
+    return mode is not None and mode not in LEGACY_WRITE_MODES
+
+
+def mark_legacy_theme_writer(session: Session) -> None:
+    """Fence every write this session makes (API request and CLI sessions)."""
+    session.info[_MARK] = True
+
+
+def _fence_write(session: Session) -> None:
+    if not (_LEGACY_WRITER.get() or session.info.get(_MARK)):
+        return
+    transaction = session.get_transaction()
+    if transaction is not None and session.info.get(_FENCED_TRANSACTION) is transaction:
+        return
+    with session.no_autoflush:
+        if session.get_bind().dialect.name == "postgresql":
+            session.execute(
+                text("SELECT pg_advisory_xact_lock_shared(:key)"),
+                {"key": ECONOMIC_TAXONOMY_FENCE_KEY},
+            )
+        if legacy_theme_writes_blocked(session):
+            raise LegacyThemeWritesBlocked(
+                "Legacy Theme writes are disabled under economic authority."
+            )
+    session.info[_FENCED_TRANSACTION] = session.get_transaction()
+
+
+@event.listens_for(Session, "before_flush")
+def _fence_legacy_theme_flush(session, flush_context, instances):
+    _fence_write(session)
+
+
+@event.listens_for(Session, "do_orm_execute")
+def _fence_legacy_theme_bulk_write(orm_execute_state):
+    if orm_execute_state.is_insert or orm_execute_state.is_update or orm_execute_state.is_delete:
+        _fence_write(orm_execute_state.session)
 
 
 def economic_authority_skip_payload() -> dict[str, object]:
@@ -41,35 +94,51 @@ def economic_authority_skip_payload() -> dict[str, object]:
     }
 
 
-def skip_in_economic_authority(task):
-    """Task decorator: return a skip result before the body runs in economic mode.
+def skip_in_economic_authority(task=None, *, on_skip=None):
+    """Task decorator: skip in economic mode on entry, and fence every write.
 
-    Place it below ``@celery_app.task``. Works for bound tasks (``self`` passes
-    through unchanged).
+    Place it below ``@celery_app.task``; bound tasks pass ``self`` through.
+    ``on_skip(*args, **kwargs)`` runs when the task is skipped, e.g. to record
+    a terminal state for work the task would have updated.
     """
 
-    @wraps(task)
-    def wrapper(*args, **kwargs):
-        from app.database import SessionLocal
+    def decorate(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            from app.database import SessionLocal
 
-        with SessionLocal() as db:
-            blocked = legacy_theme_writes_blocked(db)
-        if blocked:
-            logger.info("Skipping %s: %s", task.__name__, ECONOMIC_AUTHORITY_SKIP_REASON)
-            return economic_authority_skip_payload()
-        return task(*args, **kwargs)
+            with SessionLocal() as db:
+                blocked = legacy_theme_writes_blocked(db)
+            if blocked:
+                logger.info("Skipping %s: %s", func.__name__, ECONOMIC_AUTHORITY_SKIP_REASON)
+                if on_skip is not None:
+                    on_skip(*args, **kwargs)
+                return economic_authority_skip_payload()
+            token = _LEGACY_WRITER.set(True)
+            try:
+                return func(*args, **kwargs)
+            finally:
+                _LEGACY_WRITER.reset(token)
 
-    return wrapper
+        return wrapper
+
+    return decorate(task) if task is not None else decorate
 
 
 def ensure_legacy_theme_writes_allowed(db: Session, *, force: bool = False) -> None:
-    """For operator CLIs: refuse in economic authority unless explicitly forced."""
-    if force or not legacy_theme_writes_blocked(db):
+    """For operator CLIs: refuse in economic authority unless explicitly forced.
+
+    Unforced, the session is also marked, so its writes stay fenced if a
+    cutover happens while the CLI runs.
+    """
+    if force:
         return
-    raise LegacyThemeWritesBlocked(
-        "Legacy Theme writes are disabled under economic authority; "
-        "rerun with --force-legacy-writes only if you intend to change legacy tables."
-    )
+    if legacy_theme_writes_blocked(db):
+        raise LegacyThemeWritesBlocked(
+            "Legacy Theme writes are disabled under economic authority; "
+            "rerun with --force-legacy-writes only if you intend to change legacy tables."
+        )
+    mark_legacy_theme_writer(db)
 
 
 def exit_if_legacy_theme_writes_blocked(db: Session, *, force: bool = False) -> None:

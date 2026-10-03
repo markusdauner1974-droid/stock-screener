@@ -13,7 +13,10 @@ from sqlalchemy.orm import Session
 from ...database import get_db
 from ...models.theme import ContentSource, ThemeCluster
 from ...schemas.theme import ThemeClusterResponse
-from ...services.legacy_theme_write_guard import legacy_theme_writes_blocked
+from ...services.legacy_theme_write_guard import (
+    legacy_theme_writes_blocked,
+    mark_legacy_theme_writer,
+)
 from ...services.theme_identity_normalization import (
     UNKNOWN_THEME_KEY,
     canonical_theme_key,
@@ -27,7 +30,11 @@ _VALID_THEME_PIPELINES = {"technical", "fundamental"}
 
 
 def reject_legacy_theme_writes(db: Session = Depends(get_db)) -> None:
-    """Route dependency: legacy Theme writers return 409 under economic authority (#472)."""
+    """Route dependency: legacy Theme writers return 409 under economic authority (#472).
+
+    It also marks the request session, so its writes re-check under the shared
+    publication fence through commit if a cutover lands mid-request.
+    """
     if legacy_theme_writes_blocked(db):
         raise HTTPException(
             status_code=409,
@@ -36,6 +43,7 @@ def reject_legacy_theme_writes(db: Session = Depends(get_db)) -> None:
                 "endpoint": "/api/v1/economic-themes",
             },
         )
+    mark_legacy_theme_writer(db)
 
 
 def detect_source_type_from_url(url: str, provided_type: str | None) -> str:

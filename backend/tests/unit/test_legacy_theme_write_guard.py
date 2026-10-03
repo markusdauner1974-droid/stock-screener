@@ -18,6 +18,7 @@ from app.services.legacy_theme_write_guard import (
     ECONOMIC_AUTHORITY_SKIP_REASON,
     LEGACY_WRITE_MODES,
     LegacyThemeWritesBlocked,
+    mark_legacy_theme_writer,
     skip_in_economic_authority,
 )
 from app.tasks import (
@@ -74,6 +75,55 @@ def test_task_skips_with_a_reason_under_economic_authority(db_session, task, arg
     assert result["status"] == "skipped"
     assert result["reason"] == ECONOMIC_AUTHORITY_SKIP_REASON
     assert _clusters(db_session) == before
+
+
+def _switch_to_economic():
+    from app.database import SessionLocal
+
+    with SessionLocal() as other:
+        other.get(TaxonomyAuthority, 1).mode = "economic"
+        other.commit()
+
+
+def test_task_write_after_a_mid_run_cutover_fails_closed(db_session):
+    # The entry check passes in legacy mode; cutover happens before the body
+    # commits, so its first write re-checks under the fence and is refused.
+    _authority(db_session, "legacy")
+    from app.database import SessionLocal
+
+    @skip_in_economic_authority
+    def body():
+        _switch_to_economic()
+        with SessionLocal() as session:
+            session.add(ThemeCluster(canonical_key="late", display_name="Late",
+                                     name="Late", pipeline="technical"))
+            session.commit()
+
+    with pytest.raises(LegacyThemeWritesBlocked):
+        body()
+
+    db_session.expire_all()
+    assert _clusters(db_session) == 1
+
+
+def test_marked_request_session_write_fails_closed_after_cutover(db_session):
+    _authority(db_session, "legacy")
+    mark_legacy_theme_writer(db_session)
+    _switch_to_economic()
+
+    db_session.add(ThemeCluster(canonical_key="late", display_name="Late",
+                                name="Late", pipeline="technical"))
+    with pytest.raises(LegacyThemeWritesBlocked):
+        db_session.flush()
+
+
+def test_unmarked_sessions_are_not_fenced(db_session):
+    # Economic producers and ingestion keep writing shared tables.
+    _authority(db_session, "economic")
+
+    db_session.add(ThemeCluster(canonical_key="other", display_name="Other",
+                                name="Other", pipeline="technical"))
+    db_session.flush()
 
 
 @pytest.mark.parametrize("mode", sorted(LEGACY_WRITE_MODES))
@@ -137,6 +187,23 @@ async def test_route_returns_409_under_economic_authority(db_session, monkeypatc
     assert response.status_code == 409, response.text
     assert response.json()["detail"]["code"] == "economic_generation_endpoint_required"
     assert _clusters(db_session) == before
+
+
+def test_skipped_pipeline_run_is_recorded_as_skipped(db_session):
+    from app.models.theme import ThemePipelineRun
+
+    _authority(db_session, "economic")
+    db_session.add(ThemePipelineRun(run_id="run-1", pipeline="technical", status="queued"))
+    db_session.commit()
+
+    result = theme_discovery_tasks.run_full_pipeline(run_id="run-1", pipeline="technical")
+
+    db_session.expire_all()
+    run = db_session.query(ThemePipelineRun).filter_by(run_id="run-1").one()
+    assert result["reason"] == ECONOMIC_AUTHORITY_SKIP_REASON
+    assert run.status == "skipped"
+    assert run.completed_at is not None
+    assert ECONOMIC_AUTHORITY_SKIP_REASON in run.error_message
 
 
 def _load(path):

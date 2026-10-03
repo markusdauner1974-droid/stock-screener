@@ -114,7 +114,8 @@ def get_pipeline_status(
         "error_message": pipeline_run.error_message,
     }
 
-    if pipeline_run.status in ["completed", "failed"]:
+    # "skipped": the run was queued before cutover to economic authority (#472).
+    if pipeline_run.status in ["completed", "failed", "skipped"]:
         if pipeline_run.status == "completed":
             response["percent"] = 100.0
             response["step_number"] = 5
