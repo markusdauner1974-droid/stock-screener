@@ -313,6 +313,25 @@ def test_x_post_without_a_status_url_is_not_admitted(db_session):
     assert db_session.scalar(select(func.count()).select_from(EvidencePacket)) == 0
 
 
+def test_backfill_does_not_count_x_posts_without_a_tweet_id(db_session):
+    source = _source(db_session, source_type="twitter")
+    observed = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    item = ContentItem(source_id=source.id, source_type="twitter", source_name=source.name,
+                       external_id="tw-hash", content="Memory demand.",
+                       url="https://x.com/analyst", published_at=observed, fetched_at=observed)
+    db_session.add(item)
+    db_session.flush()
+    db_session.add(ContentPipelineEligibility(
+        content_item_id=item.id, pipeline="technical", channel="legacy",
+        originating_source_id=source.id, observed_at=observed,
+    ))
+    db_session.commit()
+
+    result = ContentIngestionService(db_session).backfill_economic_evidence()
+
+    assert result == {"admitted": 0, "last_id": item.id}
+
+
 def test_backfill_admits_legacy_x_observations(db_session):
     source = _source(db_session, source_type="twitter")
     observed = datetime(2026, 9, 1, tzinfo=timezone.utc)

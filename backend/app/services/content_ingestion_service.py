@@ -317,8 +317,8 @@ class ContentIngestionService:
         source_id: int | None,
         source_name: str | None,
         captured_at: datetime | None = None,
-    ) -> None:
-        """Admit the fetched text as economic taxonomy evidence.
+    ) -> bool:
+        """Admit the fetched text as economic taxonomy evidence; return whether it was.
 
         Runs on every poll, not just for new items: an unchanged recapture
         reuses its packet, and changed text (a correction, even to empty)
@@ -336,7 +336,7 @@ class ContentIngestionService:
             item_data.get("url") or content_item.url,
         )
         if family_key is None:
-            return
+            return False
         now = captured_at or datetime.now(timezone.utc)
         title = item_data.get("title") or ""
         content = item_data.get("content") or ""
@@ -371,6 +371,7 @@ class ContentIngestionService:
                 ),
             )
         )
+        return True
 
     def backfill_economic_evidence(self, *, batch_size: int = 500, after_id: int = 0) -> dict:
         """Admit items ingested before content admission existed (#471, #500).
@@ -415,11 +416,12 @@ class ContentIngestionService:
                     if item.source_type == "twitter":
                         continue
                     item_observations = {item.source_id: (None, item.fetched_at)}
+                item_admitted = False
                 for source_id, (pipelines, observed_at) in sorted(
                     item_observations.items(), key=lambda entry: entry[1][1]
                 ):
                     source = self.db.get(ContentSource, source_id) if source_id else None
-                    self._admit_economic_evidence(
+                    item_admitted |= self._admit_economic_evidence(
                         item,
                         {
                             "title": item.title,
@@ -435,7 +437,7 @@ class ContentIngestionService:
                         source_name=source.name if source else item.source_name,
                         captured_at=_coerce_utc_datetime(observed_at),
                     )
-                admitted += 1
+                admitted += item_admitted
             self.db.commit()
             logger.info("Economic evidence backfill: %d items admitted through id %d", admitted, last_id)
 
