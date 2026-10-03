@@ -17,14 +17,18 @@ How it decides, per entry point:
   point.
 - **A legacy read** is a reference to a legacy model class (outside type
   annotations) or a SQL string naming one of their tables.
-- **Routing:** a function that references an authority check in
-  ``ROUTING_MARKERS`` decides by authority mode, so the walk stops there, and an
-  entry point that references one itself is routed. A route is also routed
-  when it depends on ``GUARD_DEPENDENCIES`` (409 in economic mode).
+- **Routing:** an authority check in ``ROUTING_MARKERS`` decides by mode, so
+  what a function reads or calls after its first check is routed and the walk
+  does not follow it. Only checks that run unconditionally count: in
+  straight-line code, a ``with`` item, a decorator or an ``if`` test, but not
+  inside a branch, loop or handler body, nor in an annotation. Reads before the
+  check stay unrouted. A route is also routed when it depends on
+  ``GUARD_DEPENDENCIES`` (409 in economic mode).
 
 ponytail: a static over/under-approximation, not a proof. Calls on objects it
-cannot type are not followed, and ORM relationship loads are invisible; when a
-miss turns up, tighten the typing rules rather than add a runtime harness.
+cannot type are not followed, ORM relationship loads are invisible, and a check
+is assumed to divert economic mode (return or raise) rather than proven to;
+when a miss turns up, tighten these rules rather than add a runtime harness.
 """
 
 from __future__ import annotations
@@ -170,7 +174,7 @@ class Index:
         # through constructor arguments (e.g. use-case factories).
         for func in list(self.funcs.values()):
             self._local_types(func, self._scope(func.module, func))
-        self._edges: dict[str, tuple[set[str], set[str], bool]] = {}
+        self._edges: dict[str, tuple[dict[str, tuple], dict[str, tuple], tuple | None]] = {}
         self._overrides: dict[str, list[Func]] = {}
 
     # -- indexing ---------------------------------------------------------
@@ -423,23 +427,36 @@ class Index:
     # -- per-function facts -----------------------------------------------
 
     def facts(self, func):
-        """(callees, legacy models read, references a routing marker)."""
+        """(callees, legacy models read, routing point).
+
+        Callees and models map to the source position where they first occur;
+        the routing point is the position of the first unconditional authority
+        check, or None.
+        """
         if func.qualname in self._edges:
             return self._edges[func.qualname]
         scope = self._scope(func.module, func)
         types = self._local_types(func, scope)
         annotations = _annotation_nodes(func.nodes)
+        conditional = _conditional_nodes(func.node)
         dispatched = {
             id(node.value) for node in func.nodes
             if isinstance(node, ast.Attribute) and node.attr in _CELERY_DISPATCH
         }
-        callees: set[str] = set()
-        models: set[str] = set()
-        routing = False
+        callees: dict[str, tuple] = {}
+        models: dict[str, tuple] = {}
+        routing: tuple | None = None
+
+        def note(found, key, position):
+            if key not in found or position < found[key]:
+                found[key] = position
+
         for node in func.nodes:
+            position = (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 if self._table_pattern and _SQL_VERB.search(node.value):
-                    models.update(f"table:{m}" for m in self._table_pattern.findall(node.value))
+                    for table in self._table_pattern.findall(node.value):
+                        note(models, f"table:{table}", position)
                 continue
             if not isinstance(node, (ast.Name, ast.Attribute)) or id(node) in dispatched:
                 continue
@@ -448,21 +465,23 @@ class Index:
             resolved = self._resolve_expr(node, scope, types)
             if resolved is None:
                 continue
+            if id(node) in annotations:
+                continue  # type hints neither read nor route
             qualname = resolved.qualname if isinstance(resolved, (Func, Class)) else None
-            if qualname in ROUTING_MARKERS:
-                routing = True
+            if qualname in ROUTING_MARKERS and id(node) not in conditional:
+                routing = position if routing is None else min(routing, position)
             if isinstance(resolved, Class):
                 if resolved.qualname in self.legacy_models:
-                    if id(node) not in annotations:
-                        models.add(resolved.node.name)
+                    note(models, resolved.node.name, position)
                     continue
                 for ctor in ("__init__", "__post_init__"):
                     method = resolved.method(ctor)
                     if method:
-                        callees.add(method.qualname)
+                        note(callees, method.qualname, position)
             elif isinstance(resolved, Func) and resolved is not func:
-                callees.add(resolved.qualname)
-                callees.update(override.qualname for override in self.overrides(resolved))
+                note(callees, resolved.qualname, position)
+                for override in self.overrides(resolved):
+                    note(callees, override.qualname, position)
         self._edges[func.qualname] = (callees, models, routing)
         return self._edges[func.qualname]
 
@@ -501,12 +520,12 @@ class Index:
         while queue:
             qualname = queue.popleft()
             callees, models, routing = self.facts(self.funcs[qualname])
-            if routing:
-                continue
-            for model in models:
-                if model not in found:
+            for model, position in models.items():
+                if model not in found and (routing is None or position < routing):
                     found[model] = _path(parents, qualname)
-            for callee in callees:
+            for callee, position in callees.items():
+                if routing is not None and position >= routing:
+                    continue  # reached only after the authority check
                 if callee not in parents:
                     parents[callee] = qualname
                     queue.append(callee)
@@ -534,6 +553,30 @@ def _annotation_nodes(nodes):
     for root in roots:
         ids.update(id(child) for child in ast.walk(root))
     return ids
+
+
+def _conditional_nodes(func_node):
+    """Nodes that run only on some paths through the function: branch, loop
+    and handler bodies, short-circuited operands, nested functions."""
+    whole = (ast.Match, ast.Lambda, ast.FunctionDef, ast.AsyncFunctionDef,
+             ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+    conditional: set[int] = set()
+    for node in ast.walk(func_node):
+        if isinstance(node, (ast.If, ast.For, ast.AsyncFor, ast.While)):
+            parts = [*node.body, *node.orelse]
+        elif isinstance(node, ast.Try):
+            parts = [*node.handlers, *node.orelse]
+        elif isinstance(node, ast.IfExp):
+            parts = [node.body, node.orelse]
+        elif isinstance(node, ast.BoolOp):
+            parts = node.values[1:]
+        elif isinstance(node, whole) and node is not func_node:
+            parts = [node]
+        else:
+            continue
+        for part in parts:
+            conditional.update(id(child) for child in ast.walk(part))
+    return conditional
 
 
 def _path(parents, qualname):

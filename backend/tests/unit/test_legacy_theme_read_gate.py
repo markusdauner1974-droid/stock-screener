@@ -39,46 +39,160 @@ _PIPELINE_DIAGNOSTICS = "Audit 'Readers with no routing': pipeline diagnostics r
 _SOCIAL_OPERATIONS = "Audit 'Readers with no routing': Social operations snapshot counts legacy associations."
 _SOCIAL_ASSOCIATIONS = "Audit 'Readers with no routing': admin associations list serves legacy associations."
 _ROLLBACK = (
-    "Audit 'Rollback machinery (keep until retirement)': compatibility delivery and the "
-    "Social taxonomy adapter maintain legacy projections."
+    "Audit 'Rollback machinery (keep until retirement)': compatibility delivery "
+    "maintains legacy projections."
+)
+_SOCIAL_BRIDGE = (
+    "Audit 'Rollback machinery (keep until retirement)': the economic Social taxonomy "
+    "adapter keeps Social associations bridged, and economic-mode decisions revise them."
 )
 
-ALLOWLIST: dict[str, str] = {
-    "GET /api/v1/themes/merge-suggestions": _REVIEW,
-    "GET /api/v1/themes/merge-history": _REVIEW,
-    "GET /api/v1/themes/merge-plan/dry-run": _REVIEW,
-    "GET /api/v1/themes/candidates/queue": _REVIEW,
-    "GET /api/v1/themes/relationship-graph": _REVIEW,
-    "GET /api/v1/themes/equivalence/preview": _INTELLIGENCE,
-    "GET /api/v1/themes/equivalence/history": _INTELLIGENCE,
-    "GET /api/v1/themes/equivalence/search": _INTELLIGENCE,
-    "GET /api/v1/themes/{theme_id}/developments": _INTELLIGENCE,
-    "GET /api/v1/user-watchlists/{watchlist_id}/stewardship": _WATCHLIST_ALERTS,
-    "GET /api/v1/validation/overview": _VALIDATION_ALERTS,
-    "GET /api/v1/stocks/{symbol}/validation": _VALIDATION_ALERTS,
-    "mcp market_overview": _MCP_ALERTS,
-    "POST /mcp/": _MCP_ALERTS,
-    "GET /api/v1/assistant/health": _MCP_ALERTS,
-    "GET /api/v1/assistant/conversations": _MCP_ALERTS,
-    "POST /api/v1/assistant/conversations": _MCP_ALERTS,
-    "GET /api/v1/assistant/conversations/{conversation_id}": _MCP_ALERTS,
-    "POST /api/v1/assistant/conversations/{conversation_id}/messages": _MCP_ALERTS,
-    "POST /api/v1/assistant/watchlist-add-preview": _MCP_ALERTS,
-    "GET /api/v1/themes/matching/telemetry": _TELEMETRY,
-    "task app.tasks.theme_intelligence_tasks.prepare_developments": _DEVELOPMENTS,
-    "POST /api/v1/themes/developments/backfill": _DEVELOPMENTS,
-    "GET /api/v1/themes/content": _CONTENT,
-    "GET /api/v1/themes/content/export": _CONTENT,
-    "task app.interfaces.tasks.social_signal_tasks.refresh_social_signals": _SOCIAL_PREPARATION,
-    "task app.interfaces.tasks.social_signal_tasks.resume_social_analysis": _SOCIAL_PREPARATION,
-    "task app.tasks.economic_taxonomy_tasks.refresh_economic_taxonomy_generation": _SNAPSHOT_BUILDER,
-    "GET /api/v1/themes/pipeline/state-health": _PIPELINE_DIAGNOSTICS,
-    "GET /api/v1/themes/pipeline/observability": _PIPELINE_DIAGNOSTICS,
-    "GET /api/v1/operations/social-signals": _SOCIAL_OPERATIONS,
-    "GET /api/v1/social-signals/admin/health": _SOCIAL_OPERATIONS,
-    "GET /api/v1/social-signals/admin/associations": _SOCIAL_ASSOCIATIONS,
-    "task app.tasks.economic_taxonomy_tasks.deliver_taxonomy_outbox": _ROLLBACK,
-    "task app.tasks.economic_taxonomy_tasks.process_economic_taxonomy_work": _ROLLBACK,
+# entry point -> (reason, the legacy models it is expected to read)
+ALLOWLIST: dict[str, tuple[str, set[str]]] = {
+    "GET /api/v1/themes/merge-suggestions": (
+        _REVIEW,
+        {"ThemeCluster", "ThemeMergeSuggestion"},
+    ),
+    "GET /api/v1/themes/merge-history": (
+        _REVIEW,
+        {"ThemeMergeHistory"},
+    ),
+    "GET /api/v1/themes/merge-plan/dry-run": (
+        _REVIEW,
+        {"ThemeCluster", "ThemeEmbedding"},
+    ),
+    "GET /api/v1/themes/candidates/queue": (
+        _REVIEW,
+        {"ThemeCluster", "ThemeEquivalenceOperation", "ThemeMention", "ThemeMetrics"},
+    ),
+    "GET /api/v1/themes/relationship-graph": (
+        _REVIEW,
+        {"ThemeCluster", "ThemeEquivalenceOperation", "ThemeRelationship"},
+    ),
+    "GET /api/v1/themes/equivalence/preview": (
+        _INTELLIGENCE,
+        {"ThemeCluster", "ThemeEquivalenceOperation", "ThemeMention"},
+    ),
+    "GET /api/v1/themes/equivalence/history": (
+        _INTELLIGENCE,
+        {"ThemeEquivalenceOperation"},
+    ),
+    "GET /api/v1/themes/equivalence/search": (
+        _INTELLIGENCE,
+        {"ThemeCluster", "ThemeEquivalenceOperation"},
+    ),
+    "GET /api/v1/themes/{theme_id}/developments": (
+        _INTELLIGENCE,
+        {"ThemeCluster", "ThemeDevelopmentTheme", "ThemeEquivalenceOperation", "ThemeMention"},
+    ),
+    "GET /api/v1/user-watchlists/{watchlist_id}/stewardship": (
+        _WATCHLIST_ALERTS,
+        {"ThemeAlert"},
+    ),
+    "GET /api/v1/validation/overview": (
+        _VALIDATION_ALERTS,
+        {"ThemeAlert", "ThemeCluster"},
+    ),
+    "GET /api/v1/stocks/{symbol}/validation": (
+        _VALIDATION_ALERTS,
+        {"ThemeAlert", "ThemeCluster"},
+    ),
+    "mcp market_overview": (
+        _MCP_ALERTS,
+        {"ThemeAlert"},
+    ),
+    "POST /mcp/": (
+        _MCP_ALERTS,
+        {"ThemeAlert"},
+    ),
+    "GET /api/v1/assistant/health": (
+        _MCP_ALERTS,
+        {"ThemeAlert"},
+    ),
+    "GET /api/v1/assistant/conversations": (
+        _MCP_ALERTS,
+        {"ThemeAlert"},
+    ),
+    "POST /api/v1/assistant/conversations": (
+        _MCP_ALERTS,
+        {"ThemeAlert"},
+    ),
+    "GET /api/v1/assistant/conversations/{conversation_id}": (
+        _MCP_ALERTS,
+        {"ThemeAlert"},
+    ),
+    "POST /api/v1/assistant/conversations/{conversation_id}/messages": (
+        _MCP_ALERTS,
+        {"ThemeAlert"},
+    ),
+    "POST /api/v1/assistant/watchlist-add-preview": (
+        _MCP_ALERTS,
+        {"ThemeAlert"},
+    ),
+    "GET /api/v1/themes/matching/telemetry": (
+        _TELEMETRY,
+        {"ThemeMention"},
+    ),
+    "task app.tasks.theme_intelligence_tasks.prepare_developments": (
+        _DEVELOPMENTS,
+        {"ThemeCluster", "ThemeDevelopmentTheme", "ThemeEquivalenceOperation", "ThemeMention"},
+    ),
+    "POST /api/v1/themes/developments/backfill": (
+        _DEVELOPMENTS,
+        {"ThemeCluster", "ThemeMention"},
+    ),
+    "GET /api/v1/themes/content": (
+        _CONTENT,
+        {"ThemeMention", "table:theme_mentions"},
+    ),
+    "GET /api/v1/themes/content/export": (
+        _CONTENT,
+        {"ThemeMention", "table:theme_mentions"},
+    ),
+    "task app.interfaces.tasks.social_signal_tasks.refresh_social_signals": (
+        _SOCIAL_PREPARATION,
+        {"SocialThemeAssociation", "ThemeAlias", "ThemeCluster", "ThemeConstituent", "ThemeMention"},
+    ),
+    "task app.interfaces.tasks.social_signal_tasks.resume_social_analysis": (
+        _SOCIAL_PREPARATION,
+        {"SocialThemeAssociation", "ThemeAlias", "ThemeCluster", "ThemeConstituent", "ThemeMention"},
+    ),
+    "task app.tasks.economic_taxonomy_tasks.refresh_economic_taxonomy_generation": (
+        _SNAPSHOT_BUILDER,
+        {"ThemeDevelopmentTheme"},
+    ),
+    "GET /api/v1/themes/pipeline/state-health": (
+        _PIPELINE_DIAGNOSTICS,
+        {"ThemeMention"},
+    ),
+    "GET /api/v1/themes/pipeline/observability": (
+        _PIPELINE_DIAGNOSTICS,
+        {"ThemeCluster", "ThemeMention", "ThemeMergeSuggestion"},
+    ),
+    "GET /api/v1/operations/social-signals": (
+        _SOCIAL_OPERATIONS,
+        {"SocialThemeAssociation"},
+    ),
+    "GET /api/v1/social-signals/admin/health": (
+        _SOCIAL_OPERATIONS,
+        {"SocialThemeAssociation"},
+    ),
+    "GET /api/v1/social-signals/admin/associations": (
+        _SOCIAL_ASSOCIATIONS,
+        {"SocialThemeAssociation", "ThemeCluster"},
+    ),
+    "task app.tasks.economic_taxonomy_tasks.deliver_taxonomy_outbox": (
+        _ROLLBACK,
+        {"SocialThemeAssociation", "SocialThemeDecision", "ThemeCluster", "ThemeConstituent"},
+    ),
+    "task app.tasks.economic_taxonomy_tasks.process_economic_taxonomy_work": (
+        _SOCIAL_BRIDGE,
+        {"SocialThemeAssociation"},
+    ),
+    "POST /api/v1/social-signals/admin/associations/{association_id}/decision": (
+        _SOCIAL_BRIDGE,
+        {"SocialThemeAssociation"},
+    ),
 }
 
 
@@ -95,24 +209,33 @@ def _short(qualname):
 
 
 def test_no_new_unrouted_legacy_theme_reads(findings):
-    new = {entry: found for entry, found in findings.items() if found and entry not in ALLOWLIST}
-    report = "\n".join(
-        f"  {entry}: {finding.model} via {' > '.join(_short(p) for p in finding.path)}"
-        for entry, found in sorted(new.items())
+    # Keyed by entry point and model, so new debt under an allowlisted entry
+    # point fails too. Not by call path: refactors would churn it.
+    new = [
+        finding
+        for entry, found in sorted(findings.items())
         for finding in found
+        if finding.model not in ALLOWLIST.get(entry, ("", set()))[1]
+    ]
+    report = "\n".join(
+        f"  {f.entry}: {f.model} via {' > '.join(_short(p) for p in f.path)}" for f in new
     )
     assert not new, (
         "These entry points read legacy Theme tables without routing through "
         "EconomicThemeReader (or a #472 guard):\n"
         f"{report}\n"
-        "Route the read by authority mode, or add the entry to ALLOWLIST with a reason."
+        "Route the read by authority mode, or add it to ALLOWLIST with a reason."
     )
 
 
 def test_allowlist_has_no_stale_entries(findings):
-    stale = sorted(entry for entry in ALLOWLIST if not findings.get(entry))
+    stale = {
+        entry: sorted(models - {f.model for f in findings.get(entry, [])})
+        for entry, (_, models) in ALLOWLIST.items()
+    }
+    stale = {entry: models for entry, models in stale.items() if models}
     assert not stale, (
-        f"No longer unrouted (routed, removed or renamed); delete from ALLOWLIST: {stale}"
+        f"No longer read unrouted (routed, removed or renamed); shrink ALLOWLIST: {stale}"
     )
 
 
@@ -171,6 +294,20 @@ _FIXTURE = {
                 return []
             return read_clusters(db)
 
+        def read_before_check(db):
+            rows = read_clusters(db)
+            if EconomicThemeReader(db):
+                return []
+            return rows
+
+        def check_only_annotated(db, reader: EconomicThemeReader):
+            return read_clusters(db)
+
+        def check_in_other_branch(db, flag):
+            if flag:
+                EconomicThemeReader(db)
+            return read_clusters(db)
+
         def injected(db):
             return build_use_case(db).run()
 
@@ -211,6 +348,13 @@ def test_gate_reports_raw_sql_naming_a_legacy_table(fixture_index):
 
 def test_gate_accepts_reads_routed_by_authority(fixture_index):
     assert _reads(fixture_index, "routed") == []
+
+
+@pytest.mark.parametrize(
+    "name", ["read_before_check", "check_only_annotated", "check_in_other_branch"]
+)
+def test_gate_counts_reads_the_authority_check_does_not_cover(fixture_index, name):
+    assert [f.model for f in _reads(fixture_index, name)] == ["ThemeCluster"]
 
 
 def test_gate_follows_injected_protocol_dependencies(fixture_index):
