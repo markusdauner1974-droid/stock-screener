@@ -229,6 +229,25 @@ def test_social_supersession_keeps_the_legacy_x_lens(db_session):
     assert _lens(db_session, social.packet_id) == {"narrative", "technical"}
 
 
+def test_held_legacy_observation_lens_survives_social_supersession(db_session):
+    # Two legacy feeds saw different text for the post: the second capture is
+    # held, but its fundamental grant still applies to the post.
+    admission = EconomicSourceAdmissionService(db_session)
+    admission.admit_content(replace(
+        _x_capture(CONTENT_INGESTION_ROUTE, "Memory demand.", "7:3"),
+        evidence_channels=("technical",),
+    ))
+    held = admission.admit_content(replace(
+        _x_capture(CONTENT_INGESTION_ROUTE, "Memory demand, edited.", "7:4"),
+        evidence_channels=("fundamental",),
+    ))
+    assert held.precedence_state == "hold_review"
+
+    social = admission.admit_social_work(_x_capture("social", "Memory demand.", "work-9"))
+
+    assert _lens(db_session, social.packet_id) == {"fundamental", "narrative", "technical"}
+
+
 def test_legacy_x_lens_reaches_social_packet_admitted_first(db_session):
     admission = EconomicSourceAdmissionService(db_session)
     social = admission.admit_social_work(_x_capture("social", "Memory demand.", "work-9"))

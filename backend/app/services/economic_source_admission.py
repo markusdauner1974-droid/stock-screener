@@ -45,8 +45,6 @@ def _ordered(values) -> tuple[str, ...]:
 
 # Capture route for news/RSS/Substack/Reddit/legacy-X content ingestion (#471).
 CONTENT_INGESTION_ROUTE = "content_ingestion"
-# Capture route of Social saved-work admissions.
-SOCIAL_ROUTE = "social"
 
 
 def post_family_key(provider: str, canonical_item_id: str) -> str:
@@ -151,12 +149,14 @@ class EconomicSourceAdmissionService:
 
     def admit_content(self, evidence: EvidenceAdmission) -> AdmissionResult:
         # Ingestion re-polls items with a fresh capture time, so a recapture of
-        # text already admitted for this lineage reuses that packet. When Social
-        # owns the post, this capture is held but its lens still applies (#500).
+        # text already admitted for this lineage reuses that packet. A source's
+        # grant applies to the post even when this capture is held (behind
+        # Social, or behind another feed's differing text), so it lends its
+        # channels to whichever packet is in force (#500).
         return self.admit(
             evidence,
             reuse_admitted_content=True,
-            lend_channels_to_routes=frozenset({SOCIAL_ROUTE}),
+            lend_channels=True,
         )
 
     def admit_social_work(self, evidence: EvidenceAdmission) -> AdmissionResult:
@@ -175,7 +175,7 @@ class EconomicSourceAdmissionService:
         *,
         reuse_admitted_content: bool = False,
         supersede_routes: frozenset[str] = frozenset(),
-        lend_channels_to_routes: frozenset[str] = frozenset(),
+        lend_channels: bool = False,
     ) -> AdmissionResult:
         expected_epoch = self._current_epoch()
         with producer_write(
@@ -189,11 +189,11 @@ class EconomicSourceAdmissionService:
                 reuse_admitted_content=reuse_admitted_content,
                 supersede_routes=supersede_routes,
             )
-            # The lens discovery reads is the effective packet's; a capture held
-            # behind an outranking route's packet lends it its channels.
-            if lend_channels_to_routes and evidence.evidence_channels:
+            # The lens discovery reads is the effective packet's; merging is a
+            # no-op when the capture is effective or already merged.
+            if lend_channels and evidence.evidence_channels:
                 effective = self.effective_packet(result.source_lineage_id)
-                if effective is not None and effective.capture_route in lend_channels_to_routes:
+                if effective is not None:
                     self._merge_equivalent_eligibility(
                         effective,
                         evidence.evidence_channels,
