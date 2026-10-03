@@ -26,7 +26,11 @@ from app.models.economic_taxonomy_runtime import (
 from app.models.stock_universe import StockUniverse
 from app.models.theme import ContentItem, ThemeCluster
 from app.services.economic_social_taxonomy_adapter import EconomicSocialTaxonomyAdapter
-from app.services.economic_source_admission import EvidenceAdmission
+from app.services.economic_source_admission import (
+    CONTENT_INGESTION_ROUTE,
+    EconomicSourceAdmissionService,
+    EvidenceAdmission,
+)
 from app.services.economic_taxonomy_fence import AuthorityWritesFenced
 from app.services.economic_taxonomy_publication_compatibility import (
     build_default_compatibility_projections,
@@ -652,6 +656,37 @@ def test_only_published_succeeded_effective_work_is_live_admitted(db_session):
     assert db_session.get(EvidencePacket, admitted.packet_id).source_metadata[
         "social_work_id"
     ] == published.id
+
+
+def test_social_work_is_live_when_legacy_x_content_was_admitted_first(db_session):
+    # #500: a legacy-only X source admitted the post first under the same
+    # family; Social's differently prepared capture must still go live.
+    work = _saved_work(db_session, run_status="published")
+    content = EconomicSourceAdmissionService(db_session).admit_content(
+        EvidenceAdmission(
+            provider="x",
+            canonical_source_family=f"x:post:{work.content_item_id}",
+            capture_route=CONTENT_INGESTION_ROUTE,
+            route_record_id="1:1",
+            original_text="Memory pricing rose.",
+            preparation_version="content-ingestion-v1",
+            captured_at=NOW,
+            observed_at=NOW,
+            available_at=NOW,
+            evidence_channels=("technical",),
+        )
+    )
+
+    admitted = EconomicSocialTaxonomyAdapter(db_session).admit_saved_work(
+        work.id, _evidence(work)
+    )
+
+    assert admitted.precedence_state == "effective"
+    assert admitted.live is True
+    assert (
+        db_session.get(EvidencePacket, admitted.packet_id).supersedes_evidence_packet_id
+        == content.packet_id
+    )
 
 
 def test_unordered_late_archive_remains_review_only(db_session):

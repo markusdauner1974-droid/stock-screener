@@ -203,10 +203,12 @@ Record all three values. Never reopen a sealed snapshot.
 
 ## 4. Enter shadow, catch up, and benchmark
 
-Admit the news, RSS, Substack and Reddit content ingested before this release,
-so shadow comparisons include it. New items are admitted at ingest; X posts
-come only from Social. Re-running is safe, and `--after-id` resumes from the
-`last_id` a previous run printed:
+Admit the news, RSS, Substack, Reddit and legacy-X content ingested before this
+release, so shadow comparisons include it. New items are admitted at ingest.
+Posts from legacy-only X sources join Social's `x:post:<tweet_id>` family, and
+Social's capture of the same post supersedes them. X posts collected only by
+Social are left to Social. Re-running is safe, and `--after-id` resumes from
+the `last_id` a previous run printed:
 
 ```bash
 ./venv/bin/python scripts/backfill_content_economic_evidence.py

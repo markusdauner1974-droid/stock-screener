@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
@@ -11,6 +12,7 @@ from app.models.economic_taxonomy_runtime import (
     TaxonomySourceRevisionLog,
 )
 from app.services.economic_source_admission import (
+    CONTENT_INGESTION_ROUTE,
     EconomicSourceAdmissionService,
     EvidenceAdmission,
 )
@@ -142,6 +144,66 @@ def test_ordered_reversion_to_earlier_text_is_admitted_not_collapsed(db_session)
     assert reverted.packet_id != first.packet_id
     assert reverted.precedence_state == "effective"
     assert admission.effective_packet(first.source_lineage_id).id == reverted.packet_id
+
+
+def _x_capture(route: str, text: str, record: str) -> EvidenceAdmission:
+    # Legacy X content and Social prepare the same post differently, so their
+    # content fingerprints never match (#500).
+    return EvidenceAdmission(
+        provider="x",
+        canonical_source_family="x:post:123",
+        capture_route=route,
+        route_record_id=record,
+        original_text=text,
+        preparation_version=f"{route}-v1",
+        captured_at=NOW,
+        observed_at=NOW,
+        available_at=NOW,
+        evidence_channels=("narrative",),
+    )
+
+
+def test_social_supersedes_a_content_ingestion_packet_for_the_same_post(db_session):
+    admission = EconomicSourceAdmissionService(db_session)
+    content = admission.admit_content(_x_capture(CONTENT_INGESTION_ROUTE, "Memory demand.", "7:3"))
+
+    social = admission.admit_social_work(_x_capture("social", "Memory demand.", "work-9"))
+    again = admission.admit_social_work(_x_capture("social", "Memory demand.", "work-9"))
+
+    assert social.source_lineage_id == content.source_lineage_id
+    assert social.precedence_state == "effective"
+    assert db_session.get(EvidencePacket, social.packet_id).supersedes_evidence_packet_id == content.packet_id
+    assert again.packet_id == social.packet_id
+    assert db_session.scalar(select(func.count()).select_from(EvidencePacket)) == 2
+
+
+def test_social_recapture_after_superseding_content_is_equivalent(db_session):
+    # New Social metadata (e.g. a membership decision) still needs its own
+    # equivalent packet once Social has taken over from legacy X content.
+    admission = EconomicSourceAdmissionService(db_session)
+    admission.admit_content(_x_capture(CONTENT_INGESTION_ROUTE, "Memory demand.", "7:3"))
+    social = admission.admit_social_work(_x_capture("social", "Memory demand.", "work-9"))
+
+    recapture = admission.admit_social_work(
+        replace(_x_capture("social", "Memory demand.", "work-9"),
+                source_metadata={"social_memberships": ["rejected"]})
+    )
+
+    assert recapture.packet_id != social.packet_id
+    assert recapture.precedence_state == "equivalent"
+    assert db_session.get(EvidencePacket, recapture.packet_id).supersedes_evidence_packet_id is None
+
+
+def test_content_capture_after_social_is_held_once(db_session):
+    admission = EconomicSourceAdmissionService(db_session)
+    social = admission.admit_social_work(_x_capture("social", "Memory demand.", "work-9"))
+
+    held = admission.admit_content(_x_capture(CONTENT_INGESTION_ROUTE, "Memory demand.", "7:3"))
+    repoll = admission.admit_content(_x_capture(CONTENT_INGESTION_ROUTE, "Memory demand.", "7:3"))
+
+    assert held.precedence_state == "hold_review"
+    assert repoll.packet_id == held.packet_id
+    assert admission.effective_packet(social.source_lineage_id).id == social.packet_id
 
 
 def test_adding_lens_does_not_create_packet_or_work(db_session):

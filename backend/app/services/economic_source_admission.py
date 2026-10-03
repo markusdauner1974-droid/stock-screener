@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID, uuid4
@@ -31,6 +31,7 @@ from app.models.economic_taxonomy_runtime import (
     TaxonomyAuthority,
 )
 from app.services.economic_taxonomy_fence import producer_write
+from app.services.twitter_content_identity import x_post_id_from_url
 from app.utils.file_hashing import canonical_json_sha256 as _hash
 
 
@@ -48,6 +49,18 @@ CONTENT_INGESTION_ROUTE = "content_ingestion"
 
 def post_family_key(provider: str, canonical_item_id: str) -> str:
     return f"{provider.strip().lower()}:post:{canonical_item_id}"
+
+
+def content_family_key(source_type: str, external_id: str, url: str | None) -> str | None:
+    """Source family for an ingested content item.
+
+    X posts join Social's ``x:post:<tweet_id>`` family (#500); without a
+    status URL there is no tweet id to key on, so no family.
+    """
+    if source_type == "twitter":
+        post_id = x_post_id_from_url(url)
+        return post_family_key("x", post_id) if post_id else None
+    return post_family_key(source_type, external_id)
 
 
 def content_route_record_id(content_item_id: int, source_id: int | None) -> str:
@@ -140,13 +153,21 @@ class EconomicSourceAdmissionService:
         return self.admit(evidence, reuse_admitted_content=True)
 
     def admit_social_work(self, evidence: EvidenceAdmission) -> AdmissionResult:
-        return self.admit(evidence)
+        # Social's prepared capture of an X post outranks the raw legacy X
+        # content capture of the same post, whose fingerprint it can never
+        # match (#500). No fingerprint reuse here: Social recaptures with new
+        # metadata (e.g. membership decisions) must record equivalent packets.
+        return self.admit(
+            evidence,
+            supersede_routes=frozenset({CONTENT_INGESTION_ROUTE}),
+        )
 
     def admit(
         self,
         evidence: EvidenceAdmission,
         *,
         reuse_admitted_content: bool = False,
+        supersede_routes: frozenset[str] = frozenset(),
     ) -> AdmissionResult:
         expected_epoch = self._current_epoch()
         with producer_write(
@@ -158,6 +179,7 @@ class EconomicSourceAdmissionService:
                 evidence,
                 authority_epoch=authority.authority_epoch,
                 reuse_admitted_content=reuse_admitted_content,
+                supersede_routes=supersede_routes,
             )
 
     def _admit(
@@ -166,6 +188,7 @@ class EconomicSourceAdmissionService:
         *,
         authority_epoch: int,
         reuse_admitted_content: bool = False,
+        supersede_routes: frozenset[str] = frozenset(),
     ) -> AdmissionResult:
         family = self._get_or_create_family(evidence)
         lineage = self._get_or_create_lineage(family, evidence)
@@ -174,6 +197,30 @@ class EconomicSourceAdmissionService:
             .where(SourceLineage.id == lineage.id)
             .with_for_update()
         ).scalar_one()
+        # An explicit supersession of an effective packet from an outranked
+        # route, recorded on the packet so precedence advances on stated
+        # provenance rather than admission order. Applies while that packet is
+        # in force, and to an identical re-run of the superseding admission
+        # (whose hash includes the link), so a retry stays a no-op.
+        if (
+            supersede_routes
+            and evidence.supersedes_packet_id is None
+            and evidence.equivalent_packet_id is None
+        ):
+            target = self._latest_effective_from_routes(lineage.id, supersede_routes)
+            if target is not None:
+                superseding = replace(evidence, supersedes_packet_id=target.id)
+                current = self.effective_packet(lineage.id)
+                rerun_hash = self._packet_hash(
+                    superseding, self._content_fingerprint(superseding)
+                )
+                if (current is not None and current.id == target.id) or self.session.scalar(
+                    select(EvidencePacket.id).where(
+                        EvidencePacket.source_lineage_id == lineage.id,
+                        EvidencePacket.packet_hash == rerun_hash,
+                    )
+                ) is not None:
+                    evidence = superseding
 
         fingerprint = self._content_fingerprint(evidence)
         packet_hash = self._packet_hash(evidence, fingerprint)
@@ -426,6 +473,25 @@ class EconomicSourceAdmissionService:
         ):
             return 0
         return 1 if disposition == "hold_review" else None
+
+    def _latest_effective_from_routes(
+        self, lineage_id: UUID, routes: frozenset[str]
+    ) -> EvidencePacket | None:
+        """The packet from ``routes`` most recently made effective in the lineage."""
+        return self.session.execute(
+            select(EvidencePacket)
+            .join(
+                EvidencePrecedenceRevision,
+                EvidencePrecedenceRevision.evidence_packet_id == EvidencePacket.id,
+            )
+            .where(
+                EvidencePrecedenceRevision.source_lineage_id == lineage_id,
+                EvidencePrecedenceRevision.disposition == "effective",
+                EvidencePacket.capture_route.in_(routes),
+            )
+            .order_by(EvidencePrecedenceRevision.revision_number.desc())
+            .limit(1)
+        ).scalar_one_or_none()
 
     def _latest_disposition(self, packet_id: UUID) -> str | None:
         return self.session.scalar(
