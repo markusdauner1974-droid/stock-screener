@@ -277,6 +277,8 @@ GUARDED_ROUTES = [
     ("POST", "/taxonomy/assign"),
     ("POST", "/taxonomy/assign/async"),
     ("PUT", "/taxonomy/1/reassign"),
+    ("GET", "/1/validate"),
+    ("GET", "/1/similar"),
 ]
 
 
@@ -306,6 +308,30 @@ async def test_route_returns_409_under_economic_authority(db_session, monkeypatc
     assert response.status_code == 409, response.text
     assert response.json()["detail"]["code"] == "economic_generation_endpoint_required"
     assert _clusters(db_session) == before
+
+
+@pytest.mark.asyncio
+async def test_rankings_read_skips_metric_recalculation_while_writes_are_fenced(db_session, monkeypatch):
+    # A read endpoint: it still serves stored metrics instead of returning 409.
+    from app.services import server_auth
+    from app.services.theme_discovery_service import ThemeDiscoveryService
+
+    monkeypatch.setattr(server_auth.settings, "server_auth_enabled", False)
+    _authority(db_session, "legacy", writes_fenced=True)
+    recalculated = []
+    monkeypatch.setattr(ThemeDiscoveryService, "update_all_theme_metrics",
+                        lambda self: recalculated.append(True))
+    app.dependency_overrides[get_db] = lambda: db_session
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.get("/api/v1/themes/rankings?recalculate=true")
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert response.status_code == 200, response.text
+    assert recalculated == []
 
 
 def test_skipped_pipeline_run_is_recorded_as_skipped(db_session):

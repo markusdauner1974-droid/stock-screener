@@ -47,12 +47,20 @@ from ...schemas.theme import (
 )
 from ...schemas.ui_view_snapshot import UISnapshotEnvelope
 from ...services.economic_theme_read_service import EconomicThemeReader
+from ...services.legacy_theme_write_guard import (
+    legacy_theme_writes_blocked,
+    mark_legacy_theme_writer,
+)
 from ...services.live_attachment_service import attachment_snapshots
 from ...services.theme_correlation_service import ThemeCorrelationService
 from ...services.theme_discovery_service import ThemeDiscoveryService
 from ...services.theme_merging_service import ThemeMergingService
 from ...wiring.bootstrap import get_ui_snapshot_service
-from .themes_common import parse_csv_values, reject_legacy_theme_writes, safe_theme_cluster_response
+from .themes_common import (
+    parse_csv_values,
+    reject_legacy_theme_writes,
+    safe_theme_cluster_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,17 +133,18 @@ def get_theme_rankings(
         )
     service = ThemeDiscoveryService(db, pipeline=pipeline)
 
-    if recalculate:
-        service.update_all_theme_metrics()
-    else:
-        themes_without_metrics = db.query(ThemeCluster).filter(
-            ThemeCluster.is_active == True,
-            ThemeCluster.is_l1 == False,
-            ~ThemeCluster.id.in_(db.query(ThemeMetrics.theme_cluster_id).distinct()),
-        ).count()
-        if themes_without_metrics > 0:
+    themes_without_metrics = 0 if recalculate else db.query(ThemeCluster).filter(
+        ThemeCluster.is_active == True,
+        ThemeCluster.is_l1 == False,
+        ~ThemeCluster.id.in_(db.query(ThemeMetrics.theme_cluster_id).distinct()),
+    ).count()
+    # Recalculating writes legacy metrics (#472): skipped while those writes are
+    # blocked (the read still serves stored metrics), fenced otherwise.
+    if (recalculate or themes_without_metrics) and not legacy_theme_writes_blocked(db):
+        if themes_without_metrics:
             logger.info("Auto-calculating metrics for %s themes without metrics", themes_without_metrics)
-            service.update_all_theme_metrics()
+        mark_legacy_theme_writer(db)
+        service.update_all_theme_metrics()
 
     source_types_list = parse_csv_values(source_types)
     lifecycle_states_list = parse_csv_values(lifecycle_states)
@@ -723,7 +732,12 @@ def discover_correlation_clusters(
     )
 
 
-@router.get("/{theme_id}/validate", response_model=ThemeValidationResponse)
+@router.get(
+    "/{theme_id}/validate",
+    response_model=ThemeValidationResponse,
+    # Mutating GET: commits constituent and cluster validation fields.
+    dependencies=[Depends(reject_legacy_theme_writes)],
+)
 def validate_theme(
     theme_id: int,
     min_correlation: float = Query(0.5, ge=0.2, le=0.9),
@@ -769,7 +783,12 @@ def find_theme_entrants(
     }
 
 
-@router.get("/{theme_id}/similar", response_model=SimilarThemesResponse)
+@router.get(
+    "/{theme_id}/similar",
+    response_model=SimilarThemesResponse,
+    # Mutating GET: commits missing or stale ThemeEmbedding rows.
+    dependencies=[Depends(reject_legacy_theme_writes)],
+)
 def find_similar_themes(
     theme_id: int,
     threshold: float = Query(0.75, ge=0.5, le=0.99, description="Minimum similarity threshold"),
