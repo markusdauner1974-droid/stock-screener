@@ -175,7 +175,7 @@ def search_equivalent_themes(
     return {"themes": list(results.values()), "version": snapshot.version}
 
 
-@router.post("/developments/backfill", dependencies=[Depends(require_admin)])
+@router.post("/developments/backfill", dependencies=[Depends(require_admin), Depends(reject_legacy_theme_writes)])
 def backfill_developments(request: BackfillRequest, db: DbSession):
     from app.services.theme_development_worker import discover
 
