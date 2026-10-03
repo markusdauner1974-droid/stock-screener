@@ -220,11 +220,13 @@ class EconomicSourceAdmissionService:
         # route, recorded on the packet so precedence advances on stated
         # provenance rather than admission order. Applies while that packet is
         # in force, and to an identical re-run of the superseding admission
-        # (whose hash includes the link), so a retry stays a no-op.
+        # (whose hash includes the link), so a retry stays a no-op. Archive and
+        # partial captures never supersede; they stay review-only.
         if (
             supersede_routes
             and evidence.supersedes_packet_id is None
             and evidence.equivalent_packet_id is None
+            and not self._is_archive_or_partial(evidence)
         ):
             target = self._latest_effective_from_routes(lineage.id, supersede_routes)
             if target is not None:
@@ -770,11 +772,15 @@ class EconomicSourceAdmissionService:
         return (
             evidence.provider_revision_id is None
             and evidence.provider_revision_order is None
-            and (
-                "archive" in evidence.capture_route.lower()
-                or bool(evidence.source_metadata.get("archived"))
-                or bool(evidence.source_metadata.get("partial_recapture"))
-            )
+            and EconomicSourceAdmissionService._is_archive_or_partial(evidence)
+        )
+
+    @staticmethod
+    def _is_archive_or_partial(evidence: EvidenceAdmission) -> bool:
+        return (
+            "archive" in evidence.capture_route.lower()
+            or bool(evidence.source_metadata.get("archived"))
+            or bool(evidence.source_metadata.get("partial_recapture"))
         )
 
     @staticmethod

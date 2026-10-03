@@ -177,6 +177,20 @@ def test_social_supersedes_a_content_ingestion_packet_for_the_same_post(db_sessi
     assert db_session.scalar(select(func.count()).select_from(EvidencePacket)) == 2
 
 
+def test_archive_or_partial_social_capture_does_not_supersede_content(db_session):
+    admission = EconomicSourceAdmissionService(db_session)
+    content = admission.admit_content(_x_capture(CONTENT_INGESTION_ROUTE, "Memory demand.", "7:3"))
+
+    archive = admission.admit_social_work(_x_capture("social-archive", "Memory demand.", "work-9"))
+    partial = admission.admit_social_work(replace(
+        _x_capture("social", "Memory demand.", "work-10"),
+        source_metadata={"partial_recapture": True},
+    ))
+
+    assert archive.precedence_state == partial.precedence_state == "hold_review"
+    assert admission.effective_packet(content.source_lineage_id).id == content.packet_id
+
+
 def test_social_recapture_after_superseding_content_is_equivalent(db_session):
     # New Social metadata (e.g. a membership decision) still needs its own
     # equivalent packet once Social has taken over from legacy X content.
