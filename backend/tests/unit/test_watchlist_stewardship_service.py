@@ -19,6 +19,7 @@ from app.models.theme import ThemeAlert
 from app.models.user_watchlist import UserWatchlist, WatchlistItem
 from app.services import server_auth
 from app.services.watchlist_stewardship_service import WatchlistStewardshipService
+from tests.helpers.taxonomy_authority import set_economic_authority
 
 pytestmark = pytest.mark.integration
 
@@ -245,6 +246,24 @@ def test_watchlist_stewardship_service_classifies_statuses_and_sorts_default_pro
     assert payload.summary_counts.missing_from_run == 1
     assert payload.items[0].symbol == "TSLA"
     assert payload.items[1].symbol == "NVDA"
+
+
+def test_watchlist_stewardship_ignores_legacy_theme_alerts_in_economic_mode(session):
+    watchlist = _seed_watchlist_stewardship_data(session)
+    set_economic_authority(session)
+    service = WatchlistStewardshipService(event_context_service=_FakeEventContextService())
+
+    payload = service.get_watchlist_stewardship(
+        session,
+        watchlist_id=watchlist.id,
+        as_of_date=date(2026, 4, 4),
+        profile="default",
+    )
+
+    # The seeded NVDA alert is "lost" support in legacy mode.
+    assert {item.symbol: item.theme_support for item in payload.items}["NVDA"] == "none"
+    assert payload.freshness.latest_theme_alert_at is None
+    assert "economic_theme_alerts_unavailable" in payload.degraded_reasons
 
 
 def test_watchlist_stewardship_service_applies_risk_off_thresholds(session):

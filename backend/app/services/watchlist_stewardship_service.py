@@ -28,6 +28,7 @@ from app.schemas.user_watchlist import (
     WatchlistStewardshipSummaryCounts,
 )
 from app.services.breadth.query import breadth_query, latest_breadth
+from app.services.economic_theme_read_service import EconomicThemeReader
 from app.services.stock_event_context_service import StockEventContextService
 from app.services.strategy_profile_service import (
     DEFAULT_PROFILE,
@@ -160,6 +161,9 @@ class WatchlistStewardshipService:
             degraded_reasons.append("missing_previous_feature_run")
         if breadth is None:
             degraded_reasons.append("missing_breadth_snapshot")
+        if EconomicThemeReader(db).source_name == "economic":
+            # Theme support comes from legacy alerts only (#475).
+            degraded_reasons.append("economic_theme_alerts_unavailable")
 
         items = (
             db.query(WatchlistItem)
@@ -321,6 +325,8 @@ class WatchlistStewardshipService:
         start_date: date,
         end_date: date | None = None,
     ) -> set[str]:
+        if EconomicThemeReader(db).source_name == "economic":
+            return set()
         effective_end_date = end_date or start_date
         start_at, _ = eastern_day_bounds_utc(start_date)
         _, end_at = eastern_day_bounds_utc(effective_end_date)
@@ -344,6 +350,8 @@ class WatchlistStewardshipService:
         return symbols
 
     def _load_latest_theme_alert_at(self, db: Session, as_of_date: date | None) -> datetime | None:
+        if EconomicThemeReader(db).source_name == "economic":
+            return None
         query = db.query(func.max(ThemeAlert.triggered_at)).filter(
             ThemeAlert.alert_type.in_(SUPPORTED_THEME_ALERT_TYPES)
         )
