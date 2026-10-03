@@ -158,6 +158,9 @@ GUARDED_ROUTES = [
     ("POST", "/create-from-cluster"),
     ("POST", "/1/add-constituents"),
     ("DELETE", "/1"),
+    ("POST", "/taxonomy/assign"),
+    ("POST", "/taxonomy/assign/async"),
+    ("PUT", "/taxonomy/1/reassign"),
 ]
 
 

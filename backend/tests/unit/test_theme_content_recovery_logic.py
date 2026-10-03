@@ -31,7 +31,16 @@ def test_reset_corrupt_theme_content_storage_recreates_immediately_after_rewind(
             return _DummyBegin()
 
     monkeypatch.setattr(recovery_service, "engine", _DummyEngine())
-    monkeypatch.setattr(recovery_service, "_reset_blocked_by_authority", lambda conn: False)
+    monkeypatch.setattr(
+        recovery_service,
+        "_acquire_publication_fence_shared",
+        lambda conn: calls.append("fence"),
+    )
+    monkeypatch.setattr(
+        recovery_service,
+        "_reset_blocked_by_authority",
+        lambda conn: calls.append("check") or False,
+    )
     monkeypatch.setattr(
         recovery_service,
         "_acquire_theme_content_reset_lock",
@@ -58,4 +67,6 @@ def test_reset_corrupt_theme_content_storage_recreates_immediately_after_rewind(
     )
 
     assert begin_calls["count"] == 1
-    assert calls == ["lock", "drop", "rewind", "recreate"]
+    # #472: the shared publication fence is taken before the authority check,
+    # in the same transaction as the drops, so a cutover cannot slip between.
+    assert calls == ["fence", "check", "lock", "drop", "rewind", "recreate"]

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from ..database import engine
 from ..infra.db.portability import is_postgres
 from ..models.theme import ContentItem, ContentItemPipelineState, ThemeMention
+from .economic_taxonomy_fence import ECONOMIC_TAXONOMY_FENCE_KEY
 from .legacy_theme_write_guard import (
     LegacyThemeWritesBlocked,
     legacy_theme_writes_blocked,
@@ -67,6 +68,9 @@ def reset_corrupt_theme_content_storage(exc: Exception) -> None:
     )
     with _THEME_CONTENT_STORAGE_LOCK:
         with engine.begin() as conn:
+            # Held until the DDL commits, so a cutover cannot land between the
+            # authority check and the drops.
+            _acquire_publication_fence_shared(conn)
             if _reset_blocked_by_authority(conn):
                 raise LegacyThemeWritesBlocked(
                     "Theme content storage is not reset under economic authority; "
@@ -76,6 +80,14 @@ def reset_corrupt_theme_content_storage(exc: Exception) -> None:
             drop_theme_content_tables(conn)
             rewind_theme_content_source_cursors(conn)
             recreate_theme_content_tables(conn)
+
+
+def _acquire_publication_fence_shared(conn) -> None:
+    if is_postgres(conn):
+        conn.execute(
+            text("SELECT pg_advisory_xact_lock_shared(:key)"),
+            {"key": ECONOMIC_TAXONOMY_FENCE_KEY},
+        )
 
 
 def _reset_blocked_by_authority(conn) -> bool:
