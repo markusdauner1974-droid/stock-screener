@@ -28,6 +28,7 @@ NO_RUN_MESSAGE = "No published feature run is available for symbol explanation."
 
 @pytest.fixture()
 def session_factory():
+    """In-memory database carrying the shared MCP seed data."""
     factory, _engine = create_mcp_test_session_factory()
     seed_market_copilot_data(factory)
     return factory
@@ -35,6 +36,7 @@ def session_factory():
 
 @pytest.fixture()
 def service(session_factory):
+    """Read-only copilot service over the seeded session factory."""
     return MarketCopilotService(
         session_factory,
         SimpleNamespace(
@@ -45,6 +47,7 @@ def service(session_factory):
 
 
 def _set_market(session_factory, symbol: str, market: str) -> None:
+    """Move a seeded symbol into *market*, as a per-market universe would carry it."""
     session = session_factory()
     try:
         (
@@ -92,6 +95,7 @@ def _point(session_factory, key: str, run_id: int) -> None:
 
 
 def _drop_pointer(session_factory, key: str) -> None:
+    """Delete a pointer, reproducing an install that never had it."""
     session = session_factory()
     try:
         session.query(FeatureRunPointer).filter(FeatureRunPointer.key == key).delete()
@@ -101,12 +105,14 @@ def _drop_pointer(session_factory, key: str) -> None:
 
 
 def _payload(service, symbol: str) -> dict:
+    """Call ``explain_symbol`` and return its structured payload."""
     result = service.call_tool("explain_symbol", {"symbol": symbol, "depth": "brief"})
     assert result.get("isError") is not True
     return result["structuredContent"]
 
 
 def _published_run_ids(session_factory) -> set[int]:
+    """Ids of every published run, so a test can assert the run really exists."""
     session = session_factory()
     try:
         rows = (

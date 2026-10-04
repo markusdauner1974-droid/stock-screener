@@ -469,6 +469,12 @@ class MarketCopilotService:
         )
 
     def _explain_symbol(self, args: ExplainSymbolArgs) -> ToolEnvelope:
+        """Build the explanation for one symbol from the run that applies to it.
+
+        The run is resolved market-first (see ``_latest_published_run_for_symbol``):
+        publication writes per-market pointers, so looking at the global pointer alone
+        reported "no published feature run" while a valid market run was published.
+        """
         explain_use_case = ExplainStockUseCase()
         with self._uow_scope() as uow:
             latest_run = self._latest_published_run_for_symbol(uow, args.symbol)
