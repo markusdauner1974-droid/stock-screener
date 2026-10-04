@@ -59,12 +59,14 @@ def test_is_ollama_model_detects_another_family_member() -> None:
 
 
 def test_is_ollama_model_rejects_other_sanctioned_models() -> None:
+    """Sanctioned providers outside the Ollama family must not inherit the room."""
     assert LLMService._is_ollama_model("minimax/MiniMax-M2.7") is False
     assert LLMService._is_ollama_model("openai/glm-4.7-flash") is False
     assert LLMService._is_ollama_model("groq/qwen/qwen3-32b") is False
 
 
 def test_try_generate_litellm_gives_the_cloud_reasoning_model_the_high_budget() -> None:
+    """The bare form reaches ollama.com and reasons before it answers."""
     service = _service_with_configured_model("ollama/deepseek-v4.1-flash")
 
     result = service._try_generate_litellm("prompt")
@@ -77,6 +79,7 @@ def test_try_generate_litellm_gives_the_cloud_reasoning_model_the_high_budget() 
 
 
 def test_try_generate_litellm_gives_the_local_daemon_form_the_high_budget() -> None:
+    """The ``:cloud`` tag names the same family, so it gets the same room."""
     service = _service_with_configured_model("ollama/deepseek-v4.1-flash:cloud")
 
     result = service._try_generate_litellm("prompt")
