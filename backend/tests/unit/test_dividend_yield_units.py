@@ -41,13 +41,13 @@ def _service(monkeypatch) -> ymod.YFinanceService:
     return svc
 
 
-@pytest.mark.parametrize("rohwert", [0.31, 0.73, 2.27, 5.87, 0.0])
-def test_dividend_yield_is_not_scaled(monkeypatch, rohwert):
+@pytest.mark.parametrize("raw_value", [0.31, 0.73, 2.27, 5.87, 0.0])
+def test_dividend_yield_is_not_scaled(monkeypatch, raw_value):
     """A percentage point value must arrive unchanged."""
-    _FakeTicker.payload = {"dividendYield": rohwert}
+    _FakeTicker.payload = {"dividendYield": raw_value}
     result = _service(monkeypatch).get_fundamentals("KO")
     assert result is not None
-    assert result["dividend_yield"] == pytest.approx(rohwert)
+    assert result["dividend_yield"] == pytest.approx(raw_value)
 
 
 def test_beta_is_surfaced(monkeypatch):
@@ -58,10 +58,10 @@ def test_beta_is_surfaced(monkeypatch):
     assert result["beta"] == 1.23
 
 
-@pytest.mark.parametrize("rohwert", [None, "n/a", float("nan"), float("inf"), -0.5, 1e307])
-def test_a_value_that_is_not_a_yield_stays_none(monkeypatch, rohwert):
+@pytest.mark.parametrize("raw_value", [None, "n/a", float("nan"), float("inf"), -0.5, 1e307])
+def test_a_value_that_is_not_a_yield_stays_none(monkeypatch, raw_value):
     """A missing or nonsensical value must not look like a measurement."""
-    _FakeTicker.payload = {"dividendYield": rohwert}
+    _FakeTicker.payload = {"dividendYield": raw_value}
     result = _service(monkeypatch).get_fundamentals("MSFT")
     assert result is not None
     assert result["dividend_yield"] is None
@@ -87,3 +87,20 @@ def test_the_bulk_path_keeps_the_same_unit():
 
     assert fundamentals["dividend_yield"] == pytest.approx(2.27)
     assert fundamentals["roe"] == pytest.approx(15.0)
+
+
+@pytest.mark.parametrize("raw_value", [float("nan"), float("inf"), -1.0, "n/a"])
+def test_the_bulk_path_rejects_a_value_that_is_not_a_yield(raw_value):
+    """The bulk path must not store a value the single-symbol path rejects."""
+    fetcher = BulkDataFetcher.__new__(BulkDataFetcher)
+    fetcher._extract_earnings_calendar = lambda ticker, *, symbol=None: {}
+    info = {
+        "marketCap": 1e12,
+        "sharesOutstanding": 1e9,
+        "currentPrice": 93.23,
+        "dividendYield": raw_value,
+    }
+
+    fundamentals = fetcher._extract_fundamentals(None, info)
+
+    assert "dividend_yield" not in fundamentals
