@@ -370,7 +370,9 @@ class BulkDataFetcher:
 
             # Dividend metrics
             'dividend_ttm': info.get('dividendRate'),
-            'dividend_yield': self._convert_to_percentage(info.get('dividendYield')),
+            # Already in percentage points (KO 2.27 -> 2.27 %), unlike the
+            # decimal fields above. The x100 here made every yield 100x too high.
+            'dividend_yield': info.get('dividendYield'),
             'payout_ratio': self._convert_to_percentage(info.get('payoutRatio')),
 
             # Financial health
