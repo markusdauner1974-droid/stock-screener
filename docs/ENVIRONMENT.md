@@ -103,13 +103,19 @@ tier; it does not stop workers that are already running.
 Two deadlines can end the wait, and **the health check is usually the earlier one**:
 
 ```
-start_period + interval * retries   900 + 30 * 3 = 990 s   (never a successful probe)
-deployWaitTimeout                                        1200 s
+start_period + interval * retries   ~900 + 30 * 3 = ~990 s   (never a successful probe)
+deployWaitTimeout                                          1200 s
 ```
+
+The `~990 s` is a **nominal estimate, not a deadline**: Docker does not define the unhealthy
+transition that way. Probe scheduling, `start_interval` and the completion time of the
+previous probe all move it, so treat it as an order of magnitude and size both limits against
+the *measured* time to healthy, with margin.
 
 So `deployWaitTimeout` must cover the expected time to healthy — it does not have to be
 reached, and it is not automatically the first limit. Setting it below the health-check
-deadline would cap the grace for no reason, which is why the two are ordered this way.
+estimate would end the wait before Docker has even finished counting failures, which is why
+the two are ordered this way.
 
 Measured on a QNAP TS-473A, container start to first successful `/readyz`:
 

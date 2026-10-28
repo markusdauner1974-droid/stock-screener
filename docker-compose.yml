@@ -188,11 +188,12 @@ services:
       #
       # Raising this alone is not the whole picture, and this value is not always the
       # limit reached first: Docker ends the wait on its own. If /readyz never succeeds,
-      # failures are counted once the grace is spent and the backend is reported unhealthy
-      # at start_period + interval * retries (900 + 30 * 3 = 990 s here); the
-      # service_healthy dependency wait then fails before an orchestration timeout of 1200.
-      # An orchestrator's "time to healthy" setting must therefore cover the expected time
-      # to healthy. See docs/ENVIRONMENT.md, "Container orchestration".
+      # failures are counted once the grace is spent; start_period + interval * retries
+      # (900 + 30 * 3 = 990 s here) is a nominal estimate, not a deadline -- probe
+      # scheduling, start_interval and the completion of the previous probe move the real
+      # transition. The service_healthy dependency wait then fails before an orchestration
+      # timeout of 1200, so that setting must cover the measured time to healthy with margin.
+      # See docs/ENVIRONMENT.md, "Container orchestration".
       start_period: 900s
     stop_grace_period: 30s
     restart: unless-stopped
