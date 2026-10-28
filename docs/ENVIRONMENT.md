@@ -130,9 +130,12 @@ and could not recover.
 
 Docker Compose itself needs no such pairing **when `docker compose up` is run without
 `--wait`**. That option (`up --wait --wait-timeout N`) adds its own deadline for services to
-become running or healthy — configure it the same way when it is used. The table above matters
-whenever the stack is driven by an orchestrator such as Arcane, Portainer, or a CI deploy step;
-set the equivalent "time to healthy" limit there.
+become running or healthy — configure it the same way when it is used. Its default is `0`,
+meaning no timeout at all, so nothing caps the wait unless a value is passed. When one is
+passed it should sit above `start_period` (for example `--wait-timeout 1200`), otherwise the
+wait can expire while the health grace is still running. The table above matters whenever the
+stack is driven by an orchestrator such as Arcane, Portainer, or a CI deploy step; set the
+equivalent "time to healthy" limit there.
 
 If a migration is expected to outlive both limits, the durable fix is to run migrations as a
 dedicated step before the API starts, rather than extending the grace further.
