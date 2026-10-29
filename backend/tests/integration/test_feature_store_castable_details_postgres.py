@@ -28,13 +28,16 @@ pytestmark = pytest.mark.skipif(
 
 AS_OF = date(2026, 2, 17)
 MIGRATIONS = Path(__file__).parents[2] / "alembic" / "versions"
-# Values each float cast rejects: text, empty, out of range, JSON true, object.
+# Values the float cast rejects: text, empty, out of range, JSON true, an
+# object, and two that Python's float() would accept.
 BAD_VALUES = {
     "rs_rating": "n/a",
     "stage": "",
     "resilience_score": "1e400",
     "ibd_group_rank": True,
     "avg_dollar_volume": {"usd": 1},
+    "eps_growth_qq": "1_000",
+    "perf_week": "\uff11\uff12",  # fullwidth "12"
 }
 
 

@@ -201,6 +201,9 @@ def _hot_number(value):
     with NULL where that cast would fail the whole query or overflow."""
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         return None
+    # float() also reads digit separators and non-ASCII digits; the cast doesn't.
+    if isinstance(value, str) and ("_" in value or not value.isascii()):
+        return None
     try:
         number = float(value)
     except (ValueError, OverflowError):
@@ -210,6 +213,38 @@ def _hot_number(value):
     if not math.isfinite(number) and any(char.isdigit() for char in str(value)):
         return None
     return number
+
+
+# Details keys behind CAST(<details> ->> key AS FLOAT) expression indexes
+# (20260617_0021, 20260821_0028, 20260925_0057, 20261011_0064). PostgreSQL
+# casts each one on every write, so a value the cast rejects fails the INSERT.
+INDEXED_NUMERIC_FIELDS = (
+    "rs_rating",
+    "minervini_score",
+    "canslim_score",
+    "stage",
+    "eps_growth_qq",
+    "volume_breakthrough_score",
+    "ipo_score",
+    "perf_week",
+    "price_change_1d",
+    "avg_dollar_volume",
+    "ibd_group_rank",
+    "resilience_score",
+)
+
+
+def castable_details(details):
+    """``details`` with each indexed numeric value the float cast rejects set
+    to None, so the row writes and the field reads as missing."""
+    if not isinstance(details, dict):
+        return details
+    rejected = [
+        field
+        for field in INDEXED_NUMERIC_FIELDS
+        if details.get(field) is not None and _hot_number(details[field]) is None
+    ]
+    return {**details, **dict.fromkeys(rejected)} if rejected else details
 
 
 def derived_details_columns(details) -> dict:
@@ -230,6 +265,7 @@ def derived_details_columns(details) -> dict:
 @event.listens_for(StockFeatureDaily, "before_update")
 def _store_table_details(_mapper, _connection, target) -> None:
     if inspect(target).attrs.details_json.history.has_changes():
+        target.details_json = castable_details(target.details_json)
         for column, value in derived_details_columns(target.details_json).items():
             setattr(target, column, value)
         # Without a setup payload the copy is the details object itself, so

@@ -35,6 +35,7 @@ from app.domain.common.query import (
 from app.domain.feature_store.models import FeatureRowWrite
 from app.domain.scanning.filter_expression_model import FilterExpression, QuerySpec
 from app.infra.db.models.feature_store import (
+    INDEXED_NUMERIC_FIELDS,
     HOT_NUMERIC_FIELDS,
     HOT_TEXT_FIELDS,
     FeatureRun,
@@ -525,3 +526,30 @@ def test_migration_adds_exactly_the_model_hot_columns():
     )
     migration.upgrade()
     assert executed and not [sql for sql in executed if "DROP INDEX" in sql], executed
+
+
+def test_indexed_numeric_fields_cover_every_float_cast_index():
+    """castable_details guards only the keys it lists; a key indexed with a
+    float cast but missing here could fail a snapshot write again (#624)."""
+    versions = Path(__file__).parents[2] / "alembic/versions"
+
+    def load(stem):
+        spec = importlib.util.spec_from_file_location(f"_m_{stem}", versions / f"{stem}.py")
+        migration = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(migration)
+        return migration
+
+    indexed = {
+        "20260617_0021_add_feature_store_preset_filter_indexes": lambda m: m._FIELDS,
+        "20260821_0028_seed_correction_survivors_preset": lambda m: ["resilience_score"],
+        "20260925_0057_add_avg_dollar_volume_filter_indexes": lambda m: m._FIELDS,
+        "20261011_0064_feature_table_details": lambda m: m._NUMERIC_FIELDS,
+    }
+    with_float_cast = {
+        path.stem for path in versions.glob("*.py") if "AS FLOAT" in path.read_text()
+    }
+
+    assert with_float_cast == set(indexed)
+    assert {
+        field for stem, fields in indexed.items() for field in fields(load(stem))
+    } == set(INDEXED_NUMERIC_FIELDS)

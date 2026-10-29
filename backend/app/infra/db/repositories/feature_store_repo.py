@@ -33,6 +33,7 @@ from app.infra.db.models.feature_store import (
     FeatureRunPointer,
     FeatureRunUniverseSymbol,
     StockFeatureDaily,
+    castable_details,
     derived_details_columns,
 )
 from app.infra.db.portability import dialect_name, is_postgres, json_text
@@ -260,7 +261,7 @@ def _upsert_stmt(session: Session, values: list[dict[str, Any]]):
 
 
 def _snapshot_row_values(run_id: int, row: FeatureRowWrite) -> dict[str, Any]:
-    details = convert_numpy_types(row.details) or {}
+    details = castable_details(convert_numpy_types(row.details) or {})
     return {
         "run_id": run_id,
         "symbol": row.symbol,
