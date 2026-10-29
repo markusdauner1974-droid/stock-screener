@@ -120,16 +120,23 @@ def test_orm_write_of_a_non_numeric_indexed_detail_stores_it_as_missing(
 ):
     run = _run(db_session)
     # The Core path drops NaN via convert_numpy_types; JSONB rejects a bare NaN.
-    details = {**BAD_VALUES, "canslim_score": float("nan"), "beta": float("inf")}
+    details = {
+        **BAD_VALUES,
+        "rs_rating": 90,  # valid first, so the update must clear the typed column
+        "canslim_score": float("nan"),
+        "beta": float("inf"),
+    }
     row = StockFeatureDaily(
         run_id=run.id, symbol="BAD", as_of_date=AS_OF, details_json=details
     )
     db_session.add(row)
     db_session.flush()
+    assert row.rs_rating == 90
 
     row.details_json = {**row.details_json, "rs_rating": "pending"}
     db_session.flush()
 
     db_session.refresh(row)
+    assert row.rs_rating is None
     assert {key: row.details_json[key] for key in details} == dict.fromkeys(details)
     assert _rs_rating_above_zero(db_session, run.id) == []
