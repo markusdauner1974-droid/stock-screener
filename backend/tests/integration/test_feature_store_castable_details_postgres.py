@@ -38,6 +38,7 @@ BAD_VALUES = {
     "avg_dollar_volume": {"usd": 1},
     "eps_growth_qq": "1_000",
     "perf_week": "\uff11\uff12",  # fullwidth "12"
+    "price_change_1d": "1e-400",  # underflows: float() reads 0.0, the cast errors
 }
 
 
@@ -118,8 +119,10 @@ def test_orm_write_of_a_non_numeric_indexed_detail_stores_it_as_missing(
     db_session, float_cast_indexes
 ):
     run = _run(db_session)
+    # The Core path drops NaN via convert_numpy_types; JSONB rejects a bare NaN.
+    details = {**BAD_VALUES, "canslim_score": float("nan"), "beta": float("inf")}
     row = StockFeatureDaily(
-        run_id=run.id, symbol="BAD", as_of_date=AS_OF, details_json=dict(BAD_VALUES)
+        run_id=run.id, symbol="BAD", as_of_date=AS_OF, details_json=details
     )
     db_session.add(row)
     db_session.flush()
@@ -128,5 +131,5 @@ def test_orm_write_of_a_non_numeric_indexed_detail_stores_it_as_missing(
     db_session.flush()
 
     db_session.refresh(row)
-    assert {key: row.details_json[key] for key in BAD_VALUES} == dict.fromkeys(BAD_VALUES)
+    assert {key: row.details_json[key] for key in details} == dict.fromkeys(details)
     assert _rs_rating_above_zero(db_session, run.id) == []
