@@ -24,6 +24,7 @@ from sqlalchemy.orm import deferred, relationship
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.database import Base
+from app.infra.serialization import convert_numpy_types
 
 
 class FeatureRun(Base):
@@ -208,10 +209,15 @@ def _hot_number(value):
         number = float(value)
     except (ValueError, OverflowError):
         return None
-    # float() turns an out-of-range string ("1e400") into inf where the cast
-    # fails; only the digit-free NaN/Infinity literals are non-finite there.
-    if not math.isfinite(number) and any(char.isdigit() for char in str(value)):
-        return None
+    if isinstance(value, str):
+        # float() turns an out-of-range string into inf ("1e400") or 0.0
+        # ("1e-400") where the cast fails; only the digit-free NaN/Infinity
+        # literals are non-finite there, and only a zero mantissa reads as 0.
+        if not math.isfinite(number) and any(char.isdigit() for char in value):
+            return None
+        mantissa = value.lower().partition("e")[0]
+        if number == 0 and any(char in "123456789" for char in mantissa):
+            return None
     return number
 
 
@@ -265,7 +271,8 @@ def derived_details_columns(details) -> dict:
 @event.listens_for(StockFeatureDaily, "before_update")
 def _store_table_details(_mapper, _connection, target) -> None:
     if inspect(target).attrs.details_json.history.has_changes():
-        target.details_json = castable_details(target.details_json)
+        # As the Core upsert does: JSONB rejects the NaN/Infinity tokens.
+        target.details_json = castable_details(convert_numpy_types(target.details_json))
         for column, value in derived_details_columns(target.details_json).items():
             setattr(target, column, value)
         # Without a setup payload the copy is the details object itself, so
