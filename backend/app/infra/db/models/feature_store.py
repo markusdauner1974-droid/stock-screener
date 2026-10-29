@@ -24,6 +24,7 @@ from sqlalchemy.orm import deferred, relationship
 from sqlalchemy.orm.attributes import flag_modified
 
 from app.database import Base
+from app.infra.serialization import convert_numpy_types
 
 
 class FeatureRun(Base):
@@ -201,15 +202,55 @@ def _hot_number(value):
     with NULL where that cast would fail the whole query or overflow."""
     if isinstance(value, bool) or not isinstance(value, (int, float, str)):
         return None
+    # float() also reads digit separators and non-ASCII digits; the cast doesn't.
+    if isinstance(value, str) and ("_" in value or not value.isascii()):
+        return None
     try:
         number = float(value)
     except (ValueError, OverflowError):
         return None
-    # float() turns an out-of-range string ("1e400") into inf where the cast
-    # fails; only the digit-free NaN/Infinity literals are non-finite there.
-    if not math.isfinite(number) and any(char.isdigit() for char in str(value)):
-        return None
+    if isinstance(value, str):
+        # float() turns an out-of-range string into inf ("1e400") or 0.0
+        # ("1e-400") where the cast fails; only the digit-free NaN/Infinity
+        # literals are non-finite there, and only a zero mantissa reads as 0.
+        if not math.isfinite(number) and any(char.isdigit() for char in value):
+            return None
+        mantissa = value.lower().partition("e")[0]
+        if number == 0 and any(char in "123456789" for char in mantissa):
+            return None
     return number
+
+
+# Details keys behind CAST(<details> ->> key AS FLOAT) expression indexes
+# (20260617_0021, 20260821_0028, 20260925_0057, 20261011_0064). PostgreSQL
+# casts each one on every write, so a value the cast rejects fails the INSERT.
+INDEXED_NUMERIC_FIELDS = (
+    "rs_rating",
+    "minervini_score",
+    "canslim_score",
+    "stage",
+    "eps_growth_qq",
+    "volume_breakthrough_score",
+    "ipo_score",
+    "perf_week",
+    "price_change_1d",
+    "avg_dollar_volume",
+    "ibd_group_rank",
+    "resilience_score",
+)
+
+
+def castable_details(details):
+    """``details`` with each indexed numeric value the float cast rejects set
+    to None, so the row writes and the field reads as missing."""
+    if not isinstance(details, dict):
+        return details
+    rejected = [
+        field
+        for field in INDEXED_NUMERIC_FIELDS
+        if details.get(field) is not None and _hot_number(details[field]) is None
+    ]
+    return {**details, **dict.fromkeys(rejected)} if rejected else details
 
 
 def derived_details_columns(details) -> dict:
@@ -230,6 +271,8 @@ def derived_details_columns(details) -> dict:
 @event.listens_for(StockFeatureDaily, "before_update")
 def _store_table_details(_mapper, _connection, target) -> None:
     if inspect(target).attrs.details_json.history.has_changes():
+        # As the Core upsert does: JSONB rejects the NaN/Infinity tokens.
+        target.details_json = castable_details(convert_numpy_types(target.details_json))
         for column, value in derived_details_columns(target.details_json).items():
             setattr(target, column, value)
         # Without a setup payload the copy is the details object itself, so
