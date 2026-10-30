@@ -243,3 +243,36 @@ def test_run_orphaned_scan_cleanup_deletes_snapshot_rows_of_missing_scans(cleanu
     assert _values(cleanup_session_factory, Scan.scan_id) == ["live-scan"]
     assert result["deleted_scans"] == 0
     assert result["deleted_snapshot_variants"] == 1
+
+
+def test_run_orphaned_scan_cleanup_second_run_changes_nothing(cleanup_session_factory):
+    now_utc = datetime(2026, 4, 16, 12, 0, 0)
+    session = cleanup_session_factory()
+    try:
+        session.add(UserWatchlist(id=7, name="Kept"))
+        _add_scan(session, scan_id="cancelled-scan", status="cancelled", started_at=now_utc - timedelta(hours=3))
+        for scan_id, universe_key in {"kept-us": "watchlist:7:US", "orphan-us": "watchlist:9:US"}.items():
+            _add_scan(
+                session,
+                scan_id=scan_id,
+                status="completed",
+                started_at=now_utc - timedelta(days=1),
+                universe_key=universe_key,
+                trigger_source=SCAN_TRIGGER_SOURCE_WATCHLIST,
+            )
+        variants = ["scan:cancelled-scan", "scan:kept-us", "scan:orphan-us", "scan:gone-scan", "latest:US"]
+        for n, variant_key in enumerate(variants, start=1):
+            _add_snapshot(session, variant_key=variant_key, snapshot_id=n)
+        session.commit()
+    finally:
+        session.close()
+
+    first = run_orphaned_scan_cleanup(session_factory=cleanup_session_factory, now_utc=now_utc)
+    second = run_orphaned_scan_cleanup(session_factory=cleanup_session_factory, now_utc=now_utc)
+
+    counts = ("deleted_scans", "deleted_results", "deleted_snapshot_variants")
+    assert tuple(first[key] for key in counts) == (2, 2, 1)
+    assert tuple(second[key] for key in counts) == (0, 0, 0)
+    assert _values(cleanup_session_factory, Scan.scan_id) == ["kept-us"]
+    assert _values(cleanup_session_factory, UIViewSnapshotPointer.variant_key) == ["latest:US", "scan:kept-us"]
+    assert _values(cleanup_session_factory, UIViewSnapshot.variant_key) == ["latest:US", "scan:kept-us"]
