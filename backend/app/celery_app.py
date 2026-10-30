@@ -656,7 +656,9 @@ def _build_cache_warmup_beat_schedule(enabled_markets: list[str]) -> dict:
             'options': {'queue': 'exposure_research', 'expires': 3600},
         },
 
-        # Weekly cleanup of orphaned scans (cancelled, stale running/queued).
+        # Weekly cleanup of orphaned scans (cancelled, stale running/queued,
+        # daily scans of deleted watchlists) and of `scan:<id>` snapshot rows
+        # whose scan is gone (#684).
         # Runs Sunday at 1:45 AM ET, before weekly-full-refresh at 2:00 AM.
         'weekly-orphaned-scan-cleanup': {
             'task': 'app.tasks.cache_tasks.cleanup_orphaned_scans',
