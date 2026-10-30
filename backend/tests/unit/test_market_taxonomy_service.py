@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from app.services import market_taxonomy_service as taxonomy_module
@@ -301,6 +303,47 @@ def test_a_csv_that_appears_after_the_first_lookup_is_picked_up(tmp_path, monkey
     entry = service.get("AAPL", market="US")
     assert entry is not None
     assert entry.industry_group == "Computer-Hardware/Peripherals"
+
+
+def test_the_retry_deadline_holds_before_reloading(tmp_path, monkeypatch):
+    """The retry must respect its interval, not reload on the next lookup."""
+    clock = {"now": 1_000.0}
+    monkeypatch.setattr(taxonomy_module, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
+
+    service = MarketTaxonomyService(data_dir=tmp_path)
+    assert service.get("AAPL", market="US") is None
+
+    _write_csv(
+        tmp_path / "IBD_industry_group.csv",
+        "AAPL,Computer-Hardware/Peripherals\n",
+    )
+
+    clock["now"] += taxonomy_module._MISSING_FILE_RETRY_SECONDS - 1
+    assert service.get("AAPL", market="US") is None
+
+    clock["now"] += 2
+    entry = service.get("AAPL", market="US")
+    assert entry is not None
+    assert entry.industry_group == "Computer-Hardware/Peripherals"
+
+
+def test_a_non_us_csv_that_appears_after_the_first_lookup_is_picked_up(tmp_path, monkeypatch):
+    """Every guarded loader records its own path, not just the US one."""
+    monkeypatch.setattr(taxonomy_module, "_MISSING_FILE_RETRY_SECONDS", 0.0)
+    service = MarketTaxonomyService(data_dir=tmp_path)
+    assert service.get("AAPL", market="US") is None
+    assert service.entry_count_for_market("HK") == 0
+
+    _write_csv(
+        tmp_path / "hk-deep.csv",
+        (
+            "Symbol,HSICS Sector,EM Industry (EN),Theme (EN)\n"
+            "700,Information Technology,Internet Services,AI Infrastructure\n"
+        ),
+    )
+
+    service.get("AAPL", market="US")
+    assert service.entry_count_for_market("HK") > 0
 
 
 def test_an_unchanged_data_dir_is_not_reloaded(tmp_path, monkeypatch, caplog):
