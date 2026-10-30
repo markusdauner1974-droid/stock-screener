@@ -199,11 +199,6 @@ class ScanResultRepository(abc.ABC):
         ...
 
     @abc.abstractmethod
-    def delete_by_scan_id(self, scan_id: str) -> int:
-        """Delete all results for a scan. Returns the number of rows deleted."""
-        ...
-
-    @abc.abstractmethod
     def get_filter_options(self, scan_id: str) -> FilterOptions:
         """Return distinct categorical values for filtering a scan's results.
 

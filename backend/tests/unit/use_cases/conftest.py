@@ -222,15 +222,6 @@ class FakeScanResultRepository(ScanResultRepository):
             self._persisted_results.append((scan_id, symbol, result))
         return len(results)
 
-    def delete_by_scan_id(self, scan_id: str) -> int:
-        before = len(self._persisted_results)
-        self._persisted_results = [
-            (sid, sym, res)
-            for sid, sym, res in self._persisted_results
-            if sid != scan_id
-        ]
-        return before - len(self._persisted_results)
-
     def count_by_scan_id(self, scan_id: str) -> int:
         return sum(1 for sid, _, _ in self._persisted_results if sid == scan_id)
 

@@ -330,7 +330,6 @@ def _create_scan(scan_id: str, market: str, symbols: list[str], screeners: list[
 
 def _delete_scan(scan_id: str) -> None:
     with SqlUnitOfWork(SessionLocal) as uow:
-        uow.scan_results.delete_by_scan_id(scan_id)
         uow.scans.delete(scan_id)
         uow.commit()
 
