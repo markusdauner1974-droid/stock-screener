@@ -143,13 +143,17 @@ def run_orphaned_scan_cleanup(
 ):
     """Delete cancelled and stale unfinished scans synchronously.
 
+    Every delete goes through ``delete_scans`` so a scan's results and its own
+    UI snapshot rows leave with it (#684).
+
     This is the operator-safe implementation used both by the Celery task and
     by the manual maintenance script. It performs the cleanup itself rather
     than only queueing work for a background worker.
     """
     from datetime import timedelta
 
-    from ..models.scan_result import Scan, ScanResult
+    from ..models.scan_result import Scan
+    from ..services.scan_execution import delete_scans
 
     if now_utc is None:
         now_utc = datetime.now(timezone.utc)
@@ -181,12 +185,7 @@ def run_orphaned_scan_cleanup(
         logger.info("[1/2] Deleting cancelled scans...")
         cancelled_scan_ids = _locked_scan_ids(Scan.status == "cancelled")
         if cancelled_scan_ids:
-            cancelled_results = db.query(ScanResult).filter(
-                ScanResult.scan_id.in_(cancelled_scan_ids)
-            ).delete(synchronize_session=False)
-            cancelled_scans = db.query(Scan).filter(
-                Scan.scan_id.in_(cancelled_scan_ids)
-            ).delete(synchronize_session=False)
+            cancelled_scans, cancelled_results = delete_scans(db, cancelled_scan_ids)
             total_deleted_scans += cancelled_scans
             total_deleted_results += cancelled_results
             logger.info(
@@ -204,12 +203,7 @@ def run_orphaned_scan_cleanup(
             Scan.started_at < stale_cutoff,
         )
         if stale_scan_ids:
-            stale_results = db.query(ScanResult).filter(
-                ScanResult.scan_id.in_(stale_scan_ids)
-            ).delete(synchronize_session=False)
-            stale_scans = db.query(Scan).filter(
-                Scan.scan_id.in_(stale_scan_ids),
-            ).delete(synchronize_session=False)
+            stale_scans, stale_results = delete_scans(db, stale_scan_ids)
             total_deleted_scans += stale_scans
             total_deleted_results += stale_results
             logger.info(
