@@ -10,6 +10,9 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.models.scan_result import Scan, ScanResult
+from app.models.ui_view_snapshot import UIViewSnapshot, UIViewSnapshotPointer
+
+SCAN_TABLES = [Scan.__table__, ScanResult.__table__, UIViewSnapshot.__table__, UIViewSnapshotPointer.__table__]
 
 
 def test_run_post_scan_pipeline_uses_session_factory_and_closes(monkeypatch):
@@ -102,7 +105,7 @@ def test_cleanup_old_scans_uses_bulk_delete_for_scan_rows(monkeypatch):
     import app.services.scan_execution as module
 
     engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine, tables=[Scan.__table__, ScanResult.__table__])
+    Base.metadata.create_all(engine, tables=SCAN_TABLES)
     SessionLocal = sessionmaker(bind=engine)
     db = SessionLocal()
     try:
@@ -185,7 +188,7 @@ def test_cleanup_old_scans_keeps_the_newest_rows_when_completed_at_ties():
     import app.services.scan_execution as module
 
     engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine, tables=[Scan.__table__, ScanResult.__table__])
+    Base.metadata.create_all(engine, tables=SCAN_TABLES)
     db = sessionmaker(bind=engine)()
     try:
         completed_at = datetime(2026, 10, 23, 22)
@@ -204,13 +207,9 @@ def test_cleanup_old_scans_keeps_the_newest_rows_when_completed_at_ties():
 
 def test_cleanup_old_scans_deletes_the_pruned_scans_snapshot_rows():
     import app.services.scan_execution as module
-    from app.models.ui_view_snapshot import UIViewSnapshot, UIViewSnapshotPointer
 
     engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(
-        engine,
-        tables=[Scan.__table__, ScanResult.__table__, UIViewSnapshot.__table__, UIViewSnapshotPointer.__table__],
-    )
+    Base.metadata.create_all(engine, tables=SCAN_TABLES)
     db = sessionmaker(bind=engine)()
     try:
         for n in range(1, 5):
@@ -308,7 +307,7 @@ def test_bootstrap_publish_prunes_an_instant_scans_history_but_keeps_the_auto_sc
     engine = create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
     )
-    Base.metadata.create_all(engine, tables=[Scan.__table__, ScanResult.__table__])
+    Base.metadata.create_all(engine, tables=SCAN_TABLES)
     session_factory = sessionmaker(bind=engine)
     published = []
     monkeypatch.setattr(scan_tasks, "SessionLocal", session_factory)

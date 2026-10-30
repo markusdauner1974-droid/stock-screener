@@ -35,7 +35,12 @@ from app.models.theme import (
     ThemeMetrics,
     ThemePipelineRun,
 )
-from app.models.ui_view_snapshot import UIViewSnapshot, UIViewSnapshotPointer
+from app.models.ui_view_snapshot import (
+    SCAN_VIEW_KEY,
+    UIViewSnapshot,
+    UIViewSnapshotPointer,
+    scan_variant_key,
+)
 from app.schemas.groups import GroupRankingsResponse, GroupRankResponse, MoversResponse
 from app.schemas.scanning import (
     FilterOptionsResponse,
@@ -85,7 +90,6 @@ from app.wiring.bootstrap import get_stock_universe_service
 logger = logging.getLogger(__name__)
 
 
-SCAN_VIEW_KEY = "scan_bootstrap"
 BREADTH_VIEW_KEY = "breadth_bootstrap"
 GROUPS_VIEW_KEY = "groups_bootstrap"
 THEMES_VIEW_KEY = "themes_bootstrap"
@@ -133,7 +137,7 @@ class UISnapshotService:
     ) -> SnapshotResult | None:
         """Explicit scan variant, else the latest variant for ``market`` (all markets if None)."""
         self._ensure_schema()
-        variant_key = self._scan_variant_key(scan_id, market)
+        variant_key = scan_variant_key(scan_id, market)
         return self._run_with_storage_recovery(
             lambda db: self._get_snapshot(
                 db=db,
@@ -170,7 +174,7 @@ class UISnapshotService:
             explicit = self._publish(
                 db=db,
                 view_key=SCAN_VIEW_KEY,
-                variant_key=self._scan_variant_key(scan_id),
+                variant_key=scan_variant_key(scan_id),
                 source_revision=scan_id,
                 payload=payload,
                 retry_on_conflict=True,  # cancel request and cancelled worker can race
@@ -193,7 +197,7 @@ class UISnapshotService:
                     extra={
                         "action": "publish_scan_bootstrap",
                         "view_key": SCAN_VIEW_KEY,
-                        "variant_key": self._scan_variant_key(None, market),
+                        "variant_key": scan_variant_key(None, market),
                         "source_revision": latest_scan_id,
                     },
                 )
@@ -224,7 +228,7 @@ class UISnapshotService:
         return self._publish(
             db=db,
             view_key=SCAN_VIEW_KEY,
-            variant_key=self._scan_variant_key(None, market),
+            variant_key=scan_variant_key(None, market),
             source_revision=source_revision,
             payload=payload,
             still_current=lambda locked_db: (
@@ -1111,11 +1115,6 @@ class UISnapshotService:
         if themes_without_metrics > 0:
             logger.info("UI snapshot builder backfilling %s theme metrics for pipeline=%s", themes_without_metrics, pipeline)
             ThemeDiscoveryService(db, pipeline=pipeline).update_all_theme_metrics()
-
-    def _scan_variant_key(self, scan_id: str | None, market: str | None = None) -> str:
-        if scan_id:
-            return f"scan:{scan_id}"
-        return f"latest:{market}" if market else "latest"
 
     def _themes_variant_key(self, pipeline: str, theme_view: str) -> str:
         return f"{pipeline}:{theme_view}"

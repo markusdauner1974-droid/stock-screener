@@ -6,6 +6,15 @@ from sqlalchemy.sql import func
 
 from ..database import Base
 
+SCAN_VIEW_KEY = "scan_bootstrap"
+
+
+def scan_variant_key(scan_id: str | None, market: str | None = None) -> str:
+    """Variant of one scan's own bootstrap snapshot, else of a market's latest."""
+    if scan_id:
+        return f"scan:{scan_id}"
+    return f"latest:{market}" if market else "latest"
+
 
 class UIViewSnapshot(Base):
     """Persisted snapshot payload for a single page/bootstrap variant."""

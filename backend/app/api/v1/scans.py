@@ -432,7 +432,7 @@ def delete_scan(
     scan_id: str,
     uow: Any = Depends(get_uow),
 ):
-    """Delete a scan and all its results."""
+    """Delete a scan with its results and published UI snapshot."""
     try:
         with uow:
             scan = uow.scans.get_by_scan_id(scan_id)
@@ -445,7 +445,6 @@ def delete_scan(
                     detail=f"Cannot delete scan with status '{scan.status}'. Cancel it first.",
                 )
 
-            uow.scan_results.delete_by_scan_id(scan_id)
             uow.scans.delete(scan_id)
             uow.commit()
 

@@ -102,7 +102,10 @@ class ScanRepository(abc.ABC):
 
     @abc.abstractmethod
     def delete(self, scan_id: str) -> bool:
-        """Delete a scan by scan_id. Returns True if deleted, False if not found."""
+        """Delete a scan with its results and published UI snapshot.
+
+        Returns True if deleted, False if not found.
+        """
         ...
 
 
