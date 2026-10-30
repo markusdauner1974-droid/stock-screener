@@ -202,6 +202,39 @@ def test_cleanup_old_scans_keeps_the_newest_rows_when_completed_at_ties():
         engine.dispose()
 
 
+def test_cleanup_old_scans_deletes_the_pruned_scans_snapshot_rows():
+    import app.services.scan_execution as module
+    from app.models.ui_view_snapshot import UIViewSnapshot, UIViewSnapshotPointer
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(
+        engine,
+        tables=[Scan.__table__, ScanResult.__table__, UIViewSnapshot.__table__, UIViewSnapshotPointer.__table__],
+    )
+    db = sessionmaker(bind=engine)()
+    try:
+        for n in range(1, 5):
+            db.add(Scan(scan_id=f"scan-{n}", universe_key="all", status="completed", completed_at=datetime(2026, 10, n)))
+            db.add(ScanResult(scan_id=f"scan-{n}", symbol="A"))
+            db.add(
+                UIViewSnapshot(
+                    id=n, view_key="scan_bootstrap", variant_key=f"scan:scan-{n}", source_revision=f"scan-{n}", payload_json={}
+                )
+            )
+            db.add(UIViewSnapshotPointer(view_key="scan_bootstrap", variant_key=f"scan:scan-{n}", snapshot_id=n))
+        db.commit()
+
+        module.cleanup_old_scans(db, "all", keep_count=3)
+
+        kept = ["scan:scan-2", "scan:scan-3", "scan:scan-4"]
+        assert sorted(v for (v,) in db.query(UIViewSnapshot.variant_key)) == kept
+        assert sorted(v for (v,) in db.query(UIViewSnapshotPointer.variant_key)) == kept
+        assert sorted(s for (s,) in db.query(ScanResult.scan_id)) == ["scan-2", "scan-3", "scan-4"]
+    finally:
+        db.close()
+        engine.dispose()
+
+
 def test_manual_scans_never_prune_the_markets_newest_auto_scan(monkeypatch):
     """Three computed manual US scans must not delete the nightly auto scan (#682)."""
     import app.services.scan_execution as module
