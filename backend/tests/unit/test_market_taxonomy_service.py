@@ -249,24 +249,27 @@ def test_entry_count_for_market_counts_loaded_rows_before_symbol_merge(tmp_path)
     assert service.entry_count_for_market("KR") == 2
 
 
-def test_market_taxonomy_service_raises_load_error_for_missing_required_csv(tmp_path):
-    _write_csv(tmp_path / "IBD_industry_group.csv", "AAPL,Computer-Hardware/Peripherals\n")
-    _write_csv(
-        tmp_path / "india-deep.csv",
-        "Symbol,Exchange,Industry (Sector),Subgroup (Theme),Sub-industry\n",
-    )
-    _write_csv(
-        tmp_path / "kabutan_themes_en.csv",
-        "Symbol,TSE 33-Sector,TSE 17-Sector,Theme (EN)\n",
-    )
-    _write_csv(tmp_path / "taiwan-deep.csv", "Symbol,Market,Industry (EN)\n")
-    _write_csv(tmp_path / "korea-deep.csv", "Symbol,Market,Sector,Industry Group,Industry,Sub-Industry\n")
-    _write_csv(tmp_path / "china-deep.csv", "Symbol,Exchange,Sector,Industry Group,Industry,Sub-Industry\n")
+def test_refresh_tolerates_a_data_dir_without_any_csv(tmp_path, caplog):
+    """A missing CSV skips its market instead of failing the whole taxonomy.
 
+    Before the guards, the first absent file raised FileNotFoundError, which
+    refresh() wrapped into TaxonomyLoadError and marked every market unloaded.
+    """
     service = MarketTaxonomyService(data_dir=tmp_path)
 
-    with pytest.raises(TaxonomyLoadError, match="hk-deep.csv"):
-        service.groups_for_market("HK")
+    with caplog.at_level("INFO", logger="app.services.market_taxonomy_service"):
+        assert service.groups_for_market("US") == []
+        assert service.entry_count_for_market("HK") == 0
+
+    for market in ("US", "HK", "JP", "TW", "KR", "CN"):
+        assert service._loaded_row_counts[market] == 0
+    messages = [
+        record.message
+        for record in caplog.records
+        if record.name == "app.services.market_taxonomy_service"
+    ]
+    for market in ("US", "HK", "JP", "TW", "KR", "CN"):
+        assert any(f"{market} taxonomy CSV not found" in message for message in messages)
 
 
 def test_market_taxonomy_service_raises_load_error_for_malformed_csv(tmp_path):
@@ -291,8 +294,8 @@ def test_market_taxonomy_service_raises_load_error_for_malformed_csv(tmp_path):
 
 
 def _write_minimum_required_csvs(tmp_path) -> None:
-    """Write the seven CSVs required by the pre-CA loaders so a test can
-    isolate CA-specific behaviour without tripping required-CSV errors."""
+    """Write the seven non-CA CSVs so a test isolates CA-specific behaviour
+    from the missing-file log lines."""
     _write_csv(tmp_path / "IBD_industry_group.csv", "AAPL,Computer-Hardware/Peripherals\n")
     _write_csv(tmp_path / "hk-deep.csv", "Symbol,HSICS Sector,EM Industry (EN),Theme (EN)\n")
     _write_csv(

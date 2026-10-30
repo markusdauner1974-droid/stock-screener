@@ -309,6 +309,13 @@ class MarketTaxonomyService:
 
     def _load_us(self) -> None:
         path = self._data_dir / "IBD_industry_group.csv"
+        if not path.exists():
+            logger.info(
+                "US taxonomy CSV not found at %s; skipping. "
+                "Symbol-level classification will fall back to universe fields.",
+                path,
+            )
+            return
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.reader(handle)
             for row in reader:
@@ -329,6 +336,13 @@ class MarketTaxonomyService:
 
     def _load_hk(self) -> None:
         path = self._data_dir / "hk-deep.csv"
+        if not path.exists():
+            logger.info(
+                "HK taxonomy CSV not found at %s; skipping. "
+                "Symbol-level classification will fall back to universe fields.",
+                path,
+            )
+            return
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
             self._require_columns(
@@ -378,6 +392,13 @@ class MarketTaxonomyService:
 
     def _load_jp(self) -> None:
         path = self._data_dir / "kabutan_themes_en.csv"
+        if not path.exists():
+            logger.info(
+                "JP taxonomy CSV not found at %s; skipping. "
+                "Symbol-level classification will fall back to universe fields.",
+                path,
+            )
+            return
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
             self._require_columns(
@@ -400,6 +421,13 @@ class MarketTaxonomyService:
 
     def _load_tw(self) -> None:
         path = self._data_dir / "taiwan-deep.csv"
+        if not path.exists():
+            logger.info(
+                "TW taxonomy CSV not found at %s; skipping. "
+                "Symbol-level classification will fall back to universe fields.",
+                path,
+            )
+            return
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
             self._require_columns(path, reader, ("Symbol", "Market", "Industry (EN)"))
@@ -421,6 +449,13 @@ class MarketTaxonomyService:
 
     def _load_kr(self) -> None:
         path = self._data_dir / "korea-deep.csv"
+        if not path.exists():
+            logger.info(
+                "KR taxonomy CSV not found at %s; skipping. "
+                "Symbol-level classification will fall back to universe fields.",
+                path,
+            )
+            return
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
             self._require_columns(
@@ -447,6 +482,13 @@ class MarketTaxonomyService:
 
     def _load_cn(self) -> None:
         path = self._data_dir / "china-deep.csv"
+        if not path.exists():
+            logger.info(
+                "CN taxonomy CSV not found at %s; skipping. "
+                "Symbol-level classification will fall back to universe fields.",
+                path,
+            )
+            return
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
             self._require_columns(
