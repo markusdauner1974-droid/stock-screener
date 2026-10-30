@@ -8,7 +8,13 @@ market's refresh can't starve another market of provider tokens. Pairs with
 naturally — this policy module owns *which key* and *what interval* to use.
 
 Defaults: per-market intervals are derived by **universe-weighted split** of
-the global per-provider budget. Operators override per market via env
+the global per-provider budget, except that a task holding the
+``external_fetch_global`` lease gets the whole global interval, since no other
+market fetches meanwhile. ``RedisRateLimiter.wait_for_market`` also paces every
+call on one provider-wide key at the global interval, so the total stays
+within the global budget as long as raw ``wait()`` callers of that key reserve
+at least the global interval. An override can slow a market below the global
+rate but not speed it past it. Operators override per market via env
 settings (``yfinance_rate_limit_hk`` etc.) when 9.3 measurements show the
 auto-computed split is wrong. Universe weights are refreshed weekly by the
 ``refresh_universe_weights`` Celery beat task.
@@ -22,6 +28,7 @@ from typing import Dict, Optional
 
 from ..config import settings
 from ..tasks.market_queues import SHARED_SENTINEL, SUPPORTED_MARKETS, market_suffix, normalize_market
+from ..tasks.lease_renewal import holds_external_fetch_lease
 
 logger = logging.getLogger(__name__)
 
@@ -247,8 +254,9 @@ class RateBudgetPolicy:
 
         Resolution order:
         1. Per-market env override (``settings.yfinance_rate_limit_hk``)
-        2. Universe-weighted division of the global setting
-        3. Built-in default for the provider
+        2. The whole global interval while this task holds external_fetch_global
+        3. Universe-weighted division of the global setting
+        4. Built-in default for the provider
 
         For ``market=None`` (shared scope), returns the global interval.
         """
@@ -260,6 +268,11 @@ class RateBudgetPolicy:
         override = self._per_market_override(provider, normalized)
         if override is not None and override > 0:
             return 1.0 / override  # override is given as req/sec
+
+        # The external_fetch_global lease lets one market fetch at a time, so
+        # its holder is the only spender of the provider's budget.
+        if holds_external_fetch_lease():
+            return global_interval
 
         # Universe-weighted: bigger universe → bigger share → smaller interval
         weights = self._universe_weights()

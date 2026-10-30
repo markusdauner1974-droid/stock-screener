@@ -32,26 +32,31 @@ class TestRedisRateLimiterWithRedis:
         # Track the "next_allowed" per key to simulate Lua script
         state = {}
 
-        def mock_eval(script, num_keys, key, interval_str):
-            interval = float(interval_str)
+        def mock_eval(script, num_keys, *args):
+            keys, intervals = args[:num_keys], [float(v) for v in args[num_keys:-1]]
+            max_wait = float(args[-1])
             now = time.time()
-            next_allowed = state.get(key, 0.0)
-
-            if now >= next_allowed:
-                state[key] = now + interval
-                return b'0'
-            else:
-                wait_time = next_allowed - now
-                state[key] = next_allowed + interval
-                return str(wait_time).encode()
+            gate = max([now, *(state.get(key, 0.0) for key in keys[1:])])
+            if gate > now:
+                return [b'0', str(gate - now).encode()]
+            slot = max(now, state.get(keys[0], 0.0))
+            if slot - now > max_wait:
+                return [b'0', str(slot - now).encode()]
+            for key, interval in zip(keys, intervals):
+                state[key] = slot + interval
+            return [b'1', str(slot - now).encode()]
 
         mock_client.eval = mock_eval
 
         # Patch _get_redis_client to return our mock
         limiter._get_redis_client = lambda: mock_client
         limiter._using_fallback = False
+        self._limiter = limiter
 
         return limiter
+
+    def teardown_method(self):
+        assert self._limiter._using_fallback is False, "fell back to the in-process limiter"
 
     def test_first_call_immediate(self):
         """First call should return immediately (wait ≈ 0)."""
@@ -138,7 +143,7 @@ class TestRedisRateLimiterFallback:
         # Now make Redis available
         mock_client = MagicMock()
         mock_client.ping.return_value = True
-        mock_client.eval.return_value = b'0'
+        mock_client.eval.return_value = [b'1', b'0']
         limiter._get_redis_client = lambda: mock_client
 
         # Next call should recover

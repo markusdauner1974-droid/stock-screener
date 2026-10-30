@@ -24,6 +24,7 @@ from .lease_renewal import (
     LEASE_REDIS_SOCKET_TIMEOUT_SECONDS,
     RENEW_LEASE_LUA,
     LeaseNotHeld,
+    holding_external_fetch_lease,
     keep_leases_alive,
     lease_ttl_seconds,
 )
@@ -556,7 +557,7 @@ def _serialized_data_fetch(task_name: str):
                 ]
                 with keep_leases_alive(renewals) as lease_lost, workload_fence(
                     _market_workload_key(market_value), lease_lost
-                ):
+                ), holding_external_fetch_lease(lease_lost):
                     result = func(*args, **kwargs)
 
                 duration = (datetime.now() - start_time).total_seconds()
