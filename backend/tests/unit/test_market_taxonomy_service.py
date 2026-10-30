@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from app.services import market_taxonomy_service as taxonomy_module
 from app.services.market_taxonomy_service import MarketTaxonomyService, TaxonomyLoadError
 
 
@@ -270,6 +271,48 @@ def test_refresh_tolerates_a_data_dir_without_any_csv(tmp_path, caplog):
     ]
     for market in ("US", "HK", "JP", "TW", "KR", "CN"):
         assert any(f"{market} taxonomy CSV not found" in message for message in messages)
+
+
+def test_a_partial_load_keeps_the_markets_whose_csv_is_present(tmp_path):
+    """A later missing file must not discard what earlier loaders produced."""
+    _write_csv(
+        tmp_path / "IBD_industry_group.csv",
+        "AAPL,Computer-Hardware/Peripherals\n",
+    )
+
+    service = MarketTaxonomyService(data_dir=tmp_path)
+
+    assert service.groups_for_market("US") == ["Computer-Hardware/Peripherals"]
+    assert service.entry_count_for_market("US") == 1
+    assert service.entry_count_for_market("HK") == 0
+
+
+def test_a_csv_that_appears_after_the_first_lookup_is_picked_up(tmp_path, monkeypatch):
+    """A skipped file must not latch the taxonomy for the life of the process."""
+    monkeypatch.setattr(taxonomy_module, "_MISSING_FILE_RETRY_SECONDS", 0.0)
+    service = MarketTaxonomyService(data_dir=tmp_path)
+    assert service.get("AAPL", market="US") is None
+
+    _write_csv(
+        tmp_path / "IBD_industry_group.csv",
+        "AAPL,Computer-Hardware/Peripherals\n",
+    )
+
+    entry = service.get("AAPL", market="US")
+    assert entry is not None
+    assert entry.industry_group == "Computer-Hardware/Peripherals"
+
+
+def test_an_unchanged_data_dir_is_not_reloaded(tmp_path, monkeypatch, caplog):
+    """The retry stays cheap: a stat sweep, not a reload every 5 minutes."""
+    monkeypatch.setattr(taxonomy_module, "_MISSING_FILE_RETRY_SECONDS", 0.0)
+    service = MarketTaxonomyService(data_dir=tmp_path)
+    service.get("AAPL", market="US")
+
+    caplog.clear()
+    with caplog.at_level("INFO", logger="app.services.market_taxonomy_service"):
+        service.get("MSFT", market="US")
+    assert caplog.records == []
 
 
 def test_market_taxonomy_service_raises_load_error_for_malformed_csv(tmp_path):

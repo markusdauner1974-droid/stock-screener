@@ -12,6 +12,7 @@ from __future__ import annotations
 import csv
 import logging
 import re
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -53,6 +54,10 @@ _CA_EXCHANGE_ALIASES = {
 }
 
 _EMPTY_TOKENS = {"", "-", "N/A", "NA", "NAN", "NONE", "NULL"}
+# A skipped file may still arrive later (a mounted data directory is filled
+# after start). Re-check at most this often instead of on every lookup, so a
+# partial load is not latched for the life of the process.
+_MISSING_FILE_RETRY_SECONDS = 300.0
 _LOAD_EXCEPTIONS = (OSError, csv.Error, UnicodeError)
 
 
@@ -82,6 +87,8 @@ class MarketTaxonomyService:
     def __init__(self, *, data_dir: Path | None = None) -> None:
         self._data_dir = data_dir or self._default_data_dir()
         self._loaded = False
+        self._skipped_files: set[Path] = set()
+        self._retry_at = 0.0
         self._entries: dict[str, dict[str, MarketTaxonomyEntry]] = {
             "US": {},
             "HK": {},
@@ -137,6 +144,7 @@ class MarketTaxonomyService:
         return best_candidate
 
     def refresh(self) -> None:
+        self._skipped_files = set()
         self._entries = {"US": {}, "HK": {}, "IN": {}, "JP": {}, "KR": {}, "TW": {}, "CN": {}, "CA": {}, "DE": {}, "SG": {}, "MY": {}}
         self._loaded_row_counts = {"US": 0, "HK": 0, "IN": 0, "JP": 0, "KR": 0, "TW": 0, "CN": 0, "CA": 0, "DE": 0, "SG": 0, "MY": 0}
         try:
@@ -156,6 +164,7 @@ class MarketTaxonomyService:
             raise TaxonomyLoadError(
                 f"Unable to load market taxonomy from {self._data_dir}: {exc}"
             ) from exc
+        self._retry_at = time.monotonic() + _MISSING_FILE_RETRY_SECONDS
         self._loaded = True
 
     def get(
@@ -246,6 +255,15 @@ class MarketTaxonomyService:
     def _ensure_loaded(self) -> None:
         if not self._loaded:
             self.refresh()
+            return
+        if not self._skipped_files or time.monotonic() < self._retry_at:
+            return
+        # Cheap re-check first: only a file that actually appeared is worth a
+        # full reload (and a new round of log lines).
+        if any(path.exists() for path in self._skipped_files):
+            self.refresh()
+        else:
+            self._retry_at = time.monotonic() + _MISSING_FILE_RETRY_SECONDS
 
     @staticmethod
     def _normalize_text(value: object) -> str | None:
@@ -315,6 +333,7 @@ class MarketTaxonomyService:
                 "Symbol-level classification will fall back to universe fields.",
                 path,
             )
+            self._skipped_files.add(path)
             return
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.reader(handle)
@@ -342,6 +361,7 @@ class MarketTaxonomyService:
                 "Symbol-level classification will fall back to universe fields.",
                 path,
             )
+            self._skipped_files.add(path)
             return
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
@@ -398,6 +418,7 @@ class MarketTaxonomyService:
                 "Symbol-level classification will fall back to universe fields.",
                 path,
             )
+            self._skipped_files.add(path)
             return
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
@@ -427,6 +448,7 @@ class MarketTaxonomyService:
                 "Symbol-level classification will fall back to universe fields.",
                 path,
             )
+            self._skipped_files.add(path)
             return
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
@@ -455,6 +477,7 @@ class MarketTaxonomyService:
                 "Symbol-level classification will fall back to universe fields.",
                 path,
             )
+            self._skipped_files.add(path)
             return
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
@@ -488,6 +511,7 @@ class MarketTaxonomyService:
                 "Symbol-level classification will fall back to universe fields.",
                 path,
             )
+            self._skipped_files.add(path)
             return
         with path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
