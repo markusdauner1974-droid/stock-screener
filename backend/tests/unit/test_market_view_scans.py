@@ -15,7 +15,7 @@ from app.infra.db.models.feature_store import FeatureRun
 from app.infra.db.repositories.scan_repo import SqlScanRepository
 from app.infra.db.uow import SqlUnitOfWork
 from app.main import app
-from app.models.scan_result import SCAN_TRIGGER_SOURCE_AUTO, Scan
+from app.models.scan_result import SCAN_TRIGGER_SOURCE_AUTO, SCAN_TRIGGER_SOURCE_WATCHLIST, Scan
 from app.services.bootstrap_readiness_service import BootstrapReadinessService
 from app.services.daily_snapshot_service import latest_completed_scan
 from app.services import server_auth
@@ -119,6 +119,31 @@ def test_newer_watchlist_scans_never_push_the_market_scan_out_of_history(busy_wa
     snapshot = UISnapshotService(busy_watchlists).publish_scan_bootstrap(market="US")
     assert [s["scan_id"] for s in snapshot.payload["recent_scans"]["scans"]] == BUSY_US_HISTORY
     assert snapshot.payload["selected_scan"]["scan_id"] == "us-1"
+
+
+@pytest.fixture
+def busy_daily_watchlists(session_factory):
+    _add_scan(session_factory, "us-1", "market", "US", 1)
+    _add_scan(session_factory, "manual-us", "custom", "US", 2)
+    _add_scan(session_factory, "manual-unscoped", "custom", None, 2, minute=1)
+    for n in range(25):
+        _add_scan(
+            session_factory, f"daily-{n}", "custom", "US", 3, minute=n,
+            trigger_source=SCAN_TRIGGER_SOURCE_WATCHLIST,
+        )
+    return session_factory
+
+
+# The 20 newest daily watchlist scans, then the manual symbol lists, then the market's own scan.
+BUSY_DAILY_US_HISTORY = [f"daily-{n}" for n in range(24, 4, -1)] + ["manual-unscoped", "manual-us", "us-1"]
+
+
+def test_daily_watchlist_scans_never_push_manual_symbol_lists_out_of_history(busy_daily_watchlists):
+    with busy_daily_watchlists() as db:
+        assert [s.scan_id for s in SqlScanRepository(db).list_recent(market="US")] == BUSY_DAILY_US_HISTORY
+
+    snapshot = UISnapshotService(busy_daily_watchlists).publish_scan_bootstrap(market="US")
+    assert [s["scan_id"] for s in snapshot.payload["recent_scans"]["scans"]] == BUSY_DAILY_US_HISTORY
 
 
 @pytest.mark.asyncio
