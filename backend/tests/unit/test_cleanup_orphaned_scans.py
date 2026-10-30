@@ -214,3 +214,32 @@ def test_run_orphaned_scan_cleanup_deletes_daily_scans_of_deleted_watchlists(cle
     assert _values(cleanup_session_factory, Scan.scan_id) == kept
     assert _values(cleanup_session_factory, ScanResult.scan_id) == kept
     assert result["deleted_scans"] == 2
+
+
+def test_run_orphaned_scan_cleanup_deletes_snapshot_rows_of_missing_scans(cleanup_session_factory):
+    now_utc = datetime(2026, 4, 16, 12, 0, 0)
+    session = cleanup_session_factory()
+    try:
+        _add_scan(session, scan_id="live-scan", status="completed", started_at=now_utc - timedelta(hours=5))
+        _add_snapshot(session, variant_key="scan:live-scan", snapshot_id=1)
+        _add_snapshot(session, variant_key="scan:gone-scan", snapshot_id=2)
+        _add_snapshot(session, variant_key="latest:US", snapshot_id=3)
+        _add_snapshot(session, variant_key="latest", snapshot_id=4)
+        _add_snapshot(session, variant_key="scan:gone-scan", snapshot_id=5, view_key="other_view")
+        session.commit()
+    finally:
+        session.close()
+
+    result = run_orphaned_scan_cleanup(session_factory=cleanup_session_factory, now_utc=now_utc)
+
+    kept = [
+        ("other_view", "scan:gone-scan"),
+        ("scan_bootstrap", "latest"),
+        ("scan_bootstrap", "latest:US"),
+        ("scan_bootstrap", "scan:live-scan"),
+    ]
+    assert _values(cleanup_session_factory, UIViewSnapshotPointer.view_key, UIViewSnapshotPointer.variant_key) == kept
+    assert _values(cleanup_session_factory, UIViewSnapshot.view_key, UIViewSnapshot.variant_key) == kept
+    assert _values(cleanup_session_factory, Scan.scan_id) == ["live-scan"]
+    assert result["deleted_scans"] == 0
+    assert result["deleted_snapshot_variants"] == 1
