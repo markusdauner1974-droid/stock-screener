@@ -327,6 +327,33 @@ def test_the_retry_deadline_holds_before_reloading(tmp_path, monkeypatch):
     assert entry.industry_group == "Computer-Hardware/Peripherals"
 
 
+def test_an_absent_file_renews_the_retry_deadline(tmp_path, monkeypatch):
+    """A fruitless sweep must postpone the next one, not probe every lookup."""
+    clock = {"now": 2_000.0}
+    monkeypatch.setattr(taxonomy_module, "time", SimpleNamespace(monotonic=lambda: clock["now"]))
+
+    service = MarketTaxonomyService(data_dir=tmp_path)
+    assert service.get("AAPL", market="US") is None
+
+    # Deadline passes with the directory still empty: the sweep renews it.
+    clock["now"] += taxonomy_module._MISSING_FILE_RETRY_SECONDS + 1
+    assert service.get("AAPL", market="US") is None
+
+    # A file created inside the renewed interval is not picked up yet.
+    _write_csv(
+        tmp_path / "IBD_industry_group.csv",
+        "AAPL,Computer-Hardware/Peripherals\n",
+    )
+    clock["now"] += 10
+    assert service.get("AAPL", market="US") is None
+
+    # Only after the renewed deadline does the lookup load it.
+    clock["now"] += taxonomy_module._MISSING_FILE_RETRY_SECONDS
+    entry = service.get("AAPL", market="US")
+    assert entry is not None
+    assert entry.industry_group == "Computer-Hardware/Peripherals"
+
+
 def test_a_non_us_csv_that_appears_after_the_first_lookup_is_picked_up(tmp_path, monkeypatch):
     """Every guarded loader records its own path, not just the US one."""
     monkeypatch.setattr(taxonomy_module, "_MISSING_FILE_RETRY_SECONDS", 0.0)
