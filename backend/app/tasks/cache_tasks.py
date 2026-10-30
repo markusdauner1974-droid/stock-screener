@@ -10,6 +10,7 @@ All data-fetching tasks use the @serialized_data_fetch_task decorator
 to ensure only one task fetches external data at a time.
 """
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Callable, List, Optional
 
@@ -136,15 +137,20 @@ def _active_benchmark_markets(db, scope_market: Optional[str] = None) -> List[st
     return sorted(set(markets))
 
 
+# A daily watchlist scan's universe key, `watchlist:<id>:<market>`.
+_WATCHLIST_UNIVERSE_KEY = re.compile(r"watchlist:(\d+):")
+
+
 def run_orphaned_scan_cleanup(
     *,
     session_factory=SessionLocal,
     now_utc: Optional[datetime] = None,
 ):
-    """Delete cancelled and stale unfinished scans synchronously.
+    """Delete cancelled, stale unfinished and watchlist-less daily scans synchronously.
 
     Every delete goes through ``delete_scans`` so a scan's results and its own
-    UI snapshot rows leave with it (#684).
+    UI snapshot rows leave with it (#684). The watchlist step reconciles the
+    daily scan a run creates after its watchlist was deleted mid-run.
 
     This is the operator-safe implementation used both by the Celery task and
     by the manual maintenance script. It performs the cleanup itself rather
@@ -152,7 +158,8 @@ def run_orphaned_scan_cleanup(
     """
     from datetime import timedelta
 
-    from ..models.scan_result import Scan
+    from ..models.scan_result import SCAN_TRIGGER_SOURCE_WATCHLIST, Scan
+    from ..models.user_watchlist import UserWatchlist
     from ..services.scan_execution import delete_scans
 
     if now_utc is None:
@@ -171,19 +178,11 @@ def run_orphaned_scan_cleanup(
         total_deleted_scans = 0
         total_deleted_results = 0
 
-        def _locked_scan_ids(*criteria):
-            return [
-                scan.scan_id
-                for scan in (
-                    db.query(Scan)
-                    .filter(*criteria)
-                    .with_for_update()
-                    .all()
-                )
-            ]
+        def _locked_scans(*criteria):
+            return db.query(Scan).filter(*criteria).with_for_update().all()
 
-        logger.info("[1/2] Deleting cancelled scans...")
-        cancelled_scan_ids = _locked_scan_ids(Scan.status == "cancelled")
+        logger.info("[1/3] Deleting cancelled scans...")
+        cancelled_scan_ids = [scan.scan_id for scan in _locked_scans(Scan.status == "cancelled")]
         if cancelled_scan_ids:
             cancelled_scans, cancelled_results = delete_scans(db, cancelled_scan_ids)
             total_deleted_scans += cancelled_scans
@@ -196,12 +195,15 @@ def run_orphaned_scan_cleanup(
         else:
             logger.info("  No cancelled scans found")
 
-        logger.info("[2/2] Deleting stale running/queued scans...")
+        logger.info("[2/3] Deleting stale running/queued scans...")
         stale_cutoff = now_utc - timedelta(hours=1)
-        stale_scan_ids = _locked_scan_ids(
-            Scan.status.in_(["running", "queued"]),
-            Scan.started_at < stale_cutoff,
-        )
+        stale_scan_ids = [
+            scan.scan_id
+            for scan in _locked_scans(
+                Scan.status.in_(["running", "queued"]),
+                Scan.started_at < stale_cutoff,
+            )
+        ]
         if stale_scan_ids:
             stale_scans, stale_results = delete_scans(db, stale_scan_ids)
             total_deleted_scans += stale_scans
@@ -213,6 +215,28 @@ def run_orphaned_scan_cleanup(
             )
         else:
             logger.info("  No stale running/queued scans found")
+
+        logger.info("[3/3] Deleting daily scans of deleted watchlists...")
+        daily_scans = _locked_scans(Scan.trigger_source == SCAN_TRIGGER_SOURCE_WATCHLIST)
+        # Read after locking the scans: a watchlist created later has no scan among them.
+        watchlist_ids = {watchlist_id for (watchlist_id,) in db.query(UserWatchlist.id)}
+        orphan_scan_ids = [
+            scan.scan_id
+            for scan in daily_scans
+            if (match := _WATCHLIST_UNIVERSE_KEY.match(scan.universe_key or ""))
+            and int(match.group(1)) not in watchlist_ids
+        ]
+        if orphan_scan_ids:
+            orphan_scans, orphan_results = delete_scans(db, orphan_scan_ids)
+            total_deleted_scans += orphan_scans
+            total_deleted_results += orphan_results
+            logger.info(
+                "  Deleted %s daily scans of deleted watchlists, %s results",
+                orphan_scans,
+                orphan_results,
+            )
+        else:
+            logger.info("  No daily scans of deleted watchlists found")
 
         db.commit()
 
