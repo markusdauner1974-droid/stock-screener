@@ -268,7 +268,7 @@ def run_orphaned_scan_cleanup(
         logger.info("Orphaned scan cleanup completed")
         logger.info("  Deleted scans: %s", total_deleted_scans)
         logger.info("  Deleted results: %s", total_deleted_results)
-        logger.info("  Deleted snapshot variants: %s", len(orphan_variant_scan_ids))
+        logger.info("  Deleted orphan snapshot variants: %s", len(orphan_variant_scan_ids))
         logger.info("=" * 80)
 
         return {
