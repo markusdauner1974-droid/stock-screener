@@ -93,10 +93,10 @@ class ScanRepository(abc.ABC):
     def list_recent(self, limit: int = 20, market: str | None = None) -> list[object]:
         """Return the most recent scans, ordered by started_at descending.
 
-        Up to ``limit`` market scans and up to ``limit`` custom and test scans,
-        so one kind never crowds out the other. ``market`` restricts market
-        scans to that universe market, and custom and test scans to that
-        market or none.
+        Up to ``limit`` market scans, up to ``limit`` manual custom and test
+        scans, and up to ``limit`` daily watchlist scans, so no kind crowds
+        out another. ``market`` restricts market scans to that universe
+        market, and the other kinds to that market or none.
         """
         ...
 

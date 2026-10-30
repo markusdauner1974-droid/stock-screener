@@ -159,7 +159,10 @@ def get_scan_bootstrap(
 def list_scans(
     limit: int = Query(
         20, ge=1, le=100,
-        description="Number of market scans, and separately of custom and test scans, to return",
+        description=(
+            "Number of market scans, and separately of manual custom and test scans, "
+            "and of daily watchlist scans, to return"
+        ),
     ),
     market: str | None = Query(None, description="Restrict to scans of one universe market (e.g. US, HK)"),
     uow: Any = Depends(get_uow),
