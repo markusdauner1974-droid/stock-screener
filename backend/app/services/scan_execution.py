@@ -11,14 +11,32 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import is_corruption_error, safe_rollback
 from app.models.scan_result import SCAN_TRIGGER_SOURCE_AUTO, Scan, ScanResult
+from app.models.ui_view_snapshot import (
+    SCAN_VIEW_KEY,
+    UIViewSnapshot,
+    UIViewSnapshotPointer,
+    scan_variant_key,
+)
 
 logger = logging.getLogger(__name__)
 SessionFactory = Callable[[], Session]
 
 
-def _bulk_delete_scans(db: Session, scan_ids: list[str]) -> tuple[int, int]:
+def delete_scans(db: Session, scan_ids: list[str]) -> tuple[int, int]:
+    """Delete scans with their results and their own published UI snapshots.
+
+    Every scan-delete path ends here, so none leaves rows behind (#684).
+    Returns ``(deleted_scans, deleted_results)``.
+    """
     if not scan_ids:
         return 0, 0
+    variants = [scan_variant_key(scan_id) for scan_id in scan_ids]
+    # The pointer FK cascades on PostgreSQL; SQLite may not enforce it.
+    for snapshot_table in (UIViewSnapshotPointer, UIViewSnapshot):
+        db.query(snapshot_table).filter(
+            snapshot_table.view_key == SCAN_VIEW_KEY,
+            snapshot_table.variant_key.in_(variants),
+        ).delete(synchronize_session=False)
     deleted_results = db.query(ScanResult).filter(
         ScanResult.scan_id.in_(scan_ids)
     ).delete(synchronize_session=False)
@@ -50,7 +68,7 @@ def cleanup_old_scans(db: Session, universe_key: str, keep_count: int = 3) -> No
                 len(cancelled_scan_ids),
                 universe_key,
             )
-            deleted_scans, deleted_results = _bulk_delete_scans(db, cancelled_scan_ids)
+            deleted_scans, deleted_results = delete_scans(db, cancelled_scan_ids)
             total_deleted_results += deleted_results
             total_deleted_scans += deleted_scans
 
@@ -70,7 +88,7 @@ def cleanup_old_scans(db: Session, universe_key: str, keep_count: int = 3) -> No
                 len(stale_scan_ids),
                 universe_key,
             )
-            deleted_scans, deleted_results = _bulk_delete_scans(db, stale_scan_ids)
+            deleted_scans, deleted_results = delete_scans(db, stale_scan_ids)
             total_deleted_results += deleted_results
             total_deleted_scans += deleted_scans
 
@@ -99,7 +117,7 @@ def cleanup_old_scans(db: Session, universe_key: str, keep_count: int = 3) -> No
                 len(scans_to_delete),
                 universe_key,
             )
-            deleted_scans, deleted_results = _bulk_delete_scans(
+            deleted_scans, deleted_results = delete_scans(
                 db,
                 [scan.scan_id for scan in scans_to_delete],
             )

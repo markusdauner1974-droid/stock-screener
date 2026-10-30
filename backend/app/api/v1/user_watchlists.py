@@ -16,6 +16,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ...database import get_db
+from ...models.scan_result import Scan
 from ...models.user_watchlist import UserWatchlist, WatchlistItem
 from ...models.stock import StockPrice
 from ...models.stock_universe import StockUniverse
@@ -32,6 +33,7 @@ from ...schemas.user_watchlist import (
     WatchlistStewardshipResponse,
 )
 from ...services.price_row_normalization import stock_price_frame
+from ...services.scan_execution import delete_scans
 from ...services.symbol_format import normalize_symbol
 from ...services.watchlist_capacity import (
     WatchlistCapacityError,
@@ -198,11 +200,19 @@ def update_watchlist(watchlist_id: int, updates: WatchlistUpdate, db: Session = 
 
 @router.delete("/{watchlist_id}")
 def delete_watchlist(watchlist_id: int, db: Session = Depends(get_db)):
-    """Delete a watchlist and all its items (cascade)."""
+    """Delete a watchlist, its items (cascade) and its daily scans."""
     watchlist = db.query(UserWatchlist).filter(UserWatchlist.id == watchlist_id).first()
     if not watchlist:
         raise HTTPException(status_code=404, detail="Watchlist not found")
 
+    # Its daily scans' retention never runs again once it is gone (#684).
+    daily_scan_ids = [
+        scan_id
+        for (scan_id,) in db.query(Scan.scan_id).filter(
+            Scan.universe_key.startswith(f"watchlist:{watchlist_id}:", autoescape=True)
+        )
+    ]
+    delete_scans(db, daily_scan_ids)
     db.delete(watchlist)
     db.commit()
     return {"status": "deleted", "watchlist_id": watchlist_id}

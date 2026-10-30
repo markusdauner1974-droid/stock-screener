@@ -10,6 +10,7 @@ All data-fetching tasks use the @serialized_data_fetch_task decorator
 to ensure only one task fetches external data at a time.
 """
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Callable, List, Optional
 
@@ -136,12 +137,23 @@ def _active_benchmark_markets(db, scope_market: Optional[str] = None) -> List[st
     return sorted(set(markets))
 
 
+# A daily watchlist scan's universe key, `watchlist:<id>:<market>`.
+_WATCHLIST_UNIVERSE_KEY = re.compile(r"watchlist:(\d+):")
+
+
 def run_orphaned_scan_cleanup(
     *,
     session_factory=SessionLocal,
     now_utc: Optional[datetime] = None,
 ):
-    """Delete cancelled and stale unfinished scans synchronously.
+    """Delete orphaned scans and the rows deleted scans left behind, synchronously.
+
+    Cancelled and stale unfinished scans go first. Two reconciliation steps
+    then converge what concurrent deletes leave behind (#684): daily scans
+    whose watchlist was deleted while their run was loading, and `scan:<id>`
+    snapshot rows republished after their scan was deleted. Every delete goes
+    through ``delete_scans`` so a scan's results and its own UI snapshot rows
+    leave with it.
 
     This is the operator-safe implementation used both by the Celery task and
     by the manual maintenance script. It performs the cleanup itself rather
@@ -149,7 +161,15 @@ def run_orphaned_scan_cleanup(
     """
     from datetime import timedelta
 
-    from ..models.scan_result import Scan, ScanResult
+    from ..models.scan_result import SCAN_TRIGGER_SOURCE_WATCHLIST, Scan
+    from ..models.ui_view_snapshot import (
+        SCAN_VARIANT_PREFIX,
+        SCAN_VIEW_KEY,
+        UIViewSnapshot,
+        UIViewSnapshotPointer,
+    )
+    from ..models.user_watchlist import UserWatchlist
+    from ..services.scan_execution import delete_scans
 
     if now_utc is None:
         now_utc = datetime.now(timezone.utc)
@@ -167,26 +187,13 @@ def run_orphaned_scan_cleanup(
         total_deleted_scans = 0
         total_deleted_results = 0
 
-        def _locked_scan_ids(*criteria):
-            return [
-                scan.scan_id
-                for scan in (
-                    db.query(Scan)
-                    .filter(*criteria)
-                    .with_for_update()
-                    .all()
-                )
-            ]
+        def _locked_scans(*criteria):
+            return db.query(Scan).filter(*criteria).with_for_update().all()
 
-        logger.info("[1/2] Deleting cancelled scans...")
-        cancelled_scan_ids = _locked_scan_ids(Scan.status == "cancelled")
+        logger.info("[1/4] Deleting cancelled scans...")
+        cancelled_scan_ids = [scan.scan_id for scan in _locked_scans(Scan.status == "cancelled")]
         if cancelled_scan_ids:
-            cancelled_results = db.query(ScanResult).filter(
-                ScanResult.scan_id.in_(cancelled_scan_ids)
-            ).delete(synchronize_session=False)
-            cancelled_scans = db.query(Scan).filter(
-                Scan.scan_id.in_(cancelled_scan_ids)
-            ).delete(synchronize_session=False)
+            cancelled_scans, cancelled_results = delete_scans(db, cancelled_scan_ids)
             total_deleted_scans += cancelled_scans
             total_deleted_results += cancelled_results
             logger.info(
@@ -197,19 +204,17 @@ def run_orphaned_scan_cleanup(
         else:
             logger.info("  No cancelled scans found")
 
-        logger.info("[2/2] Deleting stale running/queued scans...")
+        logger.info("[2/4] Deleting stale running/queued scans...")
         stale_cutoff = now_utc - timedelta(hours=1)
-        stale_scan_ids = _locked_scan_ids(
-            Scan.status.in_(["running", "queued"]),
-            Scan.started_at < stale_cutoff,
-        )
+        stale_scan_ids = [
+            scan.scan_id
+            for scan in _locked_scans(
+                Scan.status.in_(["running", "queued"]),
+                Scan.started_at < stale_cutoff,
+            )
+        ]
         if stale_scan_ids:
-            stale_results = db.query(ScanResult).filter(
-                ScanResult.scan_id.in_(stale_scan_ids)
-            ).delete(synchronize_session=False)
-            stale_scans = db.query(Scan).filter(
-                Scan.scan_id.in_(stale_scan_ids),
-            ).delete(synchronize_session=False)
+            stale_scans, stale_results = delete_scans(db, stale_scan_ids)
             total_deleted_scans += stale_scans
             total_deleted_results += stale_results
             logger.info(
@@ -220,17 +225,56 @@ def run_orphaned_scan_cleanup(
         else:
             logger.info("  No stale running/queued scans found")
 
+        logger.info("[3/4] Deleting daily scans of deleted watchlists...")
+        daily_scans = _locked_scans(Scan.trigger_source == SCAN_TRIGGER_SOURCE_WATCHLIST)
+        # Read after locking the scans: a watchlist created later has no scan among them.
+        watchlist_ids = {watchlist_id for (watchlist_id,) in db.query(UserWatchlist.id)}
+        orphan_scan_ids = [
+            scan.scan_id
+            for scan in daily_scans
+            if (match := _WATCHLIST_UNIVERSE_KEY.match(scan.universe_key or ""))
+            and int(match.group(1)) not in watchlist_ids
+        ]
+        if orphan_scan_ids:
+            orphan_scans, orphan_results = delete_scans(db, orphan_scan_ids)
+            total_deleted_scans += orphan_scans
+            total_deleted_results += orphan_results
+            logger.info(
+                "  Deleted %s daily scans of deleted watchlists, %s results",
+                orphan_scans,
+                orphan_results,
+            )
+        else:
+            logger.info("  No daily scans of deleted watchlists found")
+
+        logger.info("[4/4] Deleting snapshot rows of deleted scans...")
+        snapshot_scan_ids = {
+            variant_key[len(SCAN_VARIANT_PREFIX):]
+            for table in (UIViewSnapshotPointer, UIViewSnapshot)
+            for (variant_key,) in db.query(table.variant_key).filter(
+                table.view_key == SCAN_VIEW_KEY,
+                table.variant_key.like(f"{SCAN_VARIANT_PREFIX}%"),
+            )
+        }
+        live_scan_ids = {scan_id for (scan_id,) in db.query(Scan.scan_id)}
+        orphan_variant_scan_ids = sorted(snapshot_scan_ids - live_scan_ids)
+        # No scan row remains, so this removes only the variants' snapshot rows.
+        delete_scans(db, orphan_variant_scan_ids)
+        logger.info("  Deleted snapshot rows of %s deleted scans", len(orphan_variant_scan_ids))
+
         db.commit()
 
         logger.info("=" * 80)
         logger.info("Orphaned scan cleanup completed")
         logger.info("  Deleted scans: %s", total_deleted_scans)
         logger.info("  Deleted results: %s", total_deleted_results)
+        logger.info("  Deleted orphan snapshot variants: %s", len(orphan_variant_scan_ids))
         logger.info("=" * 80)
 
         return {
             "deleted_scans": total_deleted_scans,
             "deleted_results": total_deleted_results,
+            "deleted_snapshot_variants": len(orphan_variant_scan_ids),
             "completed_at": datetime.now().isoformat(),
         }
 

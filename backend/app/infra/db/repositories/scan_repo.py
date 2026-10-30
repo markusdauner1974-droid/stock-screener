@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.domain.scanning.errors import DuplicateIdempotencyKey, SingleActiveScanViolation
 from app.domain.scanning.ports import ScanRepository
-from app.models.scan_result import Scan
+from app.models.scan_result import SCAN_TRIGGER_SOURCE_WATCHLIST, Scan
+from app.services.scan_execution import delete_scans
 
 
 def _is_single_active_scan_integrity_error(exc: IntegrityError) -> bool:
@@ -88,17 +89,19 @@ class SqlScanRepository(ScanRepository):
         self._session.flush()
 
     def list_recent(self, limit: int = 20, market: str | None = None) -> list[Scan]:
+        daily = Scan.trigger_source == SCAN_TRIGGER_SOURCE_WATCHLIST
         market_view = [Scan.represents_market_view()]
-        symbol_lists = [~Scan.represents_market_view()]
+        symbol_lists = [~Scan.represents_market_view(), ~daily]
+        daily_watchlists = [~Scan.represents_market_view(), daily]
         if market:
             market_view.append(Scan.universe_market == market.upper())
             # A symbol list with no stored market belongs to every market.
-            symbol_lists.append(
-                or_(Scan.universe_market == market.upper(), Scan.universe_market.is_(None))
-            )
+            in_market = or_(Scan.universe_market == market.upper(), Scan.universe_market.is_(None))
+            symbol_lists.append(in_market)
+            daily_watchlists.append(in_market)
 
         def newest(*criteria):
-            # Limited apart, so newer symbol-list scans never push out the market's own.
+            # Each kind limited apart, so a busy kind never pushes another out.
             return (
                 select(Scan.id)
                 .where(*criteria)
@@ -108,15 +111,11 @@ class SqlScanRepository(ScanRepository):
 
         return (
             self._session.query(Scan)
-            .filter(or_(Scan.id.in_(newest(*market_view)), Scan.id.in_(newest(*symbol_lists))))
+            .filter(or_(*(Scan.id.in_(newest(*kind)) for kind in (market_view, symbol_lists, daily_watchlists))))
             .order_by(*Scan.newest_first())
             .all()
         )
 
     def delete(self, scan_id: str) -> bool:
-        scan = self.get_by_scan_id(scan_id)
-        if scan is None:
-            return False
-        self._session.delete(scan)
-        self._session.flush()
-        return True
+        deleted_scans, _ = delete_scans(self._session, [scan_id])
+        return deleted_scans > 0

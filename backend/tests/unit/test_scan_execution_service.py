@@ -10,6 +10,9 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.models.scan_result import Scan, ScanResult
+from app.models.ui_view_snapshot import UIViewSnapshot, UIViewSnapshotPointer
+
+SCAN_TABLES = [Scan.__table__, ScanResult.__table__, UIViewSnapshot.__table__, UIViewSnapshotPointer.__table__]
 
 
 def test_run_post_scan_pipeline_uses_session_factory_and_closes(monkeypatch):
@@ -102,7 +105,7 @@ def test_cleanup_old_scans_uses_bulk_delete_for_scan_rows(monkeypatch):
     import app.services.scan_execution as module
 
     engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine, tables=[Scan.__table__, ScanResult.__table__])
+    Base.metadata.create_all(engine, tables=SCAN_TABLES)
     SessionLocal = sessionmaker(bind=engine)
     db = SessionLocal()
     try:
@@ -185,7 +188,7 @@ def test_cleanup_old_scans_keeps_the_newest_rows_when_completed_at_ties():
     import app.services.scan_execution as module
 
     engine = create_engine("sqlite:///:memory:")
-    Base.metadata.create_all(engine, tables=[Scan.__table__, ScanResult.__table__])
+    Base.metadata.create_all(engine, tables=SCAN_TABLES)
     db = sessionmaker(bind=engine)()
     try:
         completed_at = datetime(2026, 10, 23, 22)
@@ -197,6 +200,35 @@ def test_cleanup_old_scans_keeps_the_newest_rows_when_completed_at_ties():
         module.cleanup_old_scans(db, "all", keep_count=3)
 
         assert sorted(scan.scan_id for scan in db.query(Scan).all()) == ["tie-2", "tie-3", "tie-4"]
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_cleanup_old_scans_deletes_the_pruned_scans_snapshot_rows():
+    import app.services.scan_execution as module
+
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine, tables=SCAN_TABLES)
+    db = sessionmaker(bind=engine)()
+    try:
+        for n in range(1, 5):
+            db.add(Scan(scan_id=f"scan-{n}", universe_key="all", status="completed", completed_at=datetime(2026, 10, n)))
+            db.add(ScanResult(scan_id=f"scan-{n}", symbol="A"))
+            db.add(
+                UIViewSnapshot(
+                    id=n, view_key="scan_bootstrap", variant_key=f"scan:scan-{n}", source_revision=f"scan-{n}", payload_json={}
+                )
+            )
+            db.add(UIViewSnapshotPointer(view_key="scan_bootstrap", variant_key=f"scan:scan-{n}", snapshot_id=n))
+        db.commit()
+
+        module.cleanup_old_scans(db, "all", keep_count=3)
+
+        kept = ["scan:scan-2", "scan:scan-3", "scan:scan-4"]
+        assert sorted(v for (v,) in db.query(UIViewSnapshot.variant_key)) == kept
+        assert sorted(v for (v,) in db.query(UIViewSnapshotPointer.variant_key)) == kept
+        assert sorted(s for (s,) in db.query(ScanResult.scan_id)) == ["scan-2", "scan-3", "scan-4"]
     finally:
         db.close()
         engine.dispose()
@@ -275,7 +307,7 @@ def test_bootstrap_publish_prunes_an_instant_scans_history_but_keeps_the_auto_sc
     engine = create_engine(
         "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
     )
-    Base.metadata.create_all(engine, tables=[Scan.__table__, ScanResult.__table__])
+    Base.metadata.create_all(engine, tables=SCAN_TABLES)
     session_factory = sessionmaker(bind=engine)
     published = []
     monkeypatch.setattr(scan_tasks, "SessionLocal", session_factory)

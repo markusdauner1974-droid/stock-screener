@@ -159,7 +159,10 @@ def get_scan_bootstrap(
 def list_scans(
     limit: int = Query(
         20, ge=1, le=100,
-        description="Number of market scans, and separately of custom and test scans, to return",
+        description=(
+            "Number of market scans, and separately of manual custom and test scans, "
+            "and of daily watchlist scans, to return"
+        ),
     ),
     market: str | None = Query(None, description="Restrict to scans of one universe market (e.g. US, HK)"),
     uow: Any = Depends(get_uow),
@@ -432,7 +435,7 @@ def delete_scan(
     scan_id: str,
     uow: Any = Depends(get_uow),
 ):
-    """Delete a scan and all its results."""
+    """Delete a scan with its results and published UI snapshot."""
     try:
         with uow:
             scan = uow.scans.get_by_scan_id(scan_id)
@@ -445,7 +448,6 @@ def delete_scan(
                     detail=f"Cannot delete scan with status '{scan.status}'. Cancel it first.",
                 )
 
-            uow.scan_results.delete_by_scan_id(scan_id)
             uow.scans.delete(scan_id)
             uow.commit()
 

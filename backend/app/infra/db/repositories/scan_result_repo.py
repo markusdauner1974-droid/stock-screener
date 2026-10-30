@@ -664,15 +664,6 @@ class SqlScanResultRepository(ScanResultRepository):
 
         return enriched
 
-    def delete_by_scan_id(self, scan_id: str) -> int:
-        count = (
-            self._session.query(ScanResult)
-            .filter(ScanResult.scan_id == scan_id)
-            .delete()
-        )
-        self._session.flush()
-        return count
-
     def count_by_scan_id(self, scan_id: str) -> int:
         return (
             self._session.query(func.count(ScanResult.id))

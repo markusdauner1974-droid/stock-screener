@@ -13,8 +13,12 @@ import httpx
 import pytest
 import pytest_asyncio
 
+from app.database import SessionLocal
 from app.main import app
+from app.models.scan_result import Scan, ScanResult
+from app.models.ui_view_snapshot import UIViewSnapshot, UIViewSnapshotPointer
 from app.services import server_auth
+from app.services.ui_snapshot_service import UISnapshotService
 from app.wiring.bootstrap import get_uow
 from tests.unit.use_cases.conftest import (
     FakeScan,
@@ -466,25 +470,29 @@ class TestCancelScan:
 
 @pytest.mark.asyncio
 class TestDeleteScan:
-    async def test_delete_completed_scan(self, client):
-        scan_repo = FakeScanRepository()
-        scan_repo.scans["scan-001"] = _make_scan(
-            "scan-001", status="completed",
-            started_at=datetime(2024, 1, 1),
-        )
+    async def test_delete_completed_scan(self, client, db_session):
+        for scan_id in ("scan-001", "scan-002"):
+            db_session.add(Scan(
+                scan_id=scan_id, status="completed", universe_type="custom",
+                universe_symbols=["AAPL"], total_stocks=1, passed_stocks=1,
+                started_at=datetime(2024, 1, 1),
+            ))
+        db_session.commit()
+        for scan_id in ("scan-001", "scan-002"):
+            # Published before the result rows exist: the payload builder wants
+            # the full per-result details a real scan run writes.
+            UISnapshotService(SessionLocal).publish_scan_bootstraps_for(scan_id, with_latest=False)
+            db_session.add(ScanResult(scan_id=scan_id, symbol="AAPL"))
+        db_session.commit()
 
-        result_repo = FakeScanResultRepository()
-        result_repo._persisted_results = [("scan-001", "AAPL", {})]
+        resp = await client.delete("/api/v1/scans/scan-001")
 
-        uow = _FakeUoW(scans=scan_repo, scan_results=result_repo)
-        app.dependency_overrides[get_uow] = lambda: uow
-        try:
-            resp = await client.delete("/api/v1/scans/scan-001")
-            assert resp.status_code == 200
-            assert "scan-001" not in scan_repo.scans
-            assert result_repo.count_by_scan_id("scan-001") == 0
-        finally:
-            app.dependency_overrides.pop(get_uow, None)
+        assert resp.status_code == 200
+        assert [s for (s,) in db_session.query(Scan.scan_id)] == ["scan-002"]
+        assert [s for (s,) in db_session.query(ScanResult.scan_id)] == ["scan-002"]
+        # The scan's own published UI snapshot goes with it (#684).
+        assert [v for (v,) in db_session.query(UIViewSnapshot.variant_key)] == ["scan:scan-002"]
+        assert [v for (v,) in db_session.query(UIViewSnapshotPointer.variant_key)] == ["scan:scan-002"]
 
     async def test_409_for_running_scan(self, client):
         scan_repo = FakeScanRepository()

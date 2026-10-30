@@ -93,16 +93,19 @@ class ScanRepository(abc.ABC):
     def list_recent(self, limit: int = 20, market: str | None = None) -> list[object]:
         """Return the most recent scans, ordered by started_at descending.
 
-        Up to ``limit`` market scans and up to ``limit`` custom and test scans,
-        so one kind never crowds out the other. ``market`` restricts market
-        scans to that universe market, and custom and test scans to that
-        market or none.
+        Up to ``limit`` market scans, up to ``limit`` manual custom and test
+        scans, and up to ``limit`` daily watchlist scans, so no kind crowds
+        out another. ``market`` restricts market scans to that universe
+        market, and the other kinds to that market or none.
         """
         ...
 
     @abc.abstractmethod
     def delete(self, scan_id: str) -> bool:
-        """Delete a scan by scan_id. Returns True if deleted, False if not found."""
+        """Delete a scan with its results and published UI snapshot.
+
+        Returns True if deleted, False if not found.
+        """
         ...
 
 
@@ -193,11 +196,6 @@ class ScanResultRepository(abc.ABC):
         include_sparklines: bool = False,
     ) -> tuple[ScanResultItemDomain, ...]:
         """Return ALL filtered, sorted results (no pagination) for export."""
-        ...
-
-    @abc.abstractmethod
-    def delete_by_scan_id(self, scan_id: str) -> int:
-        """Delete all results for a scan. Returns the number of rows deleted."""
         ...
 
     @abc.abstractmethod
