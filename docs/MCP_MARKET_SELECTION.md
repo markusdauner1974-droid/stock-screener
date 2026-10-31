@@ -16,7 +16,9 @@ the feature-run repository, verifies the referenced run is published and that
 its stored market/universe metadata agrees with the request. A missing pointer,
 unpublished or missing run, custom universe, or missing/conflicting market
 evidence returns MCP `isError` with code `market_run_unavailable`. Invalid market
-arguments return `invalid_arguments`.
+arguments return `invalid_arguments`. A stored run whose status or run type is not
+a known value returns `invalid_stored_data`: the request was valid, the row is
+not, and that is reported as damaged storage rather than a caller mistake.
 
 There is no global-pointer or other-market fallback for an explicit market.
 Run IDs, universe hashes, and symbol suffixes are not used to guess a market.

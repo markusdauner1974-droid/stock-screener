@@ -165,6 +165,22 @@ def test_watchlist_scope_remains_independent_of_market(markets):
     assert [row["symbol"] for row in payload["symbols"]] == ["NVDA"]
 
 
+@pytest.mark.parametrize("universe", ["all", "latest_published", "ALL"])
+def test_the_all_scope_stays_all_in_market_mode(markets, universe):
+    """'all' scopes the run, it is never resolved as a watchlist name."""
+    service, _, _ = markets
+    payload = candidates(service, "US", universe=universe)["structuredContent"]
+    assert payload["run"]["id"] == 2
+    assert payload["scope"] == {
+        "type": "published_run",
+        "value": "published US market run",
+        "market": "US",
+    }
+    assert {row["symbol"] for row in payload["symbols"]} == {
+        "NVDA", "MSFT", "AVGO", "PANW", "SNOW"
+    }
+
+
 def test_a_stored_run_with_an_unknown_status_reports_stored_data(markets):
     """A broken enum is damaged storage, not a bad request."""
     service, factory, _ = markets
