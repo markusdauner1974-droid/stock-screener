@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -373,6 +375,80 @@ def test_a_non_us_csv_that_appears_after_the_first_lookup_is_picked_up(tmp_path,
     assert service.entry_count_for_market("HK") > 0
 
 
+def test_a_failed_reload_keeps_the_previous_taxonomy(tmp_path, monkeypatch):
+    """A half-written file that arrives later must not wipe a good load."""
+    monkeypatch.setattr(taxonomy_module, "_MISSING_FILE_RETRY_SECONDS", 0.0)
+    _write_csv(
+        tmp_path / "IBD_industry_group.csv",
+        "AAPL,Computer-Hardware/Peripherals\n",
+    )
+    service = MarketTaxonomyService(data_dir=tmp_path)
+    assert service.groups_for_market("US") == ["Computer-Hardware/Peripherals"]
+
+    # hk-deep.csv appears without the required columns, e.g. mid-copy.
+    _write_csv(tmp_path / "hk-deep.csv", "Symbol,Name\n700,Tencent\n")
+
+    assert service.groups_for_market("US") == ["Computer-Hardware/Peripherals"]
+    assert service.entry_count_for_market("US") == 1
+    assert service.entry_count_for_market("HK") == 0
+
+
+def test_an_india_csv_that_appears_after_the_first_lookup_is_picked_up(tmp_path, monkeypatch):
+    """IN is guarded too: it used to skip without recording the path."""
+    monkeypatch.setattr(taxonomy_module, "_MISSING_FILE_RETRY_SECONDS", 0.0)
+    service = MarketTaxonomyService(data_dir=tmp_path)
+    assert service.entry_count_for_market("IN") == 0
+
+    _write_csv(
+        tmp_path / "india-deep.csv",
+        (
+            "Symbol,Exchange,Industry (Sector),Subgroup (Theme),Sub-industry\n"
+            "RELIANCE.NS,XNSE,ENERGY (STOCKS),Oil & Gas,Integrated Oil & Gas\n"
+        ),
+    )
+
+    service.groups_for_market("US")
+    assert service.entry_count_for_market("IN") == 1
+
+
+def test_concurrent_lookups_reload_the_taxonomy_once(tmp_path, monkeypatch):
+    """Two threads past the deadline must not parse (or merge) twice."""
+    monkeypatch.setattr(taxonomy_module, "_MISSING_FILE_RETRY_SECONDS", 0.0)
+    service = MarketTaxonomyService(data_dir=tmp_path)
+    assert service.get("AAPL", market="US") is None
+
+    loads = []
+    original = taxonomy_module.MarketTaxonomyService._load_us
+
+    def counting_load(self, load):
+        loads.append(1)
+        time.sleep(0.05)
+        return original(self, load)
+
+    monkeypatch.setattr(
+        taxonomy_module.MarketTaxonomyService, "_load_us", counting_load
+    )
+    _write_csv(
+        tmp_path / "IBD_industry_group.csv",
+        "AAPL,Computer-Hardware/Peripherals\n",
+    )
+
+    barrier = threading.Barrier(4)
+
+    def lookup():
+        barrier.wait()
+        service.get("AAPL", market="US")
+
+    workers = [threading.Thread(target=lookup) for _ in range(4)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join()
+
+    assert len(loads) == 1
+    assert service.entry_count_for_market("US") == 1
+
+
 def test_an_unchanged_data_dir_is_not_reloaded(tmp_path, monkeypatch, caplog):
     """The retry stays cheap: a stat sweep, not a reload every 5 minutes."""
     monkeypatch.setattr(taxonomy_module, "_MISSING_FILE_RETRY_SECONDS", 0.0)
@@ -441,13 +517,13 @@ def test_load_ca_skips_silently_when_csv_is_missing(tmp_path, caplog):
         assert service.entry_count_for_market("CA") == 0
         assert service.groups_for_market("CA") == []
 
-    info_messages = [
+    warnings = [
         record.message
         for record in caplog.records
         if record.name == "app.services.market_taxonomy_service"
-        and record.levelname == "INFO"
+        and record.levelname == "WARNING"
     ]
-    assert any("CA taxonomy CSV not found" in message for message in info_messages)
+    assert any("CA taxonomy CSV not found" in message for message in warnings)
 
 
 def test_load_ca_loads_canada_deep_when_present(tmp_path):
