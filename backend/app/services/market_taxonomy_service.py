@@ -73,7 +73,8 @@ class _TaxonomyLoad:
     row_counts: dict[str, int] = field(
         default_factory=lambda: {market: 0 for market in _MARKETS}
     )
-    skipped: set[Path] = field(default_factory=set)
+    # path -> market, so a reload can carry the previous bucket over.
+    skipped: dict[Path, str] = field(default_factory=dict)
 _LOAD_EXCEPTIONS = (OSError, csv.Error, UnicodeError)
 
 
@@ -186,6 +187,15 @@ class MarketTaxonomyService:
                 raise TaxonomyLoadError(
                     f"Unable to load market taxonomy from {self._data_dir}: {exc}"
                 ) from exc
+            # A file that is missing right now may simply be unavailable, not
+            # gone: keep what the previous load produced for that market
+            # instead of publishing an empty bucket. It stays in ``skipped``,
+            # so the retry still waits for the file to come back.
+            for market in load.skipped.values():
+                previous = self._entries.get(market)
+                if previous:
+                    load.entries[market] = previous
+                    load.row_counts[market] = self._loaded_row_counts.get(market, 0)
             # Publish atomically: a failed load above leaves the previous
             # taxonomy in place, so readers keep the last good snapshot.
             self._entries = load.entries
@@ -319,7 +329,7 @@ class MarketTaxonomyService:
             market,
             path,
         )
-        load.skipped.add(path)
+        load.skipped[path] = market
         return True
 
     @staticmethod

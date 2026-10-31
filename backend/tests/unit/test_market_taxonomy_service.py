@@ -393,6 +393,39 @@ def test_a_failed_reload_keeps_the_previous_taxonomy(tmp_path, monkeypatch):
     assert service.entry_count_for_market("HK") == 0
 
 
+def test_a_market_keeps_its_entries_when_its_csv_disappears(tmp_path, monkeypatch):
+    """A reload driven by another market must not empty a loaded one."""
+    monkeypatch.setattr(taxonomy_module, "_MISSING_FILE_RETRY_SECONDS", 0.0)
+    _write_csv(
+        tmp_path / "IBD_industry_group.csv",
+        "AAPL,Computer-Hardware/Peripherals\n",
+    )
+    _write_csv(
+        tmp_path / "hk-deep.csv",
+        (
+            "Symbol,HSICS Sector,EM Industry (EN),Theme (EN)\n"
+            "700,Information Technology,Internet Services,AI Infrastructure\n"
+        ),
+    )
+    service = MarketTaxonomyService(data_dir=tmp_path)
+    assert service.entry_count_for_market("HK") == 1
+
+    # hk-deep.csv vanishes while another skipped file shows up and triggers
+    # the reload.
+    (tmp_path / "hk-deep.csv").unlink()
+    _write_csv(
+        tmp_path / "india-deep.csv",
+        (
+            "Symbol,Exchange,Industry (Sector),Subgroup (Theme),Sub-industry\n"
+            "RELIANCE.NS,XNSE,ENERGY (STOCKS),Oil & Gas,Integrated Oil & Gas\n"
+        ),
+    )
+
+    assert service.entry_count_for_market("IN") == 1
+    assert service.entry_count_for_market("HK") == 1
+    assert service.get("700", market="HK") is not None
+
+
 def test_an_india_csv_that_appears_after_the_first_lookup_is_picked_up(tmp_path, monkeypatch):
     """IN is guarded too: it used to skip without recording the path."""
     monkeypatch.setattr(taxonomy_module, "_MISSING_FILE_RETRY_SECONDS", 0.0)
