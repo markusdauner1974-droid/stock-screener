@@ -62,6 +62,26 @@ _MISSING_FILE_RETRY_SECONDS = 300.0
 
 _MARKETS = ("US", "HK", "IN", "JP", "KR", "TW", "CN", "CA", "DE", "SG", "MY")
 
+_CSV_TO_MARKET = {
+    "IBD_industry_group.csv": "US",
+    "hk-deep.csv": "HK",
+    "india-deep.csv": "IN",
+    "kabutan_themes_en.csv": "JP",
+    "taiwan-deep.csv": "TW",
+    "korea-deep.csv": "KR",
+    "china-deep.csv": "CN",
+    "canada-deep.csv": "CA",
+}
+
+
+def _file_signature(path: Path) -> tuple[int, int] | None:
+    """Size plus modification time, or None when the file is not readable."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_size, stat.st_mtime_ns)
+
 
 @dataclass
 class _TaxonomyLoad:
@@ -75,6 +95,11 @@ class _TaxonomyLoad:
     )
     # path -> market, so a reload can carry the previous bucket over.
     skipped: dict[Path, str] = field(default_factory=dict)
+    # Files that arrived late and may still have been copied while they were
+    # parsed: path -> (market, signature at parse time).
+    watched: dict[Path, tuple[str, tuple[int, int] | None]] = field(
+        default_factory=dict
+    )
 _LOAD_EXCEPTIONS = (OSError, csv.Error, UnicodeError)
 
 
@@ -106,6 +131,7 @@ class MarketTaxonomyService:
         self._data_dir = data_dir or self._default_data_dir()
         self._loaded = False
         self._skipped_files: set[Path] = set()
+        self._watched: dict[Path, tuple[str, tuple[int, int] | None]] = {}
         self._retry_at = 0.0
         # A retry can now reload while other threads are reading, and two
         # threads can pass the deadline together: serialise the whole load.
@@ -164,6 +190,16 @@ class MarketTaxonomyService:
         )
         return best_candidate
 
+    def _pending_changed(self) -> bool:
+        """True when a skipped file appeared or a watched file changed."""
+        for path in self._skipped_files:
+            if path.exists():
+                return True
+        for path, (_market, signature) in self._watched.items():
+            if not path.exists() or _file_signature(path) != signature:
+                return True
+        return False
+
     def refresh(self) -> None:
         with self._load_lock:
             # The retry exists for a data directory that fills up after start,
@@ -171,6 +207,7 @@ class MarketTaxonomyService:
             # when the CSVs were all absent. An explicit data_dir is pinned.
             if not self._data_dir_explicit:
                 self._data_dir = self._default_data_dir()
+            pending_before = set(self._skipped_files) | set(self._watched)
             load = _TaxonomyLoad()
             try:
                 self._load_us(load)
@@ -196,11 +233,21 @@ class MarketTaxonomyService:
                 if previous:
                     load.entries[market] = previous
                     load.row_counts[market] = self._loaded_row_counts.get(market, 0)
+            # A file that arrived after an earlier skip may have been copied
+            # while it was parsed, so a complete header with truncated rows
+            # would pass silently. Watch its signature for one retry interval
+            # and read it again if it kept growing.
+            load.watched = {
+                path: (_CSV_TO_MARKET.get(path.name, ""), _file_signature(path))
+                for path in pending_before
+                if path.exists()
+            }
             # Publish atomically: a failed load above leaves the previous
             # taxonomy in place, so readers keep the last good snapshot.
             self._entries = load.entries
             self._loaded_row_counts = load.row_counts
             self._skipped_files = load.skipped
+            self._watched = load.watched
             self._retry_at = time.monotonic() + _MISSING_FILE_RETRY_SECONDS
             self._loaded = True
 
@@ -297,11 +344,12 @@ class MarketTaxonomyService:
             if not self._loaded:
                 self.refresh()
                 return
-            if not self._skipped_files or time.monotonic() < self._retry_at:
+            pending = set(self._skipped_files) | set(self._watched)
+            if not pending or time.monotonic() < self._retry_at:
                 return
-            # Cheap re-check first: only a file that actually appeared is worth
-            # a full reload (and a new round of log lines).
-            if not any(path.exists() for path in self._skipped_files):
+            # Cheap re-check first: only a file that appeared, vanished or
+            # changed is worth a full reload (and a new round of log lines).
+            if not self._pending_changed():
                 self._retry_at = time.monotonic() + _MISSING_FILE_RETRY_SECONDS
                 return
             try:

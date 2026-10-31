@@ -444,6 +444,28 @@ def test_an_india_csv_that_appears_after_the_first_lookup_is_picked_up(tmp_path,
     assert service.entry_count_for_market("IN") == 1
 
 
+def test_a_csv_that_was_still_being_copied_is_read_again(tmp_path, monkeypatch):
+    """A complete header with truncated rows must not be treated as final."""
+    monkeypatch.setattr(taxonomy_module, "_MISSING_FILE_RETRY_SECONDS", 0.0)
+    service = MarketTaxonomyService(data_dir=tmp_path)
+    assert service.entry_count_for_market("HK") == 0
+
+    header = "Symbol,HSICS Sector,EM Industry (EN),Theme (EN)\n"
+    first_row = "700,Information Technology,Internet Services,AI Infrastructure\n"
+    path = tmp_path / "hk-deep.csv"
+    _write_csv(path, header + first_row)
+
+    # The file appears while it is still being copied: the rows written so far
+    # load, and the previous taxonomy is untouched.
+    assert service.entry_count_for_market("HK") == 1
+
+    _write_csv(path, header + first_row + "5,Financials,Banks,Rate Sensitive\n")
+
+    # The next pass sees the changed signature and reads the file again.
+    assert service.entry_count_for_market("HK") == 2
+    assert service.get("5", market="HK") is not None
+
+
 def test_concurrent_lookups_reload_the_taxonomy_once(tmp_path, monkeypatch):
     """Two threads past the deadline must not parse (or merge) twice."""
     monkeypatch.setattr(taxonomy_module, "_MISSING_FILE_RETRY_SECONDS", 0.0)
@@ -467,10 +489,15 @@ def test_concurrent_lookups_reload_the_taxonomy_once(tmp_path, monkeypatch):
     )
 
     barrier = threading.Barrier(4)
+    results = []
+    errors = []
 
     def lookup():
         barrier.wait()
-        service.get("AAPL", market="US")
+        try:
+            results.append(service.get("AAPL", market="US"))
+        except Exception as exc:  # noqa: BLE001 - surfaced by the assertion below
+            errors.append(exc)
 
     workers = [threading.Thread(target=lookup) for _ in range(4)]
     for worker in workers:
@@ -478,6 +505,12 @@ def test_concurrent_lookups_reload_the_taxonomy_once(tmp_path, monkeypatch):
     for worker in workers:
         worker.join()
 
+    assert errors == []
+    assert len(results) == 4
+    assert all(entry is not None for entry in results)
+    assert {entry.industry_group for entry in results} == {
+        "Computer-Hardware/Peripherals"
+    }
     assert len(loads) == 1
     assert service.entry_count_for_market("US") == 1
 
