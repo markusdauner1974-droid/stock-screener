@@ -27,6 +27,12 @@ verified `market`, `universe_type: "market"`, and `pointer_key` to `run`.
 `scope.market` also identifies the requested market. A valid empty result still
 carries this provenance; it is different from an unavailable publication.
 
+One exception: when `universe` names a watchlist that does not exist, the call
+returns the existing not-found envelope with empty `symbols` and no `run` or
+`scope` at all - the same shape an unknown watchlist produces without `market`.
+That envelope reports a bad scope, not a missing publication, so it carries no
+market provenance to verify.
+
 Omitting `market` preserves the existing global latest-run behavior and response
 shape. `universe` retains its existing meaning (`all`, `latest_published`, or a
 watchlist name); it is not a market selector. A watchlist restriction may be

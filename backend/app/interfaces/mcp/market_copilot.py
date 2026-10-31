@@ -125,6 +125,10 @@ class ToolSpec:
     handler: Callable[[Any], ToolEnvelope]
 
 
+class StoredFeatureRunInvalid(RuntimeError):
+    """A stored run row cannot be read: broken enum values, not a bad request."""
+
+
 class CandidateMarketRunUnavailable(RuntimeError):
     """An explicitly requested candidate market has no trustworthy publication."""
 
@@ -271,6 +275,13 @@ class MarketCopilotService:
                         for error in exc.errors()
                     ]
                 },
+            )
+        except StoredFeatureRunInvalid as exc:
+            logger.warning("Stored feature run rejected in %s: %s", name, exc)
+            return self._tool_error(
+                f"{name} could not read the stored feature run",
+                code="invalid_stored_data",
+                details={"message": str(exc)},
             )
         except CandidateMarketRunUnavailable as exc:
             return self._tool_error(
@@ -1604,9 +1615,18 @@ class MarketCopilotService:
     def _published_candidate_market_run(self, db: Session, market: str) -> FeatureRun:
         """Read only the canonical market publication; never substitute another run."""
         with self._uow_scope() as uow:
-            published = uow.feature_runs.get_latest_published(
-                pointer_key=f"latest_published_market:{market}"
-            )
+            try:
+                published = uow.feature_runs.get_latest_published(
+                    pointer_key=f"latest_published_market:{market}"
+                )
+            except ValueError as exc:
+                # RunStatus/RunType reject stored values outside the enum. The
+                # request was valid, the row is not: report stored-data damage
+                # instead of letting the generic ValueError branch call it an
+                # argument error.
+                raise StoredFeatureRunInvalid(
+                    f"Stored run for market {market} has an unknown status or run type"
+                ) from exc
         if published is None or published.status != RunStatus.PUBLISHED:
             raise CandidateMarketRunUnavailable("Requested market has no valid published pointer")
         run = db.get(FeatureRun, published.id)

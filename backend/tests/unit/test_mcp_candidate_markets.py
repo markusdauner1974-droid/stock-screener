@@ -160,6 +160,24 @@ def test_watchlist_scope_remains_independent_of_market(markets):
     payload = candidates(service, "US", universe="Leaders")["structuredContent"]
     assert payload["run"]["market"] == "US"
     assert payload["scope"] == {"type": "watchlist", "value": "Leaders", "market": "US"}
+    # The watchlist still filters: Leaders holds NVDA and AAPL, the US run has
+    # no AAPL row, so only NVDA can survive both restrictions.
+    assert [row["symbol"] for row in payload["symbols"]] == ["NVDA"]
+
+
+def test_a_stored_run_with_an_unknown_status_reports_stored_data(markets):
+    """A broken enum is damaged storage, not a bad request."""
+    service, factory, _ = markets
+    with factory() as db:
+        db.query(FeatureRun).filter(FeatureRun.id == 2).update(
+            {"status": "published_typo"}
+        )
+        db.commit()
+
+    result = candidates(service, "US")
+
+    assert result.get("isError") is True
+    assert result["structuredContent"]["error"]["code"] == "invalid_stored_data"
 
 
 def test_requested_market_is_advertised_in_schema(markets):
