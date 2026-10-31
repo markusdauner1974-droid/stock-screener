@@ -466,11 +466,84 @@ def test_a_csv_that_was_still_being_copied_is_read_again(tmp_path, monkeypatch):
     assert service.get("5", market="HK") is not None
 
 
+def test_a_copy_that_finishes_during_the_reload_is_read_again(tmp_path, monkeypatch):
+    """The signature must be taken when the file is opened, not after the load."""
+    monkeypatch.setattr(taxonomy_module, "_MISSING_FILE_RETRY_SECONDS", 0.0)
+    service = MarketTaxonomyService(data_dir=tmp_path)
+    assert service.entry_count_for_market("HK") == 0
+
+    header = "Symbol,HSICS Sector,EM Industry (EN),Theme (EN)\n"
+    first = "700,Information Technology,Internet Services,AI Infrastructure\n"
+    second = "5,Financials,Banks,Rate Sensitive\n"
+    path = tmp_path / "hk-deep.csv"
+    _write_csv(path, header + first)
+
+    original_jp = taxonomy_module.MarketTaxonomyService._load_jp
+
+    def jp_that_finishes_the_copy(self, load):
+        # HK is parsed before JP runs, so the remaining rows land after the
+        # parse but inside the same reload.
+        original_jp(self, load)
+        _write_csv(path, header + first + second)
+
+    monkeypatch.setattr(
+        taxonomy_module.MarketTaxonomyService, "_load_jp", jp_that_finishes_the_copy
+    )
+
+    assert service.entry_count_for_market("HK") == 1
+    # The signature recorded at parse time shows the file grew, so the next
+    # pass reads it again instead of serving the truncated parse forever.
+    assert service.entry_count_for_market("HK") == 2
+
+
+def test_a_lookup_does_not_wait_for_a_running_reload(tmp_path, monkeypatch):
+    """Readers serve the published snapshot while another thread reloads."""
+    monkeypatch.setattr(taxonomy_module, "_MISSING_FILE_RETRY_SECONDS", 0.0)
+    _write_csv(
+        tmp_path / "IBD_industry_group.csv",
+        "AAPL,Computer-Hardware/Peripherals\n",
+    )
+    service = MarketTaxonomyService(data_dir=tmp_path)
+    assert service.entry_count_for_market("US") == 1
+
+    started = threading.Event()
+    release = threading.Event()
+    original_us = taxonomy_module.MarketTaxonomyService._load_us
+
+    def slow_load(self, load):
+        started.set()
+        release.wait(5)
+        return original_us(self, load)
+
+    monkeypatch.setattr(taxonomy_module.MarketTaxonomyService, "_load_us", slow_load)
+    _write_csv(
+        tmp_path / "hk-deep.csv",
+        "Symbol,HSICS Sector,EM Industry (EN),Theme (EN)\n700,IT,Internet,AI\n",
+    )
+
+    reloader = threading.Thread(target=service.entry_count_for_market, args=("HK",))
+    reloader.start()
+    assert started.wait(5)
+    try:
+        begin = time.monotonic()
+        assert service.entry_count_for_market("US") == 1
+        elapsed = time.monotonic() - begin
+    finally:
+        release.set()
+        reloader.join()
+
+    assert elapsed < 0.5
+
+
 def test_concurrent_lookups_reload_the_taxonomy_once(tmp_path, monkeypatch):
     """Two threads past the deadline must not parse (or merge) twice."""
     monkeypatch.setattr(taxonomy_module, "_MISSING_FILE_RETRY_SECONDS", 0.0)
+    _write_csv(
+        tmp_path / "IBD_industry_group.csv",
+        "AAPL,Computer-Hardware/Peripherals\n",
+    )
     service = MarketTaxonomyService(data_dir=tmp_path)
-    assert service.get("AAPL", market="US") is None
+    assert service.entry_count_for_market("US") == 1
 
     loads = []
     original = taxonomy_module.MarketTaxonomyService._load_us
@@ -483,9 +556,10 @@ def test_concurrent_lookups_reload_the_taxonomy_once(tmp_path, monkeypatch):
     monkeypatch.setattr(
         taxonomy_module.MarketTaxonomyService, "_load_us", counting_load
     )
+    # hk-deep.csv appears, so the next lookup is due for a reload.
     _write_csv(
-        tmp_path / "IBD_industry_group.csv",
-        "AAPL,Computer-Hardware/Peripherals\n",
+        tmp_path / "hk-deep.csv",
+        "Symbol,HSICS Sector,EM Industry (EN),Theme (EN)\n700,IT,Internet,AI\n",
     )
 
     barrier = threading.Barrier(4)
@@ -507,6 +581,8 @@ def test_concurrent_lookups_reload_the_taxonomy_once(tmp_path, monkeypatch):
 
     assert errors == []
     assert len(results) == 4
+    # Either the reloaded snapshot or the previous one, but never a partial
+    # view: both are complete and both contain the US entry.
     assert all(entry is not None for entry in results)
     assert {entry.industry_group for entry in results} == {
         "Computer-Hardware/Peripherals"
@@ -583,13 +659,15 @@ def test_load_ca_skips_silently_when_csv_is_missing(tmp_path, caplog):
         assert service.entry_count_for_market("CA") == 0
         assert service.groups_for_market("CA") == []
 
-    warnings = [
-        record.message
+    levels = {
+        record.levelname: record.message
         for record in caplog.records
         if record.name == "app.services.market_taxonomy_service"
-        and record.levelname == "WARNING"
-    ]
-    assert any("CA taxonomy CSV not found" in message for message in warnings)
+        and "CA taxonomy CSV not found" in record.message
+    }
+    # canada-deep.csv is not shipped, so that absence is expected: INFO, not a
+    # warning that fires in every worker on every load.
+    assert set(levels) == {"INFO"}
 
 
 def test_load_ca_loads_canada_deep_when_present(tmp_path):

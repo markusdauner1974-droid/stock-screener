@@ -62,6 +62,8 @@ _MISSING_FILE_RETRY_SECONDS = 300.0
 
 _MARKETS = ("US", "HK", "IN", "JP", "KR", "TW", "CN", "CA", "DE", "SG", "MY")
 
+_OPTIONAL_CSV_FILES = frozenset({"canada-deep.csv"})
+
 _CSV_TO_MARKET = {
     "IBD_industry_group.csv": "US",
     "hk-deep.csv": "HK",
@@ -95,6 +97,8 @@ class _TaxonomyLoad:
     )
     # path -> market, so a reload can carry the previous bucket over.
     skipped: dict[Path, str] = field(default_factory=dict)
+    # Signatures taken immediately before each file was opened.
+    signatures: dict[Path, tuple[int, int] | None] = field(default_factory=dict)
     # Files that arrived late and may still have been copied while they were
     # parsed: path -> (market, signature at parse time).
     watched: dict[Path, tuple[str, tuple[int, int] | None]] = field(
@@ -133,6 +137,7 @@ class MarketTaxonomyService:
         self._skipped_files: set[Path] = set()
         self._watched: dict[Path, tuple[str, tuple[int, int] | None]] = {}
         self._retry_at = 0.0
+        self._reloading = False
         # A retry can now reload while other threads are reading, and two
         # threads can pass the deadline together: serialise the whole load.
         self._load_lock = threading.RLock()
@@ -202,54 +207,61 @@ class MarketTaxonomyService:
 
     def refresh(self) -> None:
         with self._load_lock:
-            # The retry exists for a data directory that fills up after start,
-            # so re-resolve the candidate instead of trusting the one chosen
-            # when the CSVs were all absent. An explicit data_dir is pinned.
-            if not self._data_dir_explicit:
-                self._data_dir = self._default_data_dir()
-            pending_before = set(self._skipped_files) | set(self._watched)
-            load = _TaxonomyLoad()
+            self._reloading = True
             try:
-                self._load_us(load)
-                self._load_hk(load)
-                self._load_in(load)
-                self._load_jp(load)
-                self._load_kr(load)
-                self._load_tw(load)
-                self._load_cn(load)
-                self._load_ca(load)
-            except TaxonomyLoadError:
-                raise
-            except _LOAD_EXCEPTIONS as exc:
-                raise TaxonomyLoadError(
-                    f"Unable to load market taxonomy from {self._data_dir}: {exc}"
-                ) from exc
-            # A file that is missing right now may simply be unavailable, not
-            # gone: keep what the previous load produced for that market
-            # instead of publishing an empty bucket. It stays in ``skipped``,
-            # so the retry still waits for the file to come back.
-            for market in load.skipped.values():
-                previous = self._entries.get(market)
-                if previous:
-                    load.entries[market] = previous
-                    load.row_counts[market] = self._loaded_row_counts.get(market, 0)
-            # A file that arrived after an earlier skip may have been copied
-            # while it was parsed, so a complete header with truncated rows
-            # would pass silently. Watch its signature for one retry interval
-            # and read it again if it kept growing.
-            load.watched = {
-                path: (_CSV_TO_MARKET.get(path.name, ""), _file_signature(path))
-                for path in pending_before
-                if path.exists()
-            }
-            # Publish atomically: a failed load above leaves the previous
-            # taxonomy in place, so readers keep the last good snapshot.
-            self._entries = load.entries
-            self._loaded_row_counts = load.row_counts
-            self._skipped_files = load.skipped
-            self._watched = load.watched
-            self._retry_at = time.monotonic() + _MISSING_FILE_RETRY_SECONDS
-            self._loaded = True
+                self._refresh_locked()
+            finally:
+                self._reloading = False
+
+    def _refresh_locked(self) -> None:
+        # The retry exists for a data directory that fills up after start,
+        # so re-resolve the candidate instead of trusting the one chosen
+        # when the CSVs were all absent. An explicit data_dir is pinned.
+        if not self._data_dir_explicit:
+            self._data_dir = self._default_data_dir()
+        pending_before = set(self._skipped_files) | set(self._watched)
+        load = _TaxonomyLoad()
+        try:
+            self._load_us(load)
+            self._load_hk(load)
+            self._load_in(load)
+            self._load_jp(load)
+            self._load_kr(load)
+            self._load_tw(load)
+            self._load_cn(load)
+            self._load_ca(load)
+        except TaxonomyLoadError:
+            raise
+        except _LOAD_EXCEPTIONS as exc:
+            raise TaxonomyLoadError(
+                f"Unable to load market taxonomy from {self._data_dir}: {exc}"
+            ) from exc
+        # A file that is missing right now may simply be unavailable, not
+        # gone: keep what the previous load produced for that market
+        # instead of publishing an empty bucket. It stays in ``skipped``,
+        # so the retry still waits for the file to come back.
+        for market in load.skipped.values():
+            previous = self._entries.get(market)
+            if previous:
+                load.entries[market] = previous
+                load.row_counts[market] = self._loaded_row_counts.get(market, 0)
+        # A file that arrived after an earlier skip may have been copied
+        # while it was parsed, so a complete header with truncated rows
+        # would pass silently. Watch its signature for one retry interval
+        # and read it again if it kept growing.
+        load.watched = {
+            path: (_CSV_TO_MARKET.get(path.name, ""), load.signatures.get(path))
+            for path in pending_before
+            if path.exists()
+        }
+        # Publish atomically: a failed load above leaves the previous
+        # taxonomy in place, so readers keep the last good snapshot.
+        self._entries = load.entries
+        self._loaded_row_counts = load.row_counts
+        self._skipped_files = load.skipped
+        self._watched = load.watched
+        self._retry_at = time.monotonic() + _MISSING_FILE_RETRY_SECONDS
+        self._loaded = True
 
     def get(
         self,
@@ -339,13 +351,23 @@ class MarketTaxonomyService:
         normalized = security_master_resolver.normalize_market(market) or market.upper()
         return self._loaded_row_counts.get(normalized, 0)
 
+    def _retry_due(self) -> bool:
+        """Whether the retry interval elapsed; safe to read without the lock."""
+        return bool(self._skipped_files or self._watched) and (
+            time.monotonic() >= self._retry_at
+        )
+
     def _ensure_loaded(self) -> None:
+        # The published snapshot is always complete, so a lookup never waits
+        # for a reload another thread is running - not even for the retry
+        # check, which only needs the current immutable references.
+        if self._loaded and (self._reloading or not self._retry_due()):
+            return
         with self._load_lock:
             if not self._loaded:
                 self.refresh()
                 return
-            pending = set(self._skipped_files) | set(self._watched)
-            if not pending or time.monotonic() < self._retry_at:
+            if not self._retry_due():
                 return
             # Cheap re-check first: only a file that appeared, vanished or
             # changed is worth a full reload (and a new round of log lines).
@@ -370,8 +392,13 @@ class MarketTaxonomyService:
         market and the path.
         """
         if path.exists():
+            # Taken before the file is opened: the copy may finish while a
+            # later loader runs, and a signature read afterwards would record
+            # the complete file as the one that was parsed.
+            load.signatures[path] = _file_signature(path)
             return False
-        logger.warning(
+        log = logger.info if path.name in _OPTIONAL_CSV_FILES else logger.warning
+        log(
             "%s taxonomy CSV not found at %s; skipping. Symbol-level "
             "classification will fall back to universe fields.",
             market,
