@@ -181,13 +181,18 @@ def test_the_all_scope_stays_all_in_market_mode(markets, universe):
     }
 
 
-def test_a_stored_run_with_an_unknown_status_reports_stored_data(markets):
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        pytest.param({"status": "published_typo"}, id="status"),
+        pytest.param({"run_type": "snapshot_typo"}, id="run-type"),
+    ],
+)
+def test_a_stored_run_with_an_unknown_enum_reports_stored_data(markets, corruption):
     """A broken enum is damaged storage, not a bad request."""
     service, factory, _ = markets
     with factory() as db:
-        db.query(FeatureRun).filter(FeatureRun.id == 2).update(
-            {"status": "published_typo"}
-        )
+        db.query(FeatureRun).filter(FeatureRun.id == 2).update(corruption)
         db.commit()
 
     result = candidates(service, "US")
